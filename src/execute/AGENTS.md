@@ -1,0 +1,18 @@
+# src/execute — the run loop and its subprocesses
+
+The engine: run orchestration, opencode subprocess lifecycle, verification, retries, and the durable-session builder.
+
+## Seams
+
+- `run.ts` — `startRun`, `runLoop`, `processTicket`, `assembleBranch`, `protectedPaths`. The orchestration hub; it imports from every other module group by design.
+- `executor.ts` — the ONLY phase runner: `executeOpendCode`, streamed event parsing, persistent worker, stall/timeout kills, `describeExecFailure`. Fresh subprocess per phase keeps context O(ticket) (ADR 0001); the builder mode reuses a durable session across checkpoints (ADR 0022).
+- `failure-ladder.ts` — `classifyFailure`, `withFailureLadder`: retry → worker restart → diagnosed failure, with the capacity shrink-scope path.
+- `stop.ts` — Ctrl-C semantics (ADR 0037): soft stop finishes the in-flight ticket's gate, `hardStopRequested` kills now. Signal handling lives here only.
+- `verify.ts` / `smoke.ts` — run the project's commands with timeouts; `output-compress.ts` compresses their output.
+- `guard.ts`, `diff-filter.ts`, `token-meter.ts`, `contract-extract.ts`, `reconcile.ts`, `builder-loop.ts`, `builder-units.ts`, `vision-probe.ts`, `diagnosis.ts` — permission guard, diff shaping, context metering, contract index update, spec reconcile, builder recovery/routing, measured vision probe, failure diagnosis.
+
+## Invariants
+
+- Only `executor.ts` spawns phase processes. `core/models.ts` may spawn `opencode` for the init availability probe — nowhere else.
+- Guards are the contract for unattended runs: spin budget, stall timeout, step budget, degraded-target window. A new blocking loop here needs one of these.
+- `run.ts` and the gate loops import `overview.ts` (`nowClock`) from `src/cli/`; that known layering wart is the price of a single clock.

@@ -1,0 +1,15 @@
+#!/usr/bin/env node
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const entry = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+if (!existsSync(entry)) {
+  console.error("railhead: build output missing — run `npm install` (or `npm run build`) first");
+  process.exit(1);
+}
+
+const { main } = await import(entry);
+main(process.argv.slice(2)).catch((err) => {
+  console.error(err instanceof Error ? err.message : err);
+  process.exit(1);
+});

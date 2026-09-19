@@ -1,0 +1,3 @@
+# File ledger, not a database
+
+The Ledger lives as `state.json` (rewritten atomically on every transition) plus one append-only `events.jsonl` per Ticket phase under `.railhead/<run-id>/`. No database. This is greppable, machine- and human-readable, trivially resumable, and carries no infrastructure a machine babysitting a long overnight run must also keep alive. It is the source of truth for `resume` and for the end-of-Run `report.md`.

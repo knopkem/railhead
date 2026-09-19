@@ -1,0 +1,3 @@
+# Single branch with one linear commit per passing ticket
+
+A whole Run works on one branch `run/<slug>`, with exactly one commit per Passing ticket, message `"<NN> — <title>"`, in dependency order. Linear history mirrors the serial execution model: it keeps each Reviewer's diff small and per-Ticket, and gives a clean pointer from which `resume` can `git reset --hard` to redo an interrupted Ticket from scratch. Branch-per-ticket merging is rejected: in unattended mode, merge conflicts would be left to a human who is not there.

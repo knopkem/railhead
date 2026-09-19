@@ -1,0 +1,10 @@
+{
+  "verify": [],
+  "max_retries": 3,
+  "infra_backoff_sec": [60, 300, 900, 1800],
+  "model": {
+    "plan": null,
+    "implement": null,
+    "review": null
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "name": "railhead",
+  "version": "0.1.0",
+  "description": "Unattended, dependency-ordered ticket execution via opencode — implement, verify, review, commit, one ticket at a time.",
+  "license": "MIT",
+  "author": "Michael Knopke",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/knopkem/railhead.git"
+  },
+  "homepage": "https://github.com/knopkem/railhead#readme",
+  "bugs": {
+    "url": "https://github.com/knopkem/railhead/issues"
+  },
+  "keywords": [
+    "opencode",
+    "autonomous",
+    "agent",
+    "orchestration",
+    "tickets",
+    "build",
+    "code-review",
+    "local-llm",
+    "unattended"
+  ],
+  "type": "module",
+  "bin": {
+    "railhead": "./bin/railhead"
+  },
+  "files": [
+    "bin",
+    "dist"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "build": "esbuild src/cli/cli.ts --bundle --platform=node --format=esm --outfile=dist/cli.js && node ./bin/railhead >/dev/null",
+    "prepare": "npm run build",
+    "start": "node ./bin/railhead",
+    "dev": "tsx src/cli/cli.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.11"
+  }
+}

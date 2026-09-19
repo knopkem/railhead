@@ -1,0 +1,3 @@
+# Stop, don't skip, on retry exhaustion
+
+When a Ticket fails its Gate (verification or review) more than `max_retries` times, the Run halts rather than parking the Ticket and moving to the next. Tickets are vertical slices destined for the same branch, so a Ticket that will not land makes every downstream Ticket suspect; continuing would hand back a pile of indifferent failures instead of telling the user where the plan itself broke. `--pause-on-failure` turns the halt into a resumable `stopped` instead of a terminal `failed`. A `--keep-going` or frontier-parallel mode is a later extension, never the default.
