@@ -1,263 +1,169 @@
 # Railhead
 
-Drive `opencode` over dependency-ordered tickets, unattended. The build runs as one durable opencode session (or a fresh subprocess per ticket — see Durable-session builder), and every ticket is verified, reviewed, and committed before the next one starts. A contracts index keeps each phase's context O(ticket), so small local models and cloud models alike can run an arbitrarily large project.
+Drive `opencode` over dependency-ordered tickets, unattended: each ticket is implemented, verified, reviewed, and committed before the next begins. A contracts index keeps every phase's context O(ticket), so a small local model or a cloud model can run an arbitrarily large project without holding it all at once.
+
+## How it works
+
+A plan is sliced into dependency-ordered tickets; only tickets whose blockers are committed may start. Each ticket runs a gate and lands as one commit; optional review gates can add corrective tickets — or replan the remainder — before the run moves on.
+
+```
+per ticket, in dependency order
+  TEST        optional   fresh phase writes one failing test per acceptance criterion
+  IMPLEMENT              durable opencode session resumed across checkpoints
+  VERIFY                 your build/test commands; must be green
+  SMOKE       optional   launch command stays up (panic / not-found signatures fail)
+  REVIEW                 read-only, diff-scoped critique of the change
+  COMMIT                 "<NN> — <title>", then the contracts index is updated
+  VISUAL      optional   post-commit screenshot review; completes (correctives
+                         included) before the next ticket starts
+
+at group checkpoints and run end
+  GOAL        optional   judges the integrated build against the goal and design docs
+  STRUCTURAL  optional   judges accumulated source for architectural drift
+  RUN END                end-of-run visual/goal/structural passes, then report.md
+```
+
+- **TEST** runs when the TDD phase is on (`--full` or `--tdd`) and the ticket is testable — the external oracle a small model needs. It is skipped for config-only tickets and in `fix` mode, where the bug reproducer is the test.
+- **SMOKE** runs when the planner emitted a `$SMOKE` launch command and the framework is recognized; a process still running at the timeout passes.
+- **Retries** feed findings back into the same builder session. `[BLOCKER]` findings always retry (then hard-fail); `[MAJOR]` retry per cadence. Any `[BLOCKER]` can become a **corrective ticket** that runs the full gate inline before the originating review passes; a failing goal review can request a **replan** of the remaining tickets.
+- **Tickets** declare what they are *blocked by*; the frontier is the set whose blockers are all committed. Committed tickets never re-open.
+- **The builder** is one durable opencode session resumed across checkpoints, so the author of the code receives review feedback directly. Set `session_builder: false` for a fresh implementer subprocess per attempt instead.
+- **Gates are always fresh and diff-scoped** — reviewers never inherit the builder's context — and phases can push `LEARNED:` facts into `.railhead/learnings.md` for later prompts.
+- **The ledger** (`.railhead/<run-id>/`) records state and the raw event stream per phase; a crashed or stopped run resumes where it left off.
+- **Failures** escalate through a three-rung ladder (retry → restart worker → diagnose/fail), with step, stall, and degraded-target guards for unattended runs.
 
 ## Install
 
 ```bash
-npm install -g railhead     # or run it ad hoc: npx railhead <command>
+npm install -g railhead     # or: npx railhead <command>
 ```
 
-Requires Node 20+, `opencode` on PATH, and a configured model (local or hosted). From a clone, `npm install && npm link` puts `railhead` on PATH; the CLI ships as a compiled JS bundle built by the `prepare` step.
+Requires Node 20+, `opencode` on PATH, and a configured model (local or hosted). From a clone: `npm install && npm link`.
 
 ## Quick start
 
 ```bash
-railhead plan "a CLI that parses RSS feeds"       # model writes dependency-ordered tickets
+railhead build "a CLI that parses RSS feeds"   # interview → PLAN.md → tickets → run
+railhead fix "paddles don't move"             # bug report → reproduction questions → fix ticket
 ```
 
-This will first initialize the repo (`railhead init`) and lets you pick a model for each seat (plan, implement, review, visual, goal) or leave empty to use the opencode default.
+`railhead init` (run automatically on first use) asks for a model per seat and probes each one for context limit, vision, and reasoning. `opencode models` lists what is available.
 
-Note: you can query the available models via: `opencode models` command.
-
-`railhead plan` prints a live progress stream, writes the plan to `PLAN.md`, and — unless `-a`/`--auto` — lets you read it and ask for changes. It also runs a bounded clarifying interview (the `--light`/`--none` presets skip it; `--sharpen` forces it) whose answers revise the plan before tickets are decomposed; resolved vocabulary lands in `CONTEXT.md`, hard decisions in `docs/adr/`. The plan's design narrative and architecture are persisted as `docs/design.md` and `docs/architecture.md`.
-
-Recommended to use vision capable models for reviewer and enable vision. This allows the reviewer to visually verify any UI output (if that is part of the ticket).
-
-If there are bugs, don't use the plan feature but rather call it via:
-
-```bash
-railhead fix "paddles don't move"
-```
-
-This creates bug tickets and asks questions how to reproduce instead of how to implement.
+`build` generates the plan, a bounded clarifying interview (preset-gated) revises it, and then — unless `-a`/`--auto` — the final plan is written to `PLAN.md` for you to read and request changes; accepting it decomposes the plan into tickets. Resolved vocabulary lands in `CONTEXT.md`, hard decisions in `docs/adr/`, and the design narrative and architecture in `docs/design.md` / `docs/architecture.md`. `fix` asks only about reproduction — the planner reads the code itself.
 
 ## Commands
 
 ```
-railhead init                                       git init + default railhead.json
-railhead plan "<prompt>" [--model M] [-a] [--full|--medium|--light|--none] [--verbose]   turn a description into tickets
-railhead fix  "<bug report>" [--model M] [-a] [--full|--medium|--light|--none] [--verbose]  turn a bug report into a fix ticket
-       the interview asks ONLY about reproduction (trigger, symptom, expected) — never
-       about code structure, which the planner reads itself. Use for runtime bugs a
-       code-reading planner would otherwise misdiagnose as "already implemented."
-railhead run <tickets-dir> [--verbose] [--pause-on-failure]
-       [--plan M] [--exec M] [--review M] [--review full|medium|light|off]   run the queue
-       [--vision …] [--goal …] [--structural …] [--tdd|--no-tdd]
-railhead resume [<run-id>]                         continue a stopped/interrupted run
-railhead status [<run-id>]                         show a live summary
-railhead next [<run-id>]                           show the next actionable ticket(s) and what's blocked
-railhead log [<run-id>] [<phase>]                  pretty-print a phase transcript from the ledger
-railhead reset [--hard]                            abandon the latest interrupted run
-       --hard also discards git work on the run branch back to the branch point
-railhead diagnose screenshots [--model M]          test whether the model can take a screenshot and read it back
+railhead init                          git init + default railhead.json
+railhead build "<prompt>" [flags]      turn a description into tickets, then run them
+railhead fix  "<bug report>" [flags]   turn a bug report into a fix ticket, then run it
+railhead run <tickets-dir>             run a queued ticket set (auto-resumes interrupted runs)
+railhead resume [<run-id>]             continue a stopped/interrupted run
+railhead status [<run-id>]             live summary of a run
+railhead next [<run-id>]               next actionable ticket(s) and what blocks them
+railhead log [<run-id>] [<phase>]      readable transcript of a phase from the ledger
+railhead reset [--hard]                abandon the latest interrupted run (--hard drops its commits)
+railhead diagnose screenshots [--model M]  check that a model can take a screenshot and read it back
 ```
 
-`railhead log` with no phase lists every phase in the run. Example: `railhead log 01-01-implement` renders the implementer's tool calls, outputs, token counts, and errors as a readable transcript. Ctrl-C during a run is a request, not a kill: the first press stops gracefully at the next ticket boundary, the second stops now (see Stopping a run).
-
-## Planning interview
-
-In build mode the interview runs *after* the plan exists: `railhead plan` writes `PLAN.md`, the interview's answers revise it, then tickets are decomposed from the accepted plan. Fix mode asks before planning, since a bug report has no plan to refine yet. Each round is one ordinary opencode phase call (not a live chat session): the railhead renders the model's questions with its recommended answers, collects yours, and folds the exchange into the next round's prompt. As terms and hard decisions resolve, they land in `CONTEXT.md` and `docs/adr/` immediately, not batched at the end.
-
-```
-❓ Q1 - Storage: Where does state live?
-➡️ SQLite
-```
-
-Skipped by the `--light`/`--none` presets (the fast default) and run explicitly by `--medium`/`--full`; `--sharpen`/`--no-sharpen` override either way. Under `-a`/`--auto` the model auto-answers its own questions. Bounded by `sharpen_max_rounds` (default 6; `0` disables it entirely) — the model's own signal usually ends it sooner. The sharpened `CONTEXT.md` glossary feeds every later `railhead plan` call, interview or not.
-
-## The Gate
-
-Each ticket on the frontier (blockers all committed) runs:
-
-```
-IMPLEMENT  durable opencode session resumed across checkpoints (session_builder, default since ADR 0022)
-           or a fresh subprocess per ticket (session_builder: false, ADR 0001)
-           prompt = ticket + contracts + verify cmds
-VERIFY     railhead.json verify commands; must be green
-REVIEW     opencode run, read-only (railhead-reviewer agent); skipped only when code_review.mode = "off"
-    approve → git commit "<NN> — <title>"
-    BLOCKER findings → feed back to implementer, retry (bounded by max_retries)
-    MAJOR findings → retry in medium/full; in light, one corrective attempt then soft-pass
-```
-
-Execution failures escalate through a three-rung failure ladder (issue #80): rung 1 retries identically (rate limits, blips); rung 2 restarts the persistent worker then retries (server crash, poisoned KV cache); rung 3 diagnoses and fails — a fatal config error (bad key, model not found) fails immediately, and a capacity failure (peak near the ceiling, or OOM wording) fails the phase and re-implements with a shrink-scope instruction. A step budget (`max_phase_steps`) still kills phases stuck in an infinite tool loop.
+`build`/`fix` flags: `[--model M] [-a|--auto] [-c] [--full|--medium|--light|--none] [--verbose] [--yolo]`, plus per-gate overrides (`--review`, `--vision`, `--goal`, `--structural`, `--tdd`, `--sharpen`). `run` accepts `[--plan M] [--exec M] [--review M] [--visual M] [--extract M] [--goal-model M] [-m N] [--pause-on-failure] [--quiet|--verbose] [--fresh]` and the same gate overrides. `-a` alone means `--light`.
 
 ## Configuration
 
 ```jsonc
 {
   "verify": ["npm run typecheck", "npm test"],
+  "smoke": [],                    // launch commands for the smoke phase (usually seeded by the planner)
+  "test_phase": false,            // TDD: write a failing test per acceptance criterion before implementing
   "max_retries": 3,
   "max_review_retries": 3,
-  "max_attempts": null,          // absolute cap (null = max_retries * 3)
-  "max_phase_steps": 50,         // kill a stuck phase after N opencode steps
-  "verify_timeout_sec": null,    // kill a hung verify command (null = 600s default)
-  "stall_timeout_sec": null,     // kill a phase with no output for this long (null = 3600s default)
-  "max_step_model_sec": null,    // kill a step after N seconds of model time — no tool, no completed part (thrashing server at 0 tok/s; null/0 disables, default 3600s)
-  "sharpen_max_rounds": 6,         // cap on railhead plan's clarifying-interview rounds (0 disables it)
-  "infra_backoff_sec": [60, 300, 900, 1800],  // waits before the ladder's two retries (rung 1, rung 2); minute-scale to survive a restarted model server
-  "request_ceiling_tokens": 32768,  // largest request a phase may send (default 0.6× the model's window); "max_context_tokens" still accepted
+  "max_attempts": null,           // absolute retry cap (null = max_retries * 3)
+  "max_phase_steps": 50,          // kill a phase stuck in a tool loop
+  "verify_timeout_sec": null,     // kill a hung verify command (null = 600s)
+  "stall_timeout_sec": null,      // kill a phase with no output (null = 3600s)
+  "max_step_model_sec": null,     // kill a single step stuck in model time (null = 3600s)
+  "request_ceiling_tokens": null, // largest request a phase may send (null = 0.6× the model window)
+  "sharpen_max_rounds": 6,        // interview round cap (0 disables the interview)
+  "infra_backoff_sec": [60, 300, 900, 1800],
   "model": {
-    "plan":      "deepseek/deepseek-v4-flash",   // 27B+ recommended (shapes the ticket graph)
-    "implement": "deepseek/deepseek-v4-flash",   // 27B+ recommended (most multi-step reasoning)
-    "review":    null,            // 27B+, separate from implement recommended; null = falls back to implement
-    "goal":      null,            // 27B+ for goal review; null = falls back to visual → review → implement
-    "visual":    null,            // vision-capable 27B+ for screenshot review; null = falls back to review
-    "extract":   null             // 9B OK — single-shot structured output only (cheapest seat)
+    "plan":      "deepseek/deepseek-v4-flash",
+    "implement": "deepseek/deepseek-v4-flash",
+    "review":    null,            // null = falls back to implement
+    "visual":    null,            // vision-capable; null = falls back to review
+    "goal":      null,            // null = falls back to visual → review → implement
+    "extract":   null             // cheap model, single-shot structured output
   },
-  "visual_review": { "mode": "off", "max_rounds": null, "round_wall_sec": null, "interaction_hints": null },
-  "goal_review": { "mode": "off", "fallback_cadence": 4, "max_rounds": null, "interaction_hints": null },
+  "code_review":       { "mode": "light" },
+  "visual_review":     { "mode": "off", "round_wall_sec": null },
+  "goal_review":       { "mode": "off" },  // add "checkpoint_action": "advisory" for advisory goal checkpoints
   "structural_review": { "mode": "off" },
-  "code_review": { "mode": "light" },
-  "session_builder": true,           // one durable opencode session across checkpoints (ADR 0022); false = fresh subprocess per ticket (ADR 0001)
-  "checkpoint_granularity": "product" // "ticket" | "group" | "product" — how much plan the session holds between checkpoints
+  "session_builder": true,                 // one durable session; false = fresh subprocess per ticket
+  "checkpoint_granularity": "product"      // "ticket" | "group" | "product"
 }
 ```
 
-Models are independent — a big model can plan while a cheap one executes. `null` falls back to the next slot. Override per invocation: `--plan M1 --exec M2 --review M3`.
+Models are independent — a strong model can plan while a cheap one executes — and `null` falls back down the chain.
 
-### Per-seat guidance (ADR 0015)
+### Model seats
 
-| Seat | Tier floor | When to use a cheaper model |
-|------|-----------|------------------------------|
-| `plan` | 27B+ | Never — planning shapes the whole ticket graph |
-| `implement` | 27B+ | Never — the implementer does the most multi-step reasoning |
-| `review` | 27B+, separate from `implement` | Not recommended below `implement`'s tier — review is judgment work |
-| `goal` | 27B+ | Not recommended below `implement` — the goal reviewer shapes remaining work |
-| `visual` | 27B+ with vision | Only when using a vision-capable model that still meets 27B |
-| `extract` | 9B OK | **Always** — this is the only seat where a cheaper model is endorsed. Use for single-shot contract extraction |
+| Seat | Tier floor | Notes |
+|------|-----------|-------|
+| `plan` | 27B+ | Shapes the ticket graph; don't cheap out |
+| `implement` | 27B+ | Most multi-step reasoning |
+| `review` | 27B+, separate model recommended | Judgment work; should not be weaker than `implement` |
+| `goal` | 27B+ | Judges the integrated build; shapes remaining work |
+| `visual` | 27B+ with vision | Screenshot review |
+| `extract` | 9B OK | The one seat where a cheap model is endorsed |
 
-The railhead warns at startup when `review` or `goal` is configured weaker than `implement`, or when any judgment seat is below 27B. These warnings are advisory — the run proceeds, but quality may suffer.
+Railhead warns (never blocks) when `review`/`goal` is weaker than `implement`, or when any judgment seat parses below 27B.
 
-`max_phase_steps` guards a model looping across many steps; `stall_timeout_sec` guards the opposite failure — one step (a bash call, a tool invocation) that never returns, where step count never advances at all. `verify_timeout_sec` covers the same gap for `verify` commands, which have no step signal of their own. All three exist because an unattended run has no human to notice or kill a hang.
+## Reviews
 
-Two more guards cover the "slow-but-loud" shapes those three miss (issue #96 — a visual-review round that burned 13+ minutes of ~60s-per-call request timeouts against a wedged browser target, with the step budget still ~95% unspent and the silence timer re-armed by every timeout error). The executor's **degraded-target guard** (default-on, like the spin loop) kills any phase once 5 timeout-class errored tool calls land within a 10-minute rolling window — regardless of tool name or input, and *not* reset by an interspersed success — because a run of request timeouts means the tool target stopped answering, not that the model is looping. Visual-review rounds additionally carry a per-round **wall-clock budget** (`visual_review.round_wall_sec`, default one hour) that bounds a whole round in wall time even when no individual call ever times out.
+Every gate has a cadence mode: `full` | `medium` | `light` | `off`. Presets choose defaults; per-gate flags override.
 
-### Durable-session builder (ADR 0022)
+| Preset | Code review | Visual | Goal | Structural | TDD test phase | Interview |
+|--------|-------------|--------|------|------------|----------------|-----------|
+| `--full` | per-ticket, BLOCKER+MAJOR retry | per-ticket + run-end | checkpoints + run-end | checkpoints + run-end | on | on |
+| `--medium` | per-ticket, BLOCKER+MAJOR retry | run-end | checkpoints | checkpoints | off | on |
+| `--light` (default) | per-ticket; BLOCKER full retry, MAJOR one attempt | run-end | advisory checkpoints + run-end | run-end | off | off |
+| `--none` | off | off | off | off | off | off |
 
-`"session_builder"` (default `true` since the #83 head-to-head; set `false` for the ADR 0001 fresh-subprocess-per-ticket shape) runs the build as ONE durable opencode session resumed across checkpoints (`opencode run --session <id>`, compaction permitted) instead of a fresh implementer subprocess per ticket. The gates — verify, review, visual, goal, structural — are unchanged fresh, diff-scoped phases that interleave between the builder's `$CHECKPOINT` markers, and a failing gate's findings are re-injected INTO the same session: the author of the code receives the verdict, no fresh explorer loses it across a context boundary. `checkpoint_granularity` (`ticket` | `group` | `product`, default `product`) picks how much plan the session holds between checkpoints. Gates and commits stay per-ticket in every mode — only the builder's process lifetime changes. report.md carries the builder's telemetry (checkpoints, session restarts with cause, compactions).
+Notes:
 
-## Review cadence (issue #73)
-
-Every review gate carries a cadence `mode` — `full` | `medium` | `light` | `off` — persisted in railhead.json and chosen per run by preset flags plus per-gate overrides.
-
-**Code review** runs per-ticket in every mode except `off`. The mode controls which finding severities trigger a retry:
-
-| Mode | Per-ticket review | Retry threshold | Run-end pass |
-|------|-------------------|-----------------|--------------|
-| `full` | yes | BLOCKER + MAJOR | no |
-| `medium` | yes | BLOCKER + MAJOR | no |
-| `light` (default) | yes | BLOCKER (full budget); MAJOR one attempt then soft-pass | no |
-| `off` | no | — | no |
-
-`[BLOCKER]` findings always trigger retry (up to the attempt cap, then hard-fail). `[MAJOR]` findings trigger retry in `medium`/`full` through the retry budget; in `light` they get exactly **one** corrective attempt per ticket, then soft-pass if still unresolved (issue #96 — a real-but-not-blocking gap, like the SpriteForge toolbar pointer-capture bug, deserves one fix shot without stalling the run). Minor findings never trigger retry in any mode (ADR 0005).
-
-**Visual, goal, and structural** review use the mid-run / run-end cadence split. Visual's end-of-run whole-app pass is skipped whenever the goal review is configured to take that same run-end seat (goal mode `full`/`light` + a goal model) — goal review judges the integrated build against the original goal and design doc, which is a stronger frame than visual's per-ticket criteria union (issue #97):
-
-| Mode | Mid-run | At run end |
-|------|---------|------------|
-| `full` | Natural cadence (per-ticket for visual, group checkpoints for goal/structural) | Fires (goal takes visual's whole-app seat when both enabled) |
-| `medium` | Natural cadence only | Does not fire |
-| `light` | Skipped | Fires (goal takes visual's whole-app seat when both enabled). Goal exception (ADR 0029): with `goal_review.checkpoint_action: "advisory"` the goal judge ALSO fires advisory at group checkpoints mid-run — see early, steer early, correct once in a single run-end batch |
-| `off` | Never | Never |
-
-Presets (`railhead plan … -a --full/--medium/--light/--none`; `-a` alone is `--light`):
-
-| Gate | `--full` | `--medium` | `--light` | `--none` |
-|------|----------|------------|-----------|----------|
-| Code review | per-ticket, BLOCKER + MAJOR retry | per-ticket, BLOCKER + MAJOR retry | per-ticket, BLOCKER full retry, MAJOR one attempt | off |
-| Visual review | per-ticket + run-end | run-end | run-end | off |
-| Goal review | checkpoints + run-end | checkpoints | advisory checkpoints + run-end corrective (ADR 0029) | off |
-| Structural review | checkpoints + run-end | checkpoints | run-end | off |
-| TDD test phase | on | off | off | off |
-| Sharpen interview | on (auto-answered under `-a`) | on | off | off |
-
-Per-gate overrides for power users: `--review full|medium|light|off`, `--vision …`, `--goal …`, `--structural …`, plus `--tdd`/`--no-tdd` and `--sharpen`/`--no-sharpen`. The old opt-out flags (`-nt`, `-nr`, `-nv`, `-ns`) and `review_mode` are gone. See [ADR 0021](docs/adr/0021-unified-review-cadence.md).
-
-Reviews split findings into MUST-FIX (blocking) and NITS (non-blocking). In `light` mode, `[BLOCKER]` findings in MUST-FIX trigger retry with the full budget; `[MAJOR]` findings trigger exactly one corrective attempt per ticket and then soft-pass (noted, no further budget burned). In `medium`/`full`, both `[BLOCKER]` and `[MAJOR]` trigger retry. Retry budget resets on progress — fixing distinct bugs won't exhaust it.
-
-## Visual review
-
-Opt-in via `visual_review: { mode: "full"|"light" }` (offered at plan time). A vision-capable `model.visual` runs the app, captures screenshots via bash, and judges it against the acceptance criteria. Emits `$VISUAL_PASS` or `$VISUAL_FAIL` with findings. On failure, generates corrective tickets and re-runs them, bounded by `max_attempts`.
-
-`mode: "full"` fires the per-ticket pass after each ticket commits *and* the end-of-run pass; `light` fires only the end-of-run pass (the default shape). Per-ticket catches per-ticket runtime regressions before they stack onto downstream tickets; end-of-run catches integration issues across the cumulative diff. The end-of-run whole-app pass is superseded by goal review when that gate fires at run end (issue #97) — they judge the same integrated build, and goal's goal+design-doc frame is stronger. `railhead fix` forces `mode: "full"` — a bug fix's whole point is observable runtime behaviour, so visual verification is never optional in fix mode. See [ADR 0011](docs/adr/0011-per-ticket-visual-review.md).
-
-Each round is bounded against a wedged interaction target (issue #96): when the executor's degraded-target guard kills a round, the loop retries it **once** with a recovery note telling the reviewer to restart the app in a fresh page (and not to re-create the wedge with an unbounded in-page pixel-readback poll); a second degraded kill ends the run honestly as INCONCLUSIVE. `round_wall_sec` (default one hour) caps any single round in wall clock even when nothing ever times out.
-
-### Vision capability probe (ADR 0036)
-
-A declared vision capability is only a claim, so the railhead measures it: it generates a small PNG with a known random pattern, has the seat model `read` it and name the content, and records the result in `.railhead/capabilities.json`. `railhead init` probes the `implement`/`visual`/`goal` seats (so a blind seat is known before a plan spends hours); `plan`/`run`/`fix`/`resume` re-probe the seats behind any enabled `visual`/`goal` gate before doing model work, and **refuse to start** if the gate's model cannot actually see — the message names the two escapes: a vision-capable model, or set that gate's mode to `"off"`. The verified result is injected into the visual/goal/implementer prompts as a railhead fact, so no phase can silently decide it "doesn't want" to read screenshots. A surfaced project (`browser-ui`/`canvas`) also gets the implement seat measured once, letting a capable implementer self-check its layout with pixels.
+- **Severities:** `[BLOCKER]` always retries (up to the cap, then hard-fail). `[MAJOR]` retries through the budget in `medium`/`full`; in `light` it gets one corrective attempt, then soft-passes. Minor findings never retry.
+- **TDD test phase:** when on, a fresh phase writes a failing test per acceptance criterion before each testable ticket; the implementer must make it pass. `--tdd`/`--no-tdd` override the preset, and `fix` forces it off — the reproducer is the test.
+- **Mid-run vs run-end:** goal and structural fire at group checkpoints as well as at run end; visual fires per-ticket (under `full`) and at run end. When goal review fires at run end it takes visual's whole-app seat — the goal + design-doc frame is stronger.
+- **Corrective tickets:** `[BLOCKER]` findings generate corrective tickets that run the full gate inline before the originating review may pass.
+- **Visual review** runs the app, captures screenshots with a vision model, and judges them against the acceptance criteria. `fix` raises it to `full` whenever the gate is enabled with a vision model, since a bug fix is about observable behaviour.
+- **Vision is measured, not declared.** A probe has the seat model read a generated PNG; `build`/`run`/`fix`/`resume` refuse to start a vision gate on a blind model.
+- **Halt:** any phase can write `.railhead/STOP` (contents = reason) to stop the run for a human. `resume` refuses until the file is deleted.
+- **Ctrl-C is a request, not a kill.** The first press finishes the ticket in flight's gate and stops at the commit boundary; the second stops immediately. Either way `railhead resume` continues with no gate left owed.
 
 ## Live output
-
-During a run, the railhead renders each opencode event as it streams — by default showing what the model is *doing*, not what it's saying:
 
 ```
 implement ── step ────────────────────────────────
 implement → bash ls -la [completed exit 0]
-implement → write src/main.rs [completed]
 implement ✔ tool-calls · in 477, out 123, cache 8304
-implement → bash cargo build [completed exit 0]
 ```
 
-Tool calls (`→`), step markers (`── step ──`, `✔ … · in 477, out 123`), and errors (`✖`) print by default; the model's reasoning and output prose is suppressed (read it later via `railhead log`). Three levels govern this:
-
-- *(default)* live tool calls + step transitions + errors, plus a periodic heartbeat with elapsed time, step count, and peak context.
-- `--verbose` streams the model's reasoning and text output inline **untruncated**, and echoes the exact prompt sent to each model call (the enriched plan/interview prompt, implementer prompts, review prompts — every phase), bracketed by `── prompt (model, est ~N tokens) ──`.
-- `--quiet` suppresses the live stream entirely, leaving only the heartbeat (elapsed/step/peak) and the final per-ticket verdict line.
-
-For post-hoc review, `railhead log` renders the full transcript with truncated I/O previews and error details.
-
-## Stopping a run (operator)
-
-Ctrl-C is a request, not a kill (ADR 0037):
-
-- **First Ctrl-C** — graceful stop. The ticket in flight finishes its whole gate
-  (implement → verify → smoke → review → commit, including the pipelined
-  per-ticket visual review) and the run then stops with `status: "stopped"`.
-  Nothing is lost: `railhead resume` (or `railhead run`) continues at the next
-  ticket. The stop lands between end-of-run passes too, so an interrupt during
-  the final review passes only defers the remaining ones.
-- **Second Ctrl-C** — immediate stop: kills the active child, persists
-  `stopped`, exits 130. In-flight phase work is re-run on resume (the worktree
-  itself is preserved as a `(checkpoint)` commit).
-
-The reason for the stop is recorded as `stop_reason` in `state.json` and
-`report.md`, so a later look at the ledger can tell an operator stop from a
-crash. `SIGTERM` (memory pressure, `kill`) stays immediate.
-
-A stopped run never leaves a gate owed: the per-ticket visual review and any
-group checkpoint the run committed past are recorded as pending and replayed
-on resume before the next ticket commits (ADR 0038).
-
-## Halting mid-run (agent-initiated)
-
-Any phase (implementer, reviewer, visual/goal/structural reviewer) can drop a file to stop the whole run and ask for a human, borrowed from siesta's `stop.md`:
-
-```bash
-echo "the plan assumes a browser, but this project is a terminal app" > .railhead/STOP
-```
-
-The railhead checks for `.railhead/STOP` once per streamed event line (and at every ticket boundary), kills the active child's process group, marks the run `status: "stopped"` (ADR 0003's honest-stop — not a `failed` run), and records the file's contents as the halt reason in `report.md` and the ledger. It is a deliberate "a human must look before more work stacks," not a failure: review feedback, the retry/failure ladder, and corrective tickets are the machinery for a hard ticket or a failing gate — the halt file is only for a fundamentally wrong plan or broken environment.
-
-`railhead resume` refuses while the file exists, printing the reason and the instruction to delete it. Delete the file once you have looked, and resume proceeds normally. The file lives under `.railhead/`, so it is already git-ignored and never committed.
+Tool calls, step markers, and errors stream by default, plus a heartbeat with elapsed time, step count, and peak context. `--verbose` adds the model's reasoning and the exact prompts; `--quiet` keeps only the heartbeat. `railhead log` replays any phase afterwards.
 
 ## Ledger
 
 Every run writes to `.railhead/<run-id>/`:
 
-- `state.json` — full ticket state (resume source)
-- `events/<NN>-<phase>.jsonl` — raw opencode event stream
+- `state.json` — full ticket state, the resume source
+- `events/<NN>-<phase>.jsonl` — raw opencode event stream per phase
 - `report.md` — end-of-run summary with review history and context telemetry
 
 ## Contracts index
 
-A `railhead.contracts.json` index keeps per-ticket context O(ticket), not O(project). After each commit, a diff-only extract pass updates the index. Later tickets get exact file/symbol pointers instead of "go explore the codebase." This lets a 100k-window model run an arbitrarily large project one ticket at a time.
+After each commit, a diff-only extract pass updates `railhead.contracts.json` with the files and symbols that changed. Later tickets receive exact pointers instead of "go explore the codebase" — this is what keeps per-ticket context O(ticket).
 
 ## Setting up opencode
 
-The one critical setting is the **per-model context limit** — opencode can't infer it for local models:
+The one critical setting is the **per-model context limit** — opencode cannot infer it for local models:
 
 ```jsonc
 // ~/.config/opencode/opencode.jsonc
@@ -276,10 +182,13 @@ The one critical setting is the **per-model context limit** — opencode can't i
 }
 ```
 
-Set the request ceiling in `railhead.json` as `request_ceiling_tokens` so the planner slices tickets to fit. This is a **request** ceiling — the largest single request (prompt + output reserve) a phase may send — not the server's capacity, which is shared with invisible foreign KV. Leave it unset and the railhead defaults to **0.6× the model's window** (a 100k model → a 60k ceiling), which survives a warm KV pool. Set it explicitly only to a value *below* the window; never mirror the server's full capacity. After a run, check `report.md` — if a ticket's peak context approaches the ceiling with zero compactions, it may still be set too high.
+Set `request_ceiling_tokens` in `railhead.json` to bound the largest single request (prompt + output reserve) a phase may send. Leave it unset and Railhead uses **0.6× the model's window** — a value that survives a warm KV pool. Only set it below the window; never mirror the server's full capacity. After a run, `report.md` shows whether any ticket's peak context approached the ceiling.
 
-## Design notes
+## Design principles
 
-- **Fresh subprocess per gate, context O(ticket).** The implementer is a durable session (or a fresh subprocess per ticket with `session_builder: false`); every judging phase is fresh and diff-scoped. The contracts index is the seam that makes this work.
-- **Verify is green at every step** (ADR 0006) — the suite runs after every committed ticket, so it must be a baseline (typecheck, lint, existing tests), not future-feature assertions.
-- Decisions recorded in `docs/adr/0001`–`0045`.
+- **Context is O(ticket), not O(project)** — fresh, diff-scoped judging phases plus the contracts index are the seam that makes long unattended runs possible.
+- **No gate overlaps the builder** — review phases run in sequence with implementation, so a reviewer never sees a half-edited worktree (ADR 0046).
+- **Green at every step** — every commit passed verify first, so the suite must be a baseline (typecheck, lint, existing tests), never future-feature assertions.
+- **Verify, then trust** — every commit has passed its gate; the ledger is the audit trail.
+
+Decisions and trade-offs are recorded in [`docs/adr/`](docs/adr/).

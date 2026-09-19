@@ -219,11 +219,11 @@ export interface RunState {
    * (soft stop at a ticket boundary, or a hard Ctrl-C). Surfaced in
    * report.md; absent for crash/SIGKILL stops, which write nothing. */
   stop_reason?: string | null;
-  /** gh: resume-owed marker for the pipelined per-ticket visual review (#35).
-   * The in-memory promise cannot be persisted, so the ticket file is recorded
-   * when the review is kicked off for a committed ticket and cleared when it
-   * is joined; if the run stops in between, resume re-runs the review instead
-   * of silently skipping that gate. `null`/absent = nothing owed. */
+  /** gh: resume-owed marker for the per-ticket visual review (ADR 0011). The
+   * in-memory promise cannot be persisted, so the ticket file is recorded when
+   * the review is kicked off for a committed ticket and cleared when it is
+   * joined; if the run stops in between, resume re-runs the review instead of
+   * silently skipping that gate. `null`/absent = nothing owed. */
   visual_pending?: string | null;
   /** gh: resume-owed markers for mid-run group checkpoint gates (goal and
    * structural keep their own sets, mirroring their separate records). A group

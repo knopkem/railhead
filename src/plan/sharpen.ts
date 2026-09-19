@@ -422,7 +422,7 @@ export async function appendContextTerms(cwd: string, terms: TermEntry[]): Promi
     .join("\n\n");
 
   if (!current.trim()) {
-    current = `# Project glossary\n\n_Maintained by \`railhead plan\`'s planning interview — the project's own words, nothing else._\n\n## Language\n\n`;
+    current = `# Project glossary\n\n_Maintained by \`railhead build\`'s planning interview — the project's own words, nothing else._\n\n## Language\n\n`;
   }
   const sep = current.endsWith("\n\n") ? "" : current.endsWith("\n") ? "\n" : "\n\n";
   await writeFile(target, current + sep + rendered + "\n", "utf8");

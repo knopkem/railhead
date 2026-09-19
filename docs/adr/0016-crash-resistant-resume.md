@@ -99,7 +99,7 @@ versa. Returns a list of `DivergedTicket` entries.
 
 - **Missing on disk** (state.json lists a ticket that doesn't exist):
   throw a descriptive error naming each missing file, with the hint:
-  `"Tickets purged from disk. Re-run \`railhead plan\` to regenerate, or restore from git."`
+  `"Tickets purged from disk. Re-run \`railhead build\` to regenerate, or restore from git."`
 - **Missing in state** (disk has a ticket state.json doesn't): warn to
   console and add the ticket to state as a new `ready` entry. This handles
   re-plans that added tickets.

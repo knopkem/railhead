@@ -58,32 +58,32 @@ describe("parseRunArgs", () => {
 
 describe("parsePlanArgs", () => {
   it("extracts the prompt from the non-flag args", () => {
-    expect(parsePlanArgs(["build", "a", "thing"], "plan").prompt).toBe("build a thing");
+    expect(parsePlanArgs(["build", "a", "thing"], "build").prompt).toBe("build a thing");
   });
 
   it("detects auto and continue flags", () => {
-    const a = parsePlanArgs(["-a", "-c", "build"], "plan");
+    const a = parsePlanArgs(["-a", "-c", "build"], "build");
     expect(a.auto).toBe(true);
     expect(a.cont).toBe(true);
   });
 
   it("parses a preset flag", () => {
-    expect(parsePlanArgs(["build", "--medium"], "plan").preset).toBe("medium");
+    expect(parsePlanArgs(["build", "--medium"], "build").preset).toBe("medium");
   });
 
   it("rejects two conflicting presets", () => {
-    expect(() => parsePlanArgs(["build", "--full", "--light"], "plan")).toThrow(/conflicting presets/);
+    expect(() => parsePlanArgs(["build", "--full", "--light"], "build")).toThrow(/conflicting presets/);
   });
 
   it("parses per-gate overrides and boolean overrides", () => {
-    const a = parsePlanArgs(["build", "--review", "off", "--goal", "light", "--tdd", "--no-sharpen"], "plan");
+    const a = parsePlanArgs(["build", "--review", "off", "--goal", "light", "--tdd", "--no-sharpen"], "build");
     expect(a.overrides).toEqual({ code: "off", visual: null, goal: "light", structural: null });
     expect(a.tdd).toBe(true);
     expect(a.sharpen).toBe(false);
   });
 
   it("rejects contradictory boolean overrides", () => {
-    expect(() => parsePlanArgs(["build", "--tdd", "--no-tdd"], "plan")).toThrow(/mutually exclusive/);
+    expect(() => parsePlanArgs(["build", "--tdd", "--no-tdd"], "build")).toThrow(/mutually exclusive/);
   });
 
   it("keeps the description clean of flag values (e.g. --model)", () => {
@@ -94,10 +94,10 @@ describe("parsePlanArgs", () => {
   });
 
   it("flags --verbose and keeps it out of the prompt", () => {
-    const a = parsePlanArgs(["build", "x", "--verbose"], "plan");
+    const a = parsePlanArgs(["build", "x", "--verbose"], "build");
     expect(a.verbose).toBe(true);
     expect(a.prompt).toBe("build x");
-    expect(parsePlanArgs(["build", "x"], "plan").verbose).toBe(false);
+    expect(parsePlanArgs(["build", "x"], "build").verbose).toBe(false);
   });
 });
 

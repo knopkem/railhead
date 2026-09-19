@@ -149,7 +149,7 @@ describe("resolveGateModes", () => {
 describe("resolveTdd", () => {
   it("the --tdd/--no-tdd flag wins over everything", () => {
     expect(resolveTdd({ flag: true, mode: "fix", preset: "light", auto: false, askDefault: false })).toBe(true);
-    expect(resolveTdd({ flag: false, mode: "plan", preset: "full", auto: false, askDefault: false })).toBe(false);
+    expect(resolveTdd({ flag: false, mode: "build", preset: "full", auto: false, askDefault: false })).toBe(false);
   });
 
   it("fix mode forces the test phase off", () => {
@@ -157,29 +157,29 @@ describe("resolveTdd", () => {
   });
 
   it("a preset decides when not interactive", () => {
-    expect(resolveTdd({ flag: null, mode: "plan", preset: "full", auto: false, askDefault: false })).toBe(true);
-    expect(resolveTdd({ flag: null, mode: "plan", preset: "light", auto: true, askDefault: false })).toBe(false);
+    expect(resolveTdd({ flag: null, mode: "build", preset: "full", auto: false, askDefault: false })).toBe(true);
+    expect(resolveTdd({ flag: null, mode: "build", preset: "light", auto: true, askDefault: false })).toBe(false);
     // auto with no preset = the light preset's off
-    expect(resolveTdd({ flag: null, mode: "plan", preset: null, auto: true, askDefault: false })).toBe(false);
+    expect(resolveTdd({ flag: null, mode: "build", preset: null, auto: true, askDefault: false })).toBe(false);
   });
 
   it("interactive (no flag, no preset, not auto) returns the answer", () => {
-    expect(resolveTdd({ flag: null, mode: "plan", preset: null, auto: false, askDefault: false, answer: true })).toBe(true);
-    expect(resolveTdd({ flag: null, mode: "plan", preset: null, auto: false, askDefault: false, answer: false })).toBe(false);
+    expect(resolveTdd({ flag: null, mode: "build", preset: null, auto: false, askDefault: false, answer: true })).toBe(true);
+    expect(resolveTdd({ flag: null, mode: "build", preset: null, auto: false, askDefault: false, answer: false })).toBe(false);
   });
 
   it("the plan ask-default is encoded as false (not the persisted config)", () => {
     // Empty input on the plan-time prompt keeps the test phase off even when
     // the persisted config has it on — the plan default is false.
-    expect(resolveTdd({ flag: null, mode: "plan", preset: null, auto: false, askDefault: false })).toBe(false);
-    expect(resolveTdd({ flag: null, mode: "plan", preset: null, auto: false, askDefault: true })).toBe(true);
+    expect(resolveTdd({ flag: null, mode: "build", preset: null, auto: false, askDefault: false })).toBe(false);
+    expect(resolveTdd({ flag: null, mode: "build", preset: null, auto: false, askDefault: true })).toBe(true);
   });
 
   it("the standalone-run ask-default is the persisted config, not false", () => {
     // A standalone `railhead run` that leaves the prompt empty keeps whatever
     // test_phase the persisted config already carries.
-    expect(resolveTdd({ flag: null, mode: "plan", preset: null, auto: false, askDefault: true })).toBe(true);
-    expect(resolveTdd({ flag: null, mode: "plan", preset: null, auto: false, askDefault: false })).toBe(false);
+    expect(resolveTdd({ flag: null, mode: "build", preset: null, auto: false, askDefault: true })).toBe(true);
+    expect(resolveTdd({ flag: null, mode: "build", preset: null, auto: false, askDefault: false })).toBe(false);
   });
 });
 

@@ -329,14 +329,9 @@ async function applyHalt(state: RunState, ledger: string): Promise<void> {
  * Honor an operator soft stop (first Ctrl-C) at a boundary where nothing is
  * owed. Callers must only invoke this at a ticket boundary — after the ticket
  * in flight has committed and its checkpoint gates returned — never between a
- * commit and those gates, or the stop would skip them.
- *
- * The pipelined per-ticket visual review (#35) is still in flight at a ticket
- * boundary (it runs concurrently with the next implement). The soft stop
- * awaits it — and any review a corrective commit kicks off — so the stop
- * leaves no gate owed; a second Ctrl-C remains the escape hatch for a review
- * that will not finish. On a corrective failure the ordinary failure status
- * applies and the stop is recorded too.
+ * commit and those gates, or the stop would skip them. Per-ticket visual
+ * reviews complete inside `committedTicket` (ADR 0046), so no gate is ever in
+ * flight here.
  */
 async function softStopHere(
   state: RunState,
@@ -344,24 +339,7 @@ async function softStopHere(
   reason: string,
   onUpdate?: () => void,
 ): Promise<void> {
-  let joinFailed = false;
-  while (state._pending_visual_review && !isFinished(state.status)) {
-    console.log(`[${nowClock()}] soft stop: joining the pending visual review before stopping`);
-    const joinOutcome = await joinPendingVisualReview(state, ledger, processTicket);
-    if (joinOutcome === "fail") {
-      joinFailed = true;
-      break;
-    }
-  }
-  if (joinFailed) {
-    // A corrective ticket's own halt is the same honest stop as any other.
-    if (haltReason(state.cwd) !== null) {
-      await applyHalt(state, ledger);
-      onUpdate?.();
-      return;
-    }
-    state.status = state.pause_on_failure ? "stopped" : "failed";
-  } else if (!isFinished(state.status)) {
+  if (!isFinished(state.status)) {
     state.status = "stopped";
   }
   state.stop_reason = reason;
@@ -387,8 +365,9 @@ async function runLoopInner(state: RunState, ledger: string, onUpdate?: () => vo
   clearStop();
   state.stop_reason = null;
   const cleanupSignals = installSignalHandlers(state, ledger);
-  // gh: replay the gates a prior stop left owed — the pipelined per-ticket
-  // visual review and any post-commit group checkpoint the run never got to.
+  // gh: replay the gates a prior stop left owed — a per-ticket visual review
+  // the process died before joining, and any post-commit group checkpoint the
+  // run never got to.
   // Runs before the frontier so no ticket stacks on a foundation a gate has
   // not cleared (ADR 0006). A failed replay stops the run like any gate
   // failure; the halt file, if present, wins as usual.
@@ -483,8 +462,8 @@ async function runLoopInner(state: RunState, ledger: string, onUpdate?: () => vo
       await writeState(ledger, state);
       onUpdate?.();
       // gh: the ticket boundary — gate complete, commit durable. Stop here
-      // (after draining the pipelined visual review) and resume continues at
-      // the next ticket with no work to redo and no gate owed.
+      // and resume continues at the next ticket with no work to redo and no
+      // gate owed.
       if (isSoftStopRequested()) {
         await softStopHere(state, ledger, `stop requested — ${next.number} committed; stopping before the next ticket`, onUpdate);
         break;
@@ -500,15 +479,6 @@ async function runLoopInner(state: RunState, ledger: string, onUpdate?: () => vo
   // model time on final code review and structural review of an incomplete
   // build.
   if (state.status === "finished") {
-    // Issue #35: join the last ticket's pending per-ticket visual review before
-    // the run's end-of-run phases. A [BLOCKER] here generates corrective tickets
-    // (processed inline) before the integrated visual review runs.
-    const finalJoin = await joinPendingVisualReview(state, ledger, processTicket);
-    if (finalJoin === "fail" && !isFinished(state.status)) {
-      state.status = state.pause_on_failure ? "stopped" : "failed";
-      await writeState(ledger, state);
-      onUpdate?.();
-    }
     // gh: a soft stop requested during the end-of-run block is honored between
     // passes. All tickets are committed, so nothing is owed; a resume re-enters
     // this block and runs only the passes that did not complete (visual picks
@@ -518,8 +488,7 @@ async function runLoopInner(state: RunState, ledger: string, onUpdate?: () => vo
       if (softStoppedAtRunEnd || !isSoftStopRequested()) return;
       // `finished` is a terminal RunStatus, but the run-end gates have not all
       // completed — the run is only finished once this block returns. Flip to
-      // `stopped` first so the helper's terminal-state guard does not veto it;
-      // an in-flight pipelined review stays owed via its persisted marker.
+      // `stopped` first so the helper's terminal-state guard does not veto it.
       state.status = "stopped";
       await softStopHere(state, ledger, reason, onUpdate);
       softStoppedAtRunEnd = true;
@@ -647,20 +616,16 @@ export function ticketBudgetStop(state: RunState, ticket: TicketState): string |
  * The post-commit sequence shared by both commit sites in `processTicket`:
  * the regular commit (review passed) and the soft-pass (attempt cap hit with
  * only non-blocking findings). Both must: record the commit, mark the ticket
- * committed, persist state, join the prior ticket's pending per-ticket visual
- * review (if any), kick off this ticket's own per-ticket visual review
- * (pipelined, #35), and update the contract index. The phase ordering here is
- * deliberate:
+ * committed, persist state, run this ticket's own per-ticket visual review
+ * (ADR 0011, serialized — ADR 0046), and update the contract index. The phase
+ * ordering here is deliberate:
  *   1. Commit + mark committed + persist: an interrupt in any later sub-pass
  *      can't lose a finished ticket (resume sees `committed` and skips it).
- *   2. Join pending visual review (prior ticket): [BLOCKER]s from the prior
- *      review must be resolved (corrective tickets processed inline) before
- *      this ticket may stack work on top (ADR 0006).
- *   3. Kickoff this ticket's per-ticket visual review: runs concurrently with
- *      the next ticket's implement phase; joined at the next `committedTicket`
- *      or at end-of-run.
- *   4. Contracts update: a best-effort bonus; a failure here must not lose the
- *      already-committed ticket.
+ *   2. Per-ticket visual review: runs to completion (corrective tickets
+ *      included) before this ticket returns — no gate overlaps the builder
+ *      (ADR 0022) and the reviewer sees the committed worktree (ADR 0046).
+ *   3. Group checkpoints, then the contracts update: a best-effort bonus; a
+ *      failure here must not lose the already-committed ticket.
  */
 async function committedTicket(
   state: RunState,
@@ -712,57 +677,20 @@ async function committedTicket(
   markGroupCheckpointsOwed(state, ticket);
   await writeState(ledger, state);
 
-  // Issue #35: join the pending per-ticket visual review from the PRIOR
-  // ticket (if any) before this ticket may commit. If the prior review found
-  // [BLOCKER]s, its corrective tickets are generated and processed inline
-  // here — this ticket cannot stack work on a broken foundation (ADR 0006).
-  // `joinPendingVisualReview` clears `state._pending_visual_review` first, so
-  // the corrective tickets' own `committedTicket` calls do not re-join.
-  const joinOutcome = await joinPendingVisualReview(state, ledger, processTicket);
-  if (joinOutcome === "fail") {
-    return "failed";
-  }
-  // A corrective ticket committed by the join above may itself have kicked off
-  // a per-ticket visual review. Join it before the kickoff below overwrites
-  // the single pending slot — otherwise that corrective's visual gate would
-  // never report (the overwritten promise is the only handle to it).
-  while (state._pending_visual_review) {
-    const pendingOutcome = await joinPendingVisualReview(state, ledger, processTicket);
-    if (pendingOutcome === "fail") {
-      return "failed";
-    }
-  }
-
-  // Per-ticket visual review (ADR 0011, pipelined #35). Kick off the visual-
-  // model subprocess asynchronously; it runs concurrently with the next
-  // ticket's implement phase. The join happens at the next ticket's
-  // `committedTicket` (or at end-of-run in `runLoop`). Skipped silently when
-  // visual_review is disabled or no vision model is configured.
+  // Per-ticket visual review (ADR 0011): post-commit and serialized (ADR 0046).
+  // The review — and any corrective tickets it spawns — completes before this
+  // ticket returns, so a gate never runs concurrently with the builder (ADR
+  // 0022, the single-server contract) and the reviewer sees the committed
+  // worktree, never the next ticket's partial edits. The owed marker is
+  // persisted before the wait so a crash mid-review replays the gate on resume
+  // (ADR 0038). Skipped silently when visual_review is disabled or no vision
+  // model is configured.
   state._pending_visual_review = kickoffPerTicketVisualReview(state, ledger, ticket, parsed) ?? undefined;
-  // gh: persist the owed-visual marker the moment the review is kicked off.
-  // The promise cannot survive the process; the marker is what lets a stop
-  // before the join replay this gate on resume instead of skipping it.
   await writeState(ledger, state);
-
-  // Issue #62: the per-ticket visual reviewer and the goal reviewer both drive
-  // the SAME Playwright browser (one shared MCP server). If this ticket reaches
-  // a goal checkpoint, join the just-kicked-off visual review BEFORE the goal
-  // review spawns its own subprocess — otherwise the two phases navigate,
-  // screenshot, and read each other's tabs concurrently (the run's screenshots
-  // were contaminated by exactly this overlap). Pipelining with the next
-  // ticket's implement (#35) is preserved for non-checkpoint commits: the
-  // visual review is only awaited when it would otherwise collide with a goal
-  // review.
-  // ADR 0029 (#102): the goal checkpoint can fire at a group boundary under a
-  // `checkpoint_action: "advisory"` light gate too — same browser-collision
-  // serialization applies, so the predicate is the gate's real mid-run fuse.
-  if (state._pending_visual_review && goalFiresCheckpointsMidRun(state.config.goal_review) && (state._models?.goal ?? null) !== null) {
-    const checkpoints = goalCheckpointsToFire(state, ticket);
-    if (checkpoints.length > 0) {
-      const serialized = await joinPendingVisualReview(state, ledger, processTicket);
-      if (serialized === "fail") {
-        return "failed";
-      }
+  if (state._pending_visual_review) {
+    const visualOutcome = await joinPendingVisualReview(state, ledger, processTicket);
+    if (visualOutcome === "fail") {
+      return "failed";
     }
   }
 
@@ -1896,7 +1824,7 @@ export function protectedPaths(cwd: string, ticketsDir: string): string[] {
       // permission-rejection loop the pre-grant was meant to prevent.
       "opencode.json",
       "opencode.jsonc",
-      // Plan-time docs (AGENTS.md, CONTEXT.md) are written by `railhead plan`
+      // Plan-time docs (AGENTS.md, CONTEXT.md) are written by `railhead build`
       // AFTER the scaffold commit but BEFORE `railhead run` starts — so they're
       // untracked at run start, and `git clean -fd` in `cleanWorktree` would
       // delete them on the first implement attempt. Every implementer reads
@@ -2101,7 +2029,7 @@ function toBuilderTicket(parsed: Ticket, handoff: string | null | undefined): Bu
 }
 
 /** gh: record the group checkpoints a just-committed ticket completes as owed
- * BEFORE any long post-commit work (the pipelined visual join) runs. The
+ * BEFORE any long post-commit work (the per-ticket visual review) runs. The
  * checkpoint wrappers add the same markers immediately before their review
  * agents; this closes the window between the commit write and that moment,
  * where a crash would leave the group committed, unrecorded, and never

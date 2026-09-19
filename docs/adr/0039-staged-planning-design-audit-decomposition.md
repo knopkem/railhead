@@ -37,7 +37,7 @@ Three separable defects lived in one call:
 
 ### 1. Build-mode planning is three stages
 
-`railhead plan` (build mode) runs separate model calls, each with its own
+`railhead build` (build mode) runs separate model calls, each with its own
 output shape and its own ledger phase:
 
 1. **Design** (`planDesignSystemPrompt`, phase `plan`) — emits `$VERIFY`,

@@ -42,6 +42,10 @@ run-loop entry, so it cannot stop an unrelated run.
 
 ### 2. The boundary includes the pipelined visual review and the run-end block
 
+> Amended by ADR 0046: the per-ticket visual review now completes inside
+> `committedTicket`; the boundary still includes it — the join simply happens
+> before the stop is checked, not at the stop.
+
 The per-ticket visual review is kicked off asynchronously at commit (#35) and
 joined at the next commit. A ticket boundary without that join would leave the
 review's promise dropped. The soft stop therefore joins the pending per-ticket

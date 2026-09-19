@@ -74,18 +74,18 @@ export async function main(argv: string[]): Promise<void> {
   const cwd = process.cwd();
 
   switch (cmd) {
-    case "plan": {
-      const prefs = parsePlanArgs(rest, "plan");
+    case "build": {
+      const prefs = parsePlanArgs(rest, "build");
       await ensureInitialized(cwd, prefs.auto);
-      if (!prefs.prompt) throw new Error("plan requires a description of what to build");
-      await cmdPlan(cwd, prefs);
+      if (!prefs.prompt) throw new Error("build requires a description of what to build");
+      await cmdBuild(cwd, prefs);
       break;
     }
     case "fix": {
       const prefs = parsePlanArgs(rest, "fix");
       await ensureInitialized(cwd, prefs.auto);
       if (!prefs.prompt) throw new Error("fix requires a description of the bug");
-      await cmdPlan(cwd, prefs);
+      await cmdBuild(cwd, prefs);
       break;
     }
     case "run": {
@@ -131,7 +131,7 @@ export async function main(argv: string[]): Promise<void> {
 function usage() {
   console.log(`usage: railhead <command>
 
-  plan "<what to build>" [--model M] [-a] [-c] [--full|--medium|--light|--none]
+  build "<what to build>" [--model M] [-a] [-c] [--full|--medium|--light|--none]
        [--review M|full|light|off] [--vision full|light|off] [--goal full|light|off]
        [--structural full|light|off] [--tdd|--no-tdd] [--sharpen|--no-sharpen] [--yolo] [--verbose]
        turn a description into dependency-ordered tickets, then run them (issue #73)
@@ -157,7 +157,7 @@ function usage() {
        [--tdd|--no-tdd] [--sharpen|--no-sharpen] [--yolo] [--verbose]
        turn a bug report into a fix ticket, then run it
        fix mode forces visual_review.mode: full and TDD off (bug reproducer is the test, #6)
-       flags: same as plan above
+       flags: same as build above
    init [--free] [-y]                     scaffold a default railhead.json in the current directory
         all five model seats (plan/implement/review/visual/goal) are asked up front and default to
         the opencode default; each is probed once for availability, context limit, vision and reasoning.
@@ -613,7 +613,7 @@ async function cmdInit(cwd: string, yes: boolean = false, free: boolean = false)
   console.log(`context budget: ${Math.round(contextBudget / 1000)}k tokens`);
   console.log(`review cadence: code=light (run-end); visual/goal/structural=off — raise gates at plan time with --full/--medium/--light/--none or per-gate flags`);
   console.log(`tdd test phase: off — presets default it off; enable with --tdd/--full`);
-  console.log(`edit ${target} to change these, then run \`railhead plan -a "<what to build>"\`.`);
+  console.log(`edit ${target} to change these, then run \`railhead build -a "<what to build>"\`.`);
 }
 
 /**
@@ -653,11 +653,10 @@ async function ensureVisionGates(
   }
 }
 
-async function cmdPlan(cwd: string, prefs: PlanArgs): Promise<void> {
+async function cmdBuild(cwd: string, prefs: PlanArgs): Promise<void> {
   const { prompt, auto, cont, yolo: yoloFlag, verbose, modelOverride, mode, overrides, tdd, sharpen } = prefs;
-  // Planner/interview mode vocabulary is `build` | `fix`; the CLI's plan/fix
+  // Planner/interview mode vocabulary is `build` | `fix`; the CLI's build/fix
   // commands map onto it (sharpen/planner prompts differ in fix mode).
-  const planMode = mode === "fix" ? "fix" : "build";
   // Issue #73: run cadence. A preset flag wins; otherwise `-a` and
   // interactive mode default to `light` — the fast default that defers all
   // review to run end. Interactive mode offers per-gate prompts whose
@@ -839,8 +838,8 @@ async function cmdPlan(cwd: string, prefs: PlanArgs): Promise<void> {
       onQuestion: isSkip ? undefined : (_q: SharpenQuestion, rendered: string) => console.log("\n" + rendered),
     };
     const skipLabel = isSkip ? " (auto-answered)" : "";
-    if (planMode === "fix") {
-      const session = await runSharpenSession({ ...sessionOptions, topic: prompt, mode: planMode });
+    if (mode === "fix") {
+      const session = await runSharpenSession({ ...sessionOptions, topic: prompt, mode });
       if (session.transcript) {
         enrichedPrompt = `${prompt}\n\n${session.transcript}`;
         console.log(`fix interview (${depth})${skipLabel}: ${session.exchanges.length} question(s) answered across ${session.rounds} round(s)`);
@@ -867,7 +866,7 @@ async function cmdPlan(cwd: string, prefs: PlanArgs): Promise<void> {
     stallTimeoutSec: config.stall_timeout_sec,
     maxStepModelSec: config.max_step_model_sec,
     maxContextTokens: config.max_context_tokens,
-    mode: planMode,
+    mode,
     verbose,
     persistentWorker: config.persistent_worker === true,
     infraBackoffSec: config.infra_backoff_sec,
@@ -877,7 +876,7 @@ async function cmdPlan(cwd: string, prefs: PlanArgs): Promise<void> {
     // replaces the goal-coverage audit. Auto runs keep the audit and skip
     // this loop.
     interviewPlan,
-    reviewPlan: auto || planMode === "fix"
+    reviewPlan: auto || mode === "fix"
       ? undefined
       : async ({ planPath }) => {
           console.log(`\nThe final plan is written to ${planPath ? planPath : "PLAN.md"} — read it before answering.`);
@@ -923,7 +922,7 @@ async function cmdPlan(cwd: string, prefs: PlanArgs): Promise<void> {
     // ADR 0041 (amended): accepting the interactive plan IS the start
     // decision — tickets are created and the build begins with no second
     // prompt. Fix mode (no plan review) keeps the explicit start question.
-    const acceptedPlan = !auto && planMode === "build";
+    const acceptedPlan = !auto && mode === "build";
     const startNow = auto || cont || acceptedPlan || await askYesNo("Start this run now?", true);
     if (startNow) {
       await cmdRun(cwd, [outDir, ...(verbose ? ["--verbose"] : [])], { fromPlan: true });
@@ -1058,7 +1057,7 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } 
   // ADR 0036: refuse a vision-dependent gate whose seat model cannot see —
   // before a fresh run spends hours, and before a resume continues one. The
   // message names the escape hatches (a vision model, or mode "off"). A run
-  // started from `plan` already probed in this process seconds ago, so it
+  // started from `build` already probed in this process seconds ago, so it
   // does not pay for the same measurement twice.
   const visionModes = {
     visual: (config.visual_review?.mode ?? "off") as GateMode,
@@ -1088,7 +1087,7 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } 
           config.test_phase !== false,
         )
       : undefined;
-    const runTdd = resolveTdd({ flag: tdd, mode: "plan", preset: null, auto: false, askDefault: config.test_phase !== false, answer });
+    const runTdd = resolveTdd({ flag: tdd, mode: "build", preset: null, auto: false, askDefault: config.test_phase !== false, answer });
     const tddReport = await persistPolicy(cwd, config, { testPhase: runTdd });
     if (tddReport.testPhaseChanged && tdd !== null) {
       console.log(tdd ? "test phase: enabled via --tdd" : "test phase: disabled via --no-tdd");
@@ -1148,7 +1147,7 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } 
   for (const w of warnIfOversightModelIsLocal(config, resolvedModels)) console.log(w);
   if (config.verify.length === 0) {
     console.log(
-      `WARNING: railhead.json "verify" is empty — every ticket will skip the verify gate and rely on review alone (ADR 0006 violated). Re-run \`railhead plan\` to seed verify commands from the plan, or edit railhead.json {"verify":["cargo build","cargo test"]}/{"verify":["npm test","tsc --noEmit"]} manually.`,
+      `WARNING: railhead.json "verify" is empty — every ticket will skip the verify gate and rely on review alone (ADR 0006 violated). Re-run \`railhead build\` to seed verify commands from the plan, or edit railhead.json {"verify":["cargo build","cargo test"]}/{"verify":["npm test","tsc --noEmit"]} manually.`,
     );
   }
   console.log(`run ${runId} — ${state.tickets.length} tickets`);
@@ -1286,7 +1285,7 @@ async function resumeRun(
   if (missingOnDisk.length > 0) {
     const files = missingOnDisk.map((d) => d.file).join(", ");
     throw new Error(
-      `tickets missing from disk: ${files}. The state.json references ticket files that no longer exist (possibly purged by a mid-run bug). Re-run \`railhead plan\` to regenerate, or restore from git.`,
+      `tickets missing from disk: ${files}. The state.json references ticket files that no longer exist (possibly purged by a mid-run bug). Re-run \`railhead build\` to regenerate, or restore from git.`,
     );
   }
   for (const d of diverged) {

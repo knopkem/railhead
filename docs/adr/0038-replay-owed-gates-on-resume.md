@@ -11,6 +11,10 @@ The gap is not theoretical: any hard kill (OOM, SIGKILL, terminal close) can
 land there, and with `goal_review.mode: full/medium` or group builder
 granularity it silently skips corrective work.
 
+> Amended by ADR 0046: the per-ticket visual review is serialized inside
+> `committedTicket`; the marker/replay mechanism below is unchanged, and now
+> covers only a crash mid-review rather than a cross-ticket overlap.
+
 ## Decision
 
 ### 1. Persist what is owed, before the gate runs

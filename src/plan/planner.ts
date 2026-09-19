@@ -189,7 +189,7 @@ async function runPlanInner(options: {
       },
     );
     if (!infra.ok) {
-      throw new Error(`planner hit a provider failure (${infra.rung.diagnosis}); re-run \`railhead plan\` after the rate limit clears`);
+      throw new Error(`planner hit a provider failure (${infra.rung.diagnosis}); re-run \`railhead build\` after the rate limit clears`);
     }
     if (infra.value.status !== "ok") {
       throw new Error(`planner did not complete (${describeExecFailure(infra.value)})`);

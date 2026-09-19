@@ -44,7 +44,7 @@ start.
    visual review (`shouldRunVisualReview`) and charter injection so the two can
    never disagree about what a surface ticket is. Empty criteria default to
    true. A false positive costs ~250 words; a false negative recreates the
-   drift the charter exists to prevent. `railhead plan` **warns** (never fails)
+   drift the charter exists to prevent. `railhead build` **warns** (never fails)
    when surface tickets exist but the planner emitted no charter section.
 
 4. **Injection.** Surface tickets carry the charter content + a file pointer in

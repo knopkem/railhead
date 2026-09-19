@@ -389,16 +389,14 @@ export async function visualReviewLoop(
  * ticket is not allowed to return "ok" until its visual blockers are resolved.
  * Matches the end-of-run `visualReviewLoop` semantics.
  *
- * Issue #35: the review is split into two phases. `kickoffPerTicketVisualReview`
- * starts the visual-model subprocess asynchronously and returns a promise that
- * resolves to the verdict + closure data (the worktree is stable — the visual
- * review does not edit source files, so the next ticket's implementer can start
- * immediately). `joinPendingVisualReview` awaits that promise and, if it found
- * [BLOCKER]s, writes corrective tickets and processes them inline before
- * returning "fail" / "pass". The join runs at the start of the next ticket's
- * `committedTicket`, so the visual review of ticket N overlaps with the
- * implement of ticket N+1, but ticket N+1 cannot commit until N's visual
- * blockers are resolved (preserving ADR 0006: green at every committed step).
+ * Post-commit and serialized (ADR 0046): the caller kicks off the review,
+ * persists the owed marker, then joins immediately, so the review — and any
+ * corrective tickets it spawns — completes before the next ticket starts. A
+ * gate must never run concurrently with the builder (ADR 0022, the
+ * single-server contract), and the reviewer must see the committed worktree,
+ * not the next ticket's partial edits. The split into kickoff + join remains
+ * because an owed review is replayed through the same pair on resume (ADR
+ * 0038).
  *
  * Returns "fail" only when a corrective ticket itself fails; "pass" covers
  * both an outright pass and inconclusive (agent produced no verdict — don't
@@ -444,7 +442,7 @@ export function kickoffPerTicketVisualReview(
   console.log(
     opts?.replay
       ? `[${nowClock()}]   ${ticket.number} visual review (per-ticket) — replaying the review the prior run stopped before joining`
-      : `[${nowClock()}]   ${ticket.number} visual review (per-ticket) — kicked off (pipelined with next implement, #35)`,
+      : `[${nowClock()}]   ${ticket.number} visual review (per-ticket) — kicked off (post-commit, serialized; ADR 0046)`,
   );
   const mission = parsed.mission ?? "(no mission declared)";
   const criteria = parsed.criteria;
@@ -519,11 +517,13 @@ export function kickoffPerTicketVisualReview(
 }
 
 /**
- * Join the pending per-ticket visual review (if any) before the next ticket
- * commits. If the review found [BLOCKER]s, generate corrective tickets and
- * process them inline — ticket N+1 cannot stack work on a broken foundation
- * (ADR 0006). Clears `state._pending_visual_review` before processing
- * corrective tickets so their own `committedTicket` does not re-join.
+ * Await the pending per-ticket visual review set by
+ * `kickoffPerTicketVisualReview` and, if it found [BLOCKER]s, generate
+ * corrective tickets and process them inline. `committedTicket` calls this
+ * immediately after the kickoff, so the review completes within the ticket's
+ * own boundary (ADR 0046); the owed-gate replay calls the same pair on resume.
+ * Clears `state._pending_visual_review` before processing corrective tickets
+ * so their own `committedTicket` does not re-join.
  */
 export async function joinPendingVisualReview(
   state: RunState,

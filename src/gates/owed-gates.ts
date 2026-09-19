@@ -14,7 +14,7 @@ import type { RunTicket } from "./corrective.ts";
  * Resume-owed gate replay (gh: graceful stop).
  *
  * A ticket is marked committed BEFORE its post-commit work runs — the
- * pipelined per-ticket visual review (#35) and the group checkpoint gates
+ * per-ticket visual review (ADR 0011) and the group checkpoint gates
  * (goal/structural). That ordering is deliberate (an interrupt must never lose
  * a finished ticket), but it opens a window: stop between the commit and a
  * gate's completion and resume sees the ticket committed, picks the next one,
@@ -31,9 +31,9 @@ import type { RunTicket } from "./corrective.ts";
 
 /**
  * Replay the gates a stopped/crashed run left owed. Order mirrors the ticket
- * boundary: the pipelined visual join first (its [BLOCKER]s generate corrective
- * tickets that must land before anything else commits, ADR 0006), then
- * structural, then goal (cheap-first fail-fast, gh #107-C2).
+ * boundary: the per-ticket visual review first (its [BLOCKER]s generate
+ * corrective tickets that must land before anything else commits, ADR 0006),
+ * then structural, then goal (cheap-first fail-fast, gh #107-C2).
  *
  * Returns "fail" when a replay's corrective ticket failed; the caller applies
  * the ordinary failure status (the halt file, when present, is the caller's to

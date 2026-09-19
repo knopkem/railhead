@@ -71,7 +71,7 @@ tickets must `reference` existing contracts, not re-declare them. Without
 this seam, the planner would have to re-read the entire codebase to
 understand what's been built.
 
-### Why not just re-run `railhead plan`?
+### Why not just re-run `railhead build`?
 
 `runPlan` is destructive: `writeTickets` clears stale `.md` files from the
 output directory. Calling it mid-run would delete committed ticket files —

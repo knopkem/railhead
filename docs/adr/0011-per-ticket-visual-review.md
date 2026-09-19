@@ -16,7 +16,7 @@ The structural gap: end-of-run visual review is an integration check across the 
 
 ## Decision
 
-Add a **per-ticket visual review** pass, gated on a new `visual_review.per_ticket` config field. When true, a visual review round runs *after each ticket commits* (in addition to, not instead of, the end-of-run pass). It is opt-in at plan time: `railhead plan` asks the user whether to enable it (default No — per-ticket visual is significantly slower, and most builds only need the integration check at end-of-run).
+Add a **per-ticket visual review** pass, gated on a new `visual_review.per_ticket` config field. When true, a visual review round runs *after each ticket commits* (in addition to, not instead of, the end-of-run pass). It is opt-in at plan time: `railhead build` asks the user whether to enable it (default No — per-ticket visual is significantly slower, and most builds only need the integration check at end-of-run).
 
 In `railhead fix` mode, the question is omitted and `per_ticket` is forced `true` whenever `visual_review.enabled` is on and a vision-capable `model.review` is configured. A bug fix's whole point is observable runtime behaviour; visual verification is never optional in fix mode. The user cannot disable it short of disabling visual review entirely.
 

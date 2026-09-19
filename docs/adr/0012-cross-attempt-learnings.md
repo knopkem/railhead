@@ -35,4 +35,4 @@ Add a **learnings** system: a single `.railhead/learnings.md` file per project (
 - `.railhead/learnings.md` must be in `protectedPaths` so `cleanWorktree` doesn't delete it between implement attempts (it's untracked — plan writes it after the first implement phase).
 - The char budget (~800 tokens) is paid on every phase prompt. For a 3-ticket run with per-ticket visual, that's ~9 implementer/reviewer/visual prompts × 800 = ~7,200 extra tokens total — negligible.
 - Pruning is model-driven (consolidation when full), not heuristic. The extraction model is the same model that writes the learnings, so it understands the domain.
-- Learnings are per-project. A `railhead plan` on a new project starts with no learnings file. A `railhead fix` on the same project picks up prior run's learnings. This is the desired behavior.
+- Learnings are per-project. A `railhead build` on a new project starts with no learnings file. A `railhead fix` on the same project picks up prior run's learnings. This is the desired behavior.

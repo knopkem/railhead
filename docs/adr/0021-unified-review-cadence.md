@@ -1,5 +1,9 @@
 # Unified review cadence: per-gate mode replaces scattered knobs (issue #73)
 
+> Amended by ADR 0046: the per-ticket visual review is serialized inside
+> `committedTicket`; the cadence modes and dispatch below are otherwise
+> unchanged.
+
 ## Status
 
 Accepted.

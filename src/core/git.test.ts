@@ -206,7 +206,7 @@ describe("cleanWorktree", () => {
   it("preserves plan-time config writes to a protected tracked file (railhead.json) across reset --hard", async () => {
     const cwd = await freshRepo();
     // Simulate: railhead.json is committed at scaffold time with mode:off,
-    // then `railhead plan` writes mode:full to disk (persistPolicy).
+    // then `railhead build` writes mode:full to disk (persistPolicy).
     await writeFile(join(cwd, "railhead.json"), JSON.stringify({ visual_review: { mode: "off" } }) + "\n");
     await commit(cwd, "scaffold with railhead.json");
 

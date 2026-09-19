@@ -6,7 +6,7 @@
  * its whole gate and commits, so a resume continues at the next ticket with
  * nothing re-run and no gate owed. A second SIGINT escalates to the HARD stop
  * (kill the active child, persist `stopped`, exit 130) — the escape hatch for
- * a phase that will not finish. `railhead plan`/`init`/`diagnose` have no ticket
+ * a phase that will not finish. `railhead build`/`init`/`diagnose` have no ticket
  * boundary to honor, so the executor's own SIGINT handler keeps its immediate
  * kill whenever no run-loop handler is installed.
  *

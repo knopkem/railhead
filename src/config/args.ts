@@ -69,7 +69,7 @@ export interface PlanArgs {
   overrides: GateOverrides;
   tdd: boolean | null;
   sharpen: boolean | null;
-  mode: "plan" | "fix";
+  mode: "build" | "fix";
 }
 
 const PLAN_BOOL_FLAGS = new Set([
@@ -87,8 +87,8 @@ const PLAN_VALUE_FLAGS = new Set([
   "--review", "--vision", "--goal", "--structural",
 ]);
 
-/** Parse the arguments of `railhead plan` / `railhead fix`. */
-export function parsePlanArgs(argv: string[], mode: "plan" | "fix"): PlanArgs {
+/** Parse the arguments of `railhead build` / `railhead fix`. */
+export function parsePlanArgs(argv: string[], mode: "build" | "fix"): PlanArgs {
   const auto = argv.includes("-a") || argv.includes("--auto") || argv.includes("-y") || argv.includes("--yes");
   const cont = argv.includes("-c") || argv.includes("--continue");
   const presets = (["full", "medium", "light", "none"] as const).filter((p) => argv.includes(`--${p}`));

@@ -228,8 +228,8 @@ export async function writeTickets(
   tickets: Ticket[],
 ): Promise<string> {
   await mkdir(dir, { recursive: true });
-  // Clear stale `.md` files from prior plan/fix runs on this directory before
-  // writing the new plan. A user who re-runs `railhead plan` (or `railhead fix`)
+  // Clear stale `.md` files from prior build/fix runs on this directory before
+  // writing the new plan. A user who re-runs `railhead build` (or `railhead fix`)
   // on the same .scratch/<slug>/issues path would otherwise accumulate ticket
   // files across runs — the next `railhead run` then loads the stale set along
   // with the new one, mixing already-completed tickets with fresh ones.

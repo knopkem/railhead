@@ -62,12 +62,12 @@ project alike. The browser capture half stays where it belongs: the existing
   Init never fails on a probe result: the gates default to `off`, so the
   outcome is recorded and reported, with an explicit warning that a
   vision-dependent gate will be refused later.
-- **At every invocation that will use a vision gate** — `plan`, `run`, `fix`,
+- **At every invocation that will use a vision gate** — `build`, `run`, `fix`,
   and `resume` — always re-probed, deduplicated per invocation. A cached "yes"
   is not evidence: the model behind a model id can change (a local server
   restarted with a different checkpoint), so a `railhead.json` fingerprint is
   not sufficient and no TTL is trusted. Cost is one short opencode call
-  (~30–60s) against runs measured in hours. In `cmdPlan` the per-gate cadence
+  (~30–60s) against runs measured in hours. In `cmdBuild` the per-gate cadence
   questions (and the TDD question) now resolve *before* the planner call — they
   are static, nothing in them reads plan output — so the refusal precedes the
   plan's multi-hour spend on the interactive path too, not just the
@@ -135,7 +135,7 @@ the colors — an attachment-only check would have passed the blind model.
   MINOR-severity toolbar gap surviving a "finished" run — has its first link
   cut: the playback bar's pixels would have been read, and the toolbar gap
   would have been judged by a seat that can see it.
-- Every `plan`/`run`/`resume` invocation with a vision gate pays one probe per
+- Every `build`/`run`/`resume` invocation with a vision gate pays one probe per
   distinct seat model; resumes included, so a model swapped mid-run is caught.
 - `.railhead/capabilities.json` is the first railhead-owned, model-facing
   capability record; later work (retraction-triggers-reprobe, structural

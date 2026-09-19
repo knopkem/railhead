@@ -12,7 +12,7 @@ import type { GateOverrides } from "./args.ts";
  * resolver; the resolver never prompts.
  *
  * The gate-mode default rule (`code` → light, others → off) and the
- * persist-if-changed logic each exist exactly once, here — cmdPlan and cmdRun
+ * persist-if-changed logic each exist exactly once, here — cmdBuild and cmdRun
  * resolve through these functions instead of reassembling policy inline.
  */
 
@@ -67,7 +67,7 @@ export interface ResolveGateModesInput {
   /** Whether the visual gate is currently NOT off (a fix forces visual full
    * only when the user has visual review enabled at all). */
   visualEnabled: boolean;
-  /** The interactive questionnaire result, when cmdPlan collected one. */
+  /** The interactive questionnaire result, when cmdBuild collected one. */
   answer?: GateCadenceAnswer | null;
 }
 
@@ -122,8 +122,8 @@ export function resolveGateModes(input: ResolveGateModesInput): PresetGateModes 
 export interface ResolveTddInput {
   /** `--tdd` / `--no-tdd` flag value; `null` = not given. */
   flag: boolean | null;
-  /** Plan mode — `fix` forces the test phase off. Run passes `"plan"`. */
-  mode: "plan" | "fix";
+  /** Plan mode — `fix` forces the test phase off. Run passes `"build"`. */
+  mode: "build" | "fix";
   /** The plan preset; `null` in a standalone run. */
   preset: GatePreset | null;
   /** Whether this is a non-interactive (`-a`/`--auto`) invocation. */
@@ -132,7 +132,7 @@ export interface ResolveTddInput {
    * standalone run: the persisted config. The two defaults are encoded by the
    * caller, never unified here. */
   askDefault: boolean;
-  /** The interactive answer, when cmdPlan/cmdRun asked. */
+  /** The interactive answer, when cmdBuild/cmdRun asked. */
   answer?: boolean;
 }
 
@@ -157,7 +157,7 @@ export interface ResolveYoloInput {
   flag: boolean;
   /** Whether yolo_permissions is already persisted. */
   configValue: boolean;
-  /** The interactive answer, when cmdPlan asked. */
+  /** The interactive answer, when cmdBuild asked. */
   answer?: boolean;
 }
 
@@ -194,7 +194,7 @@ export interface PersistReport {
  * The one compare-then-persist path. Each provided decision is compared
  * against the value already on the in-memory config; only differences are
  * written, through `updateConfig` (which preserves keys the railhead doesn't
- * model). Returns what changed so cmdRun can log — cmdPlan ignores the report.
+ * model). Returns what changed so cmdRun can log — cmdBuild ignores the report.
  */
 export async function persistPolicy(
   cwd: string,

@@ -217,7 +217,7 @@ export interface RailheadConfig {
    */
   on_block?: "continue" | "pause";
   /**
-   * Bound on the number of interview rounds `railhead plan` runs (ADR 0010)
+   * Bound on the number of interview rounds `railhead build` runs (ADR 0010)
    * before generating tickets. Each round is one ordinary opencode phase
    * call; the interview typically stops earlier on its own $DONE signal —
    * this is the backstop for a model that never emits one. `0` disables the

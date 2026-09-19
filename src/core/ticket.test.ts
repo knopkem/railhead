@@ -103,7 +103,7 @@ describe("write → parse round-trip", () => {
     ];
     const ordered = await orderTickets(plan);
     const dir = await mkdtemp(join(tmpdir(), "tkt-"));
-    // Seed the dir with a stale ticket from a previous plan/fix run on the same
+    // Seed the dir with a stale ticket from a previous build/fix run on the same
     // .scratch/<slug>/issues path. Without clearing, the next run picks up both
     // the stale and the new file as separate tickets — the user observed three
     // `01-*` files stacked across three runs.

@@ -196,7 +196,7 @@ describe("protectedPaths", () => {
     expect(paths).toContain("opencode.jsonc");
   });
 
-  it("protects AGENTS.md and CONTEXT.md (written by `railhead plan`, untracked at run start, needed by every implementer)", () => {
+  it("protects AGENTS.md and CONTEXT.md (written by `railhead build`, untracked at run start, needed by every implementer)", () => {
     const paths = protectedPaths("/repo", "/repo/.scratch/proj/issues");
     expect(paths).toContain("AGENTS.md");
     expect(paths).toContain("CONTEXT.md");
@@ -1374,12 +1374,11 @@ describe("runLoop", () => {
     expect(committed.logs.some((l) => l.includes("inconclusive"))).toBe(true);
   });
 
-  it("per-ticket visual: ticket 02's implement runs concurrently with ticket 01's visual review (#35)", async () => {
-    // The pipelining: after ticket 01 commits, its visual review is kicked
-    // off asynchronously while ticket 02's implement phase starts immediately.
-    // The visual review of ticket 01 must be joined before ticket 02 commits
-    // (preserving ADR 0006: green at every committed step). This test asserts
-    // the ordering: implement-02 starts BEFORE visual-01 completes.
+  it("per-ticket visual: ticket 01's review completes before ticket 02's implement starts (serialized, ADR 0046)", async () => {
+    // Serialization: after ticket 01 commits, its visual review runs to
+    // completion inside committedTicket before the run may start ticket 02.
+    // No gate runs concurrently with the builder (ADR 0022), so the reviewer
+    // sees the committed worktree, never ticket 02's partial edits.
     const cwd = await freshRepo();
     const ticketsDir = ticketsDirOf(cwd);
     const ledgerDir = join(cwd, ".railhead", "run-test");
@@ -1402,20 +1401,16 @@ describe("runLoop", () => {
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [toTicketState(first), toTicketState(second)];
 
-    let visual01Resolve: (() => void) | null = null;
     let visual01Started = false;
     let visual01Completed = false;
-    let implement02StartedBeforeVisual01Completed = false;
+    let implement02StartedAfterVisual01Completed = false;
 
     mockExec.mockImplementation(async (_prompt, options) => {
       const kind = kindOf(options);
       if (kind === "implement") {
         if (options.phaseFile.startsWith("02-")) {
-          // Key assertion: implement-02 starts BEFORE visual-01 completes.
-          implement02StartedBeforeVisual01Completed = !visual01Completed;
-          // Now that implement-02 has started (proving pipelining), let the
-          // pending visual review of ticket 01 complete so the join can proceed.
-          if (visual01Resolve) visual01Resolve();
+          // The assertion: visual-01 already completed before implement-02 ran.
+          implement02StartedAfterVisual01Completed = visual01Completed;
           await mkdir(join(cwd, "src"), { recursive: true });
           await writeFile(join(cwd, "src", "score.js"), "export function computeScore() {}\n", "utf8");
         } else {
@@ -1425,16 +1420,12 @@ describe("runLoop", () => {
       } else if (kind === "review") {
         await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
       } else if (kind === "visual") {
-        // Only the per-ticket visual review of ticket 01 (phaseFile "01-visual")
-        // blocks to prove pipelining. End-of-run visual reviews resolve
-        // immediately so the run can finish.
+        // The per-ticket visual review of ticket 01 completes inline before
+        // ticket 02 may start; end-of-run visual reviews also pass here.
         if (options.phaseFile === "01-visual") {
           visual01Started = true;
           await emitToolUse(ledgerDir, options.phaseFile, "bash", { command: "cargo run" });
           await emitText(ledgerDir, options.phaseFile, "$VISUAL_PASS\napp renders correctly");
-          // The visual review completes only when implement-02 starts (proving
-          // the two phases overlapped). The mock suspends here until resolved.
-          await new Promise<void>((r) => { visual01Resolve = r; });
           visual01Completed = true;
         } else {
           await emitToolUse(ledgerDir, options.phaseFile, "bash", { command: "cargo run" });
@@ -1450,23 +1441,23 @@ describe("runLoop", () => {
 
     expect(final.status).toBe("finished");
     expect(final.tickets.every((t) => t.status === "committed")).toBe(true);
-    // The per-ticket visual review of ticket 01 ran exactly once. (End-of-run
-    // visual reviews also run but are a separate phase.)
+    // The per-ticket visual review of ticket 01 ran exactly once, and ticket
+    // 02's implement started only after it completed. (End-of-run visual
+    // reviews also run but are a separate phase.)
     const perTicketVisualCalls = mockExec.mock.calls.filter(
       ([, o]) => kindOf(o!) === "visual" && o!.phaseFile === "01-visual",
     );
     expect(perTicketVisualCalls).toHaveLength(1);
     expect(visual01Started).toBe(true);
-    // THE pipelining assertion: implement 02 must start before visual 01 completes.
-    expect(implement02StartedBeforeVisual01Completed).toBe(true);
+    // THE serialization assertion: no implement ran while visual 01 was open.
+    expect(implement02StartedAfterVisual01Completed).toBe(true);
   });
 
-  it("per-ticket visual: BLOCKER from ticket 01's pipelined review generates corrective ticket before ticket 02 commits (#35)", async () => {
-    // Ticket 01 commits → visual review kicked off (pipelined). Ticket 02's
-    // implement runs concurrently. When ticket 02 reaches `committedTicket`,
-    // it joins the pending visual review of ticket 01 — which found a BLOCKER.
-    // The corrective ticket (02-fix) must be generated and processed BEFORE
-    // ticket 02 commits (ADR 0006: green at every committed step). The
+  it("per-ticket visual: a BLOCKER on ticket 01 generates and commits its corrective before ticket 02 starts (ADR 0006)", async () => {
+    // Ticket 01 commits → its visual review runs inline and finds a BLOCKER.
+    // The corrective ticket is generated and committed inside ticket 01's own
+    // committedTicket, BEFORE ticket 02 starts — no work stacks on a
+    // known-broken visual state (ADR 0006: green at every committed step). The
     // corrective ticket is testable:false so it skips its own per-ticket
     // visual review (#36).
     const cwd = await freshRepo();
@@ -2289,8 +2280,8 @@ describe("goal review prompt scope (#19 — pendingDeliverables at group checkpo
   it("goal review waits for the pending per-ticket visual review so they never share the browser concurrently (#62)", async () => {
     // Both the per-ticket visual reviewer and the goal reviewer connect to the
     // same Playwright MCP server. When ticket 02 commits (completing the
-    // "core" group), the visual review is kicked off async and the goal review
-    // must NOT start until it resolves — otherwise the two subprocesses
+    // "core" group), the visual review completes inside committedTicket before
+    // the goal checkpoint runs — otherwise the two subprocesses
     // navigate/screenshot/read each other's tabs concurrently.
     const cwd = await freshRepo();
     const ticketsDir = ticketsDirOf(cwd);
@@ -5486,7 +5477,7 @@ describe("graceful stop — soft Ctrl-C", () => {
     expect(final.tickets[0].status).toBe("committed");
   });
 
-  it("joins the pipelined per-ticket visual review before stopping (nothing owed)", async () => {
+  it("completes the per-ticket visual review before stopping (nothing owed)", async () => {
     const cwd = await freshRepo();
     const ticketsDir = ticketsDirOf(cwd);
     const ledgerDir = join(cwd, ".railhead", "run-test");
@@ -5519,8 +5510,8 @@ describe("graceful stop — soft Ctrl-C", () => {
     const final = await runLoop(state, ledgerDir);
 
     expect(final.status).toBe("stopped");
-    // The per-ticket visual review kicked off at commit was joined, not
-    // dropped — the stop leaves no gate owed.
+    // The per-ticket visual review runs before the boundary stop — nothing is
+    // left owed.
     const visualCalls = mockExec.mock.calls.filter(([, o]) => kindOf(o!) === "visual" && o!.phaseFile === "01-visual");
     expect(visualCalls).toHaveLength(1);
     expect(final.visual_pending).toBeNull();
