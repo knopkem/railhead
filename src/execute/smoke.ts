@@ -42,6 +42,15 @@ export const SMOKE_NOT_FOUND_SIGNATURES = [
   "No such file or directory",
 ] as const;
 
+/** GNU timeout(1)'s exit code when it had to kill the wrapped command.
+ * Planners habitually wrap smoke commands in `timeout N <launch>` — and for
+ * a run-until-killed app (a windowed game, a server) that wrapper's kill IS
+ * the success case, identical to our own `timedOut` path. Without this
+ * special case, `timeout 5 <launch>` can never pass: the app stays healthy
+ * for 5s, timeout kills it, exit 124 reads as an ordinary failure. (The
+ * snake-run ticket 01 smoke failed exactly this way.) */
+const TIMEOUT_KILL_EXIT_CODE = 124;
+
 export interface SmokeInput {
   /** The launch command, as the planner emitted it (`cargo run`, `npm start`). */
   command: string;
@@ -96,6 +105,13 @@ export async function runSmoke(
   }
   if (notFound) {
     return { ok: false, outputs: [`$ ${input.command}\n${out}`], notFound: true };
+  }
+  // Exit 124 means the command's OWN `timeout` wrapper killed a still-running
+  // process — for a smoke phase that's success (the app started and stayed
+  // up), same as our timedOut path below. Panic signatures were checked
+  // above, so a killed-but-panicking app still fails.
+  if (code === TIMEOUT_KILL_EXIT_CODE) {
+    return { ok: true, outputs: [`$ ${input.command}\n${out}\n(killed by the command's own timeout wrapper — still running, smoke treats this as success)`], timedOut: true };
   }
   if (code !== 0 && !timedOut) {
     return { ok: false, outputs: [`$ ${input.command}\n${out}`] };

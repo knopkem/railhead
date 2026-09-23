@@ -118,4 +118,29 @@ describe("runSmoke", () => {
     expect(r.ok).toBe(false);
     expect(r.notFound).toBeUndefined();
   });
+
+  it("exit 124 (the command's OWN `timeout` wrapper killed a still-running app) is a SUCCESS, not a failure", async () => {
+    // Planners emit `timeout 5 <launch>` smoke commands; for a run-until-
+    // killed app (a windowed game, a server) that wrapper's kill IS the
+    // success case — the app stayed up for the whole window. The snake-run
+    // ticket 01 smoke failed exactly this way: a healthy app, exit 124,
+    // read as FAILED, and the retry burned the ticket's wall budget.
+    const cwd = await freshCwd();
+    const r = await runSmoke(cwd, { command: "sh -c 'exit 124'" });
+    expect(r.ok).toBe(true);
+    expect(r.timedOut).toBe(true);
+    expect(r.outputs[0]).toContain("timeout wrapper");
+  });
+
+  it("exit 124 with a panic signature in the output still fails as a panic", async () => {
+    // The timeout-wrapper pardon must not mask a crash: an app that panicked
+    // and THEN got killed by its wrapper (or whose wrapper code coincides)
+    // is still a panic.
+    const cwd = await freshCwd();
+    const r = await runSmoke(cwd, {
+      command: `sh -c "echo \\"thread 'main' panicked at foo.rs:1:1\\" >&2; exit 124"`,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.panic).toBe(true);
+  });
 });

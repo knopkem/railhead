@@ -56,6 +56,10 @@ function stepFinishLineWithTokens(input: number): string {
   return JSON.stringify({ type: "step_finish", timestamp: Date.now(), part: { type: "step-finish", id: "p2", messageID: "m1", sessionID: "s1", reason: "tool-calls", tokens: { input, output: 10 }, cost: 0.001 } });
 }
 
+function stepFinishLineWithCache(input: number, cacheRead: number, cacheWrite: number): string {
+  return JSON.stringify({ type: "step_finish", timestamp: Date.now(), part: { type: "step-finish", id: "p2", messageID: "m1", sessionID: "s1", reason: "tool-calls", tokens: { input, output: 10, reasoning: 0, cache: { write: cacheWrite, read: cacheRead } }, cost: 0.001 } });
+}
+
 function stepFinishLineZeroTokens(): string {
   return JSON.stringify({ type: "step_finish", timestamp: Date.now(), part: { type: "step-finish", id: "p2", messageID: "m1", sessionID: "s1", reason: "stop", tokens: { input: 0, output: 0, reasoning: 0, cache: { write: 0, read: 0 } }, cost: 0 } });
 }
@@ -526,7 +530,7 @@ describe("executeOpendCode in-flight token estimate (#82)", () => {
   it("shows a rising in-flight estimate in the heartbeat while one step streams content and never finishes", async () => {
     // One step_start, then four ~4000-char assistant chunks spaced out over
     // ~1.4s, then a clean exit — NO step_finish, so peakTokens never moves.
-    // The heartbeat (every 0.3s) must show est climbing chunk by chunk.
+    // The heartbeat (every 0.3s) must show ctx climbing chunk by chunk.
     const start = stepStartLine().replace(/'/g, "'\\''");
     const chunk = (n: number) => textEvent("x".repeat(4000 * n)).replace(/'/g, "'\\''");
     const emitter = `printf '%s\\n' '${start}' ; printf '%s\\n' '${chunk(1)}' ; sleep 0.35 ; printf '%s\\n' '${chunk(2)}' ; sleep 0.35 ; printf '%s\\n' '${chunk(3)}' ; sleep 0.35 ; printf '%s\\n' '${chunk(4)}' ; exit 0`;
@@ -543,7 +547,7 @@ describe("executeOpendCode in-flight token estimate (#82)", () => {
         heartbeat: true,
         heartbeatIntervalSec: 0.3,
         liveSink: (line: string) => {
-          const m = line.match(/est (\d+(?:\.\d+)?)k/);
+          const m = line.match(/ctx (\d+(?:\.\d+)?)k/);
           if (line.includes("running") && m) ests.push(parseFloat(m[1]));
         },
       });
@@ -625,6 +629,62 @@ describe("executeOpendCode in-flight token estimate (#82)", () => {
       expect(result.estimateDriftTokens).toBe(2000 - (1000 + 400));
       // The drift of the FIRST step is the pre-reconcile overshoot — surfaced
       // by the reconcile, and the last value recorded is what we asserted.
+    } finally {
+      restorePath(env.restorePath);
+    }
+  }, 60000);
+
+  it("counts cache-read/write tokens in the reported context — bare input underreads the window on a warm cache", async () => {
+    // A warm-cache step_finish reports a tiny fresh input (the uncached
+    // sliver) alongside a large cache-read. The guards and the operator's
+    // readout key on the COMPLETE context; keying on the sliver alone would
+    // let a 40k-context phase read as 0.1k and the ceiling guard never fire.
+    const start = stepStartLine().replace(/'/g, "'\\''");
+    const finish = stepFinishLineWithCache(100, 40_000, 2_000).replace(/'/g, "'\\''");
+    const emitter = `printf '%s\\n%s\\n' '${start}' '${finish}' ; exit 0`;
+    const env = await makeFakeOpencode(emitter);
+    try {
+      const result = await executeOpendCode("test prompt", {
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "cache-inclusive-context",
+        model: null,
+        stallTimeoutSec: null,
+        maxStepModelSec: null,
+        live: false,
+        heartbeat: false,
+      });
+      expect(result.status).toBe("ok");
+      expect(result.peakTokens).toBe(42_100);
+      // The estimate reconciles to the complete context, not the sliver.
+      expect(result.inFlightTokens).toBe(42_100);
+    } finally {
+      restorePath(env.restorePath);
+    }
+  }, 60000);
+
+  it("arms the ceiling kill on cache-inclusive context — a warm-cache request over budget dies", async () => {
+    // Budget 1000 → 95% = 950. Fresh input 100 alone is far under budget; the
+    // request's complete context (100 + 900 cache-read) crosses it and must
+    // kill. Before cache was counted this phase passed as "ok" while holding
+    // a 1k-token context against a 1k budget.
+    const start = stepStartLine().replace(/'/g, "'\\''");
+    const finish = stepFinishLineWithCache(100, 900, 0).replace(/'/g, "'\\''");
+    const emitter = `printf '%s\\n%s\\n' '${start}' '${finish}' ; sleep 30`;
+    const env = await makeFakeOpencode(emitter);
+    try {
+      const result = await executeOpendCode("test prompt", {
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "cache-inclusive-kill",
+        model: null,
+        maxContextTokens: 1_000,
+        stallTimeoutSec: null,
+        maxStepModelSec: null,
+        live: false,
+        heartbeat: false,
+      });
+      expect(result.status).toBe("budget_exceeded");
     } finally {
       restorePath(env.restorePath);
     }

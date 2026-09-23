@@ -172,3 +172,77 @@ never resets on a ladder rung, a resume, or a compaction. The phase's own
 - The builder gains an honest failure channel, which also makes its success
   signal meaningful: a `$CHECKPOINT` now means the criteria were met, not
   that the model ran out of options.
+
+## Amendment (2026-09-23): the wall clock restarts at a green checkpoint
+
+The snake run `run-20260923-1547` exposed a misfire the original scaling
+could not have caught. Ticket 01 built green — 50 steps, checkpoint, verify
+PASS — but the smoke gate (`timeout 5 cargo run --release` on a windowed
+game: the app runs until the timeout kills it, exit 124 = "failure") sent the
+loop back for a retry, and the wall budget stop fired at the attempt
+boundary: 35m cumulative against the 30m floor. A slow-but-progressing ticket
+was canceled for being slow, and a project-config smoke misjudgment was
+amplified into a whole-run failure.
+
+Two separate flaws, two separate fixes:
+
+1. **The scaling premise broke.** The plan-phase wall (2.6 minutes here —
+   three LLM calls, nine events) cannot calibrate build wall: a build ticket
+   runs dozens of tool-heavy steps, an order of magnitude more wall per unit
+   work than planning. In practice the 30-minute floor always governed, and
+   the floor was sized for fast cloud models, not an 11 tok/s local one.
+2. **Absolute wall time is the wrong invariant.** The budget exists to bound
+   thrash — and the spriteforge thrash this ADR records produced **zero**
+   checkpoints in 7 hours. A ticket that keeps reaching green checkpoints is
+   not thrashing: a `$CHECKPOINT` is externally validated (verify must pass
+   downstream), so it is proof of progress.
+
+The amendment: `ticket_wall_sec` bounds builder wall time **since the last
+green checkpoint** (`build_ms_since_checkpoint`, restarted at each
+checkpoint; before the first checkpoint it equals the cumulative total).
+`ticket_step_budget` stays cumulative across checkpoints — total work is
+still bounded regardless of progress, and thrash still hits the wall budget
+at the same attempt boundaries as before, because thrash lands no
+checkpoints. The 30-minute floor is unchanged: it now bounds a
+no-progress stretch, which is the shape it was meant to catch.
+
+## Amendment 2 (2026-09-23, same incident): calibrate from the build itself, gate the reset on verify, land green work softly
+
+A review of the first amendment found four remaining defects, all fixed here:
+
+1. **The reset moved from the checkpoint marker to verify-green.** The first
+   amendment restarted the clock when the marker *arrived* — but a premature
+   `$CHECKPOINT` whose verify fails would restart the very budget that exists
+   to bound that thrash. `build_ms_since_checkpoint` now restarts only on the
+   verify-green path in `processTicket` (the reconcile re-verify included).
+   The snake scenario is unaffected: its verify passed before smoke ran.
+2. **The derived wall budget self-calibrates from the build, not the plan.**
+   `max(plan-phase wall, 30m floor, 2 × slowest builder invocation)` — the
+   new `build_ms_max_invocation` telemetry makes the bound a multiple of the
+   model's own observed pace: two checkpoint-less invocations of the slowest
+   observed length is the thrash signature. The 30-minute floor now binds
+   only when every invocation was shorter than 15 minutes — fast models,
+   exactly where the floor is sane. A slow first invocation on a local model
+   can no longer be killed by a floor sized for a cloud one, and a resume
+   persisted mid-thrash un-wedges itself (the recorded invocation raises the
+   derived budget).
+3. **Budget exhaustion with a green tree lands softly.** The old stop flipped
+   the run to `failed` with verified work uncommitted — while the attempt-cap
+   path right beside it soft-passes and commits. The budget stop now mirrors
+   it: `verify_ok` green and no standing blocker → commit as a soft-pass,
+   then stop the run as `stopped` (a stop-for-human, not a failure). A red
+   tree or a standing blocker keeps the hard fail.
+4. **The step budget's scaling was decorative.** `resolveStepBudget` was
+   `max(80, contextTokens/2000)`: below a 160k window the floor always won
+   (64k → 32), so "80" was a constant wearing a formula. It is now
+   `max(120, contextTokens/1000)` — 120 because this ADR's incident ticket
+   needed 95 steps and a routine first ticket already uses ~50.
+
+Two smoke-gate repairs ride along, both from the snake incident's root cause
+(`timeout 5 cargo run --release` on a windowed game — a command that can
+never pass): every smoke outcome now prints to the console (the phase
+previously wrote only to `ticket.logs`, which is why the run's log read
+"verify PASS, then died for no reason"), and exit code 124 — GNU
+`timeout(1)`'s kill code — is treated as the success it is for a
+run-until-killed app, identical to `runSmoke`'s own `timedOut` path. A panic
+signature in the output still fails first.

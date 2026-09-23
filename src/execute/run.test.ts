@@ -5871,6 +5871,140 @@ describe("ADR 0040 — blocked exit and per-ticket budget", () => {
     expect(t.ticketState.logs.join("\n")).toContain("wall budget exhausted");
   });
 
+  it("per-ticket wall budget: a green checkpoint restarts the wall clock — a slow but progressing ticket is not stopped", async () => {
+    // The snake-run-20260923 shape: cumulative builder wall far over budget,
+    // but the last invocation checkpointed green. The retry the smoke failure
+    // asked for must be allowed — the budget bounds thrash, and thrash by
+    // definition produces no checkpoints.
+    const t = await blockedRepo({ ticket_wall_sec: 60 });
+    t.ticketState.build_ms_total = 600_000; // 10m cumulative — far over the 60s budget
+    t.ticketState.build_ms_since_checkpoint = 0; // green checkpoint just landed
+    let buildCalls = 0;
+    mockExec.mockImplementation(async (_prompt, options) => {
+      if (options.phaseFile.endsWith("-build")) {
+        buildCalls++;
+        await writeImplementedFile(t.cwd);
+        await emitText(t.ledgerDir, options.phaseFile, "$CHECKPOINT ticket=01");
+        return t.checkpointOk();
+      }
+      if (kindOf(options) === "review") {
+        await emitText(t.ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
+      } else {
+        await emitText(t.ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const outcome = await processTicket(t.state, t.ledgerDir, t.ticketState);
+
+    expect(buildCalls).toBe(1);
+    expect(outcome).toBe("ok");
+    expect(t.ticketState.status).toBe("committed");
+  });
+
+  it("per-ticket wall budget: a checkpoint whose verify FAILS does not restart the wall clock — premature-checkpoint thrash stays bounded", async () => {
+    // The reset lives on the verify-green path, not the checkpoint marker:
+    // a model emitting $CHECKPOINT for work verify rejects must not clear
+    // the budget that exists to bound exactly that thrash.
+    const t = await blockedRepo({ ticket_wall_sec: 60, verify: ["false"] });
+    let buildCalls = 0;
+    mockExec.mockImplementation(async (_prompt, options) => {
+      if (options.phaseFile.endsWith("-build")) {
+        buildCalls++;
+        await writeImplementedFile(t.cwd);
+        await emitText(t.ledgerDir, options.phaseFile, "$CHECKPOINT ticket=01");
+        return { ...t.checkpointOk(), durationMs: 70_000 };
+      }
+      return okResult();
+    });
+
+    const outcome = await processTicket(t.state, t.ledgerDir, t.ticketState);
+
+    expect(outcome).toBe("failed");
+    expect(buildCalls).toBe(1);
+    expect(t.ticketState.verify_ok).toBe(false);
+    expect(t.ticketState.logs.join("\n")).toContain("wall budget exhausted");
+  });
+
+  it("per-ticket budget exhausted with a GREEN tree: commits the verified work as a soft-pass and stops the run for a human", async () => {
+    // The attempt-cap path soft-passes working code when out of runway; the
+    // budget path must land the same way — a green tree is not a failure.
+    // Here: a light-mode MAJOR spends its one corrective attempt, and the
+    // retry boundary finds the cumulative step budget spent.
+    const t = await blockedRepo({ ticket_step_budget: 5, code_review: { mode: "light" } });
+    let buildCalls = 0;
+    mockExec.mockImplementation(async (_prompt, options) => {
+      if (options.phaseFile.endsWith("-build")) {
+        buildCalls++;
+        await writeImplementedFile(t.cwd);
+        await emitText(t.ledgerDir, options.phaseFile, "$CHECKPOINT ticket=01");
+        return { ...t.checkpointOk(), steps: 5 };
+      }
+      if (kindOf(options) === "review") {
+        await emitText(t.ledgerDir, options.phaseFile, "$BLOCKING\n[MAJOR] cosmetic gap\n$NITS\nNONE\n$OK\nmeh");
+      } else {
+        await emitText(t.ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const outcome = await processTicket(t.state, t.ledgerDir, t.ticketState);
+
+    // "failed" is how the frontier loop hears stop-and-break; the preset
+    // terminal "stopped" status survives it (isFinished), as with a halt.
+    expect(outcome).toBe("failed");
+    expect(buildCalls).toBe(1);
+    expect(t.ticketState.status).toBe("committed");
+    expect(t.ticketState.commit).toBeTruthy();
+    expect(t.state.status).toBe("stopped");
+    expect(t.state.stop_reason).toContain("step budget exhausted");
+    expect(t.ticketState.logs.join("\n")).toContain("green tree");
+  });
+
+  it("ticketBudgetStop: the wall clock restarts at a green verify — cumulative wall no longer stops a progressing ticket", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const state = await makeState(cwd, ticketsDir, baseConfig({ ticket_wall_sec: 60, ticket_step_budget: 0 }));
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    ticketState.build_ms_total = 3_600_000; // an hour cumulative
+    // A green verify just landed: 30s on the fresh clock — within budget.
+    ticketState.build_ms_since_checkpoint = 30_000;
+    expect(ticketBudgetStop(state, ticketState)).toBeNull();
+    // The fresh clock over budget stops, naming the verify-green span.
+    ticketState.build_ms_since_checkpoint = 60_000;
+    expect(ticketBudgetStop(state, ticketState)).toContain("wall budget exhausted");
+    expect(ticketBudgetStop(state, ticketState)).toContain("since the last green verify");
+    // No green round yet: the cumulative total governs, with the original wording.
+    ticketState.build_ms_since_checkpoint = undefined;
+    expect(ticketBudgetStop(state, ticketState)).toContain("across all builder invocations");
+  });
+
+  it("ticketBudgetStop: the derived wall budget self-calibrates from the slowest observed invocation", async () => {
+    // The snake-run ticket 01 shape: no usable plan ledger, a 35m healthy
+    // invocation on an 11 tok/s model. The old fixed 30m floor killed it;
+    // the derived budget is max(plan wall, 30m floor, 2 × slowest invocation).
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const state = await makeState(cwd, ticketsDir, baseConfig({ ticket_step_budget: 0, ticket_wall_sec: null }));
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    // No invocation measured yet: the 30m floor alone governs.
+    ticketState.build_ms_total = 31 * 60_000;
+    expect(ticketBudgetStop(state, ticketState)).toContain("wall budget exhausted");
+    // One 35m invocation observed: the budget rises to 70m — a second
+    // checkpoint-less attempt of the same length is allowed.
+    ticketState.build_ms_max_invocation = 35 * 60_000;
+    ticketState.build_ms_total = 35 * 60_000;
+    expect(ticketBudgetStop(state, ticketState)).toBeNull();
+    // Two full checkpoint-less invocations of that length IS the thrash
+    // signature the budget exists to stop.
+    ticketState.build_ms_total = 71 * 60_000;
+    expect(ticketBudgetStop(state, ticketState)).toContain("wall budget exhausted");
+    // An explicit config still wins over the derivation.
+    const explicit = await makeState(cwd, ticketsDir, baseConfig({ ticket_step_budget: 0, ticket_wall_sec: 60 }));
+    ticketState.build_ms_total = 61_000;
+    expect(ticketBudgetStop(explicit, ticketState)).toContain("wall budget exhausted");
+  });
+
   it("ticketBudgetStop: defaults scale from the plan — steps 2x max_phase_steps, wall measured from the plan ledger", async () => {
     const cwd = await freshRepo();
     const ticketsDir = ticketsDirOf(cwd);

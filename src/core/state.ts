@@ -162,6 +162,20 @@ export interface TicketState {
    * against the plan-scaled per-ticket budget. */
   build_ms_total?: number;
   build_steps_total?: number;
+  /** ADR 0040 (amended): builder wall-clock since the last green verify. The
+   * wall budget exists to bound thrash, and thrash by definition produces
+   * nothing green — a verify-passing round is externally validated progress,
+   * so it restarts this clock while `build_steps_total` stays cumulative.
+   * Undefined until the first invocation lands; the budget check falls back
+   * to `build_ms_total`, which is identical up to that point. */
+  build_ms_since_checkpoint?: number;
+  /** ADR 0040 (amended): the slowest single builder invocation's wall ms.
+   * The derived wall budget scales from it (see WALL_BUDGET_INVOCATION_MULTIPLE
+   * in run.ts) so a slow model's legitimate work self-calibrates the bound —
+   * the plan phase's wall cannot (planning and building differ by an order of
+   * magnitude in wall-per-unit-work), and a fixed floor sized for fast cloud
+   * models is smaller than one healthy invocation on a slow local model. */
+  build_ms_max_invocation?: number;
   /** ADR 0040: every terminal `$BLOCKED` report this ticket produced, in
    * order — the reason is surfaced in the report and a second
    * implementation-stuck block fails the ticket. */

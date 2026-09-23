@@ -581,15 +581,32 @@ function isBlockedResult(r: ImplementResult): r is { ok: false; blocked: BlockRe
   return r.ok === false && "blocked" in r;
 }
 
-/** ADR 0040: the floor under the plan-derived wall budget (the plan may have
- * been produced long ago, or without a ledger). */
+/** ADR 0040: the floor under the derived wall budget. Only ever binds when
+ * every invocation so far was shorter than half of it (see the invocation
+ * multiple below) — i.e. on fast models, exactly where 30 minutes is sane. */
 const MIN_TICKET_WALL_MS = 30 * 60 * 1000;
 
+/** ADR 0040 (amended): the wall budget bounds checkpoint-less THRASH, so it
+ * is sized in units of the slowest observed builder invocation: two full
+ * invocations with no green verify between them is the thrash signature the
+ * budget exists to stop. An absolute bound cannot calibrate — the plan
+ * phase's wall is an order of magnitude off build wall, and a fixed floor
+ * sized for fast cloud models is smaller than one healthy invocation on a
+ * slow local model (the snake-run ticket 01 kill: 35m of green work stopped
+ * against a 30m floor). */
+const WALL_BUDGET_INVOCATION_MULTIPLE = 2;
+
 /** ADR 0040: whether this ticket has exhausted its cumulative builder budget.
- * Both budgets scale from the plan: steps from `max_phase_steps` (itself
- * derived from the plan/context size), wall from the measured plan-phase wall
- * time (same model, same repo) with a 30-minute floor. Explicit config wins;
- * `0` disables either; returning null means "within budget". */
+ * Steps derive from `max_phase_steps` (itself scaled from the context size);
+ * the wall derivation is `max(plan-phase wall, 30m floor, 2 × slowest builder
+ * invocation)`. Explicit config wins; `0` disables either; returning null
+ * means "within budget".
+ *
+ * Amended: the WALL check reads time since the last green verify (falling
+ * back to the cumulative total before any invocation has landed). The budget
+ * exists to bound thrash, and thrash produces nothing green — a ticket that
+ * keeps passing verify is progressing and must not be stopped for being
+ * slow. The STEP budget stays cumulative across checkpoints. */
 export function ticketBudgetStop(state: RunState, ticket: TicketState): string | null {
   const cfg = state.config;
   const stepBudget = cfg.ticket_step_budget === 0
@@ -600,14 +617,18 @@ export function ticketBudgetStop(state: RunState, ticket: TicketState): string |
     ? null
     : cfg.ticket_wall_sec != null
       ? cfg.ticket_wall_sec * 1000
-      : Math.max(planWallMs ?? 0, MIN_TICKET_WALL_MS);
+      : Math.max(planWallMs ?? 0, MIN_TICKET_WALL_MS, WALL_BUDGET_INVOCATION_MULTIPLE * (ticket.build_ms_max_invocation ?? 0));
   const steps = ticket.build_steps_total ?? 0;
   if (stepBudget !== null && steps >= stepBudget) {
     return `ticket step budget exhausted (${steps}/${stepBudget} steps across all builder invocations) — stopping instead of retrying`;
   }
-  const ms = ticket.build_ms_total ?? 0;
+  const sinceCheckpoint = ticket.build_ms_since_checkpoint !== undefined;
+  const ms = sinceCheckpoint ? ticket.build_ms_since_checkpoint! : (ticket.build_ms_total ?? 0);
   if (wallMs !== null && ms >= wallMs) {
-    return `ticket wall budget exhausted (${Math.round(ms / 60000)}m/${Math.round(wallMs / 60000)}m across all builder invocations) — stopping instead of retrying`;
+    const span = sinceCheckpoint
+      ? `${Math.round(ms / 60000)}m/${Math.round(wallMs / 60000)}m since the last green verify`
+      : `${Math.round(ms / 60000)}m/${Math.round(wallMs / 60000)}m across all builder invocations`;
+    return `ticket wall budget exhausted (${span}) — stopping instead of retrying`;
   }
   return null;
 }
@@ -884,6 +905,30 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
     // the cap the way the per-process step budget could.
     const budgetStop = ticketBudgetStop(state, ticket);
     if (budgetStop) {
+      // ADR 0040 (amended): budget exhaustion with a GREEN tree is not a
+      // failure — it is the attempt-cap soft-pass's twin (out of runway,
+      // working code). Commit the verified work so the progress is durable,
+      // then stop the run for a human: exhaustion means something unusual
+      // happened, so the run must not silently continue — but a green tree
+      // must not be reported as failed either. A red tree (or a standing
+      // blocker) keeps the hard fail below.
+      if (ticket.verify_ok === true && severityOf(lastBlockingFindings) !== "blocker") {
+        ticket.logs.push(`budget exhausted with a green tree — committing the verified work, then stopping for a human: ${budgetStop}`);
+        const msg = `${ticket.number} — ${ticket.title}`;
+        ticket.commit = await git.commitOrReuseHead(state.cwd, msg);
+        const reused = ticket.commit === ticket.start_commit;
+        if (implementPhaseFiles.size > 0) ticket.context = await summarizePhaseFiles(ledger, implementPhaseFiles);
+        const commitOutcome = await committedTicket(state, ledger, ticket, parsed, msg, reused, "soft-pass");
+        if (commitOutcome === "failed") return "failed";
+        state.status = "stopped";
+        state.stop_reason = `ticket ${ticket.number}: ${budgetStop} — verified work committed; review the budget, then resume`;
+        await writeState(ledger, state);
+        console.log(`[${nowClock()}]   ${ticket.number} ${budgetStop} — green work committed; run stopped for a human`);
+        // The frontier loop treats "failed" as stop-and-break; the preset
+        // terminal `stopped` status survives it (isFinished), same pattern as
+        // the halt path.
+        return "failed";
+      }
       ticket.logs.push(`FAILED: ${budgetStop}`);
       console.log(`[${nowClock()}]   ${ticket.number} ${budgetStop}`);
       state.status = state.pause_on_failure ? "stopped" : "failed";
@@ -1368,6 +1413,14 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
       }
     }
 
+    // ADR 0040 (amended): verify-green is the externally validated progress
+    // signal that restarts the ticket's wall clock — NOT the bare checkpoint
+    // marker (a premature checkpoint whose verify fails would otherwise reset
+    // the very budget that exists to bound that thrash). Reaching this line
+    // means verify passed, on this round or via a reconcile re-verify. The
+    // step budget stays cumulative: total work remains bounded.
+    ticket.build_ms_since_checkpoint = 0;
+
     // Smoke (binary-launch): runs only when the config declared a launch
     // command AND a framework recipe matched. Stronger than verify — a Bevy
     // app whose `cargo build` is green can still panic on frame 1 (the
@@ -1397,6 +1450,18 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
             : boundedLog(`smoke ${smokePhase} ${failReason}`, smokeBlob),
       );
       await writeState(ledger, state);
+
+      // Smoke outcomes must reach the console, not just ticket.logs — a
+      // silent smoke retry once read as "verify PASS, then the run died for
+      // no reason" (the snake-run ticket 01 budget kill hid exactly this).
+      if (s.ok) {
+        console.log(`[${nowClock()}]   ${ticket.number} smoke ✓ PASS${s.timedOut ? " (still running at the timeout — a launched app is the success case)" : ""}`);
+      } else if (s.notFound) {
+        console.log(`[${nowClock()}]   ${ticket.number} smoke ⊘ skipped (command not found — feature not built yet)`);
+      } else {
+        const tail = smokeBlob.trim().split("\n").filter((l) => l.trim()).slice(-3).join(" | ");
+        console.log(`[${nowClock()}]   ${ticket.number} smoke ✗ ${failReason}: ${tail.slice(0, 300)}`);
+      }
 
       if (!s.ok && !s.notFound) {
         const smokSummarizeResult = await withFailureLadderOnThrow(
@@ -2282,6 +2347,16 @@ async function runBuilderStep(
   // loop's budget check is what makes the cap real per ticket.
   ticket.build_ms_total = (ticket.build_ms_total ?? 0) + result.durationMs;
   ticket.build_steps_total = (ticket.build_steps_total ?? 0) + result.steps;
+  // ADR 0040 (amended): the wall clock the budget actually checks — time
+  // since the last green verify (the verify-green path in processTicket
+  // restarts it; a bare checkpoint marker must not, because a premature
+  // checkpoint that fails verify would otherwise reset the very budget that
+  // exists to bound that thrash). The cumulative totals above stay telemetry.
+  ticket.build_ms_since_checkpoint = (ticket.build_ms_since_checkpoint ?? 0) + result.durationMs;
+  // The slowest invocation sizes the derived wall budget (two checkpoint-less
+  // invocations of the slowest observed length = thrash), so the bound
+  // self-calibrates to the model's actual speed instead of a fixed floor.
+  ticket.build_ms_max_invocation = Math.max(ticket.build_ms_max_invocation ?? 0, result.durationMs);
 
   // gh #111: a halt mid-build is an honest stop, not a failure — propagate it
   // out of the builder engine so the run loop applies the halt directly.
@@ -2322,7 +2397,7 @@ async function runBuilderStep(
   const sessionBit = result.sessionId ? ` · session ${result.sessionId.slice(0, 8)}` : "";
   ticket.logs.push(`build ${phaseFile}: checkpoint ${markerTicket} (${result.steps} steps, ${result.totalOutputTokens} output tokens${sessionBit})`);
   console.log(
-    `[${nowClock()}]   ${ticket.number} build ✓ checkpoint ${markerTicket} — ${result.steps} steps · est ${(result.inFlightTokens / 1000).toFixed(1)}k${sessionBit} · ${builder.checkpoint_count + 1} checkpoints`,
+    `[${nowClock()}]   ${ticket.number} build ✓ checkpoint ${markerTicket} — ${result.steps} steps · ctx ${(result.inFlightTokens / 1000).toFixed(1)}k${sessionBit} · ${builder.checkpoint_count + 1} checkpoints`,
   );
   return { ok: true, toolCalls: result.toolCalls };
 }

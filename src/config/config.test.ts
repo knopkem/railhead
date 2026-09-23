@@ -163,24 +163,24 @@ describe("loadConfig", () => {
     expect(cfg.max_phase_steps).toBe(10);
   });
 
-  it("defaults max_phase_steps to 80", async () => {
+  it("defaults max_phase_steps to 120", async () => {
     const cfg = await loadConfig(await makeCwd(null));
-    expect(cfg.max_phase_steps).toBe(80);
+    expect(cfg.max_phase_steps).toBe(120);
   });
 
-  it("scales max_phase_steps from max_context_tokens (64k → 80, floored)", async () => {
+  it("scales max_phase_steps from max_context_tokens (64k → 120, floored)", async () => {
     const cfg = await loadConfig(await makeCwd('{"max_context_tokens":64000}'));
-    expect(cfg.max_phase_steps).toBe(80);
+    expect(cfg.max_phase_steps).toBe(120);
   });
 
-  it("scales max_phase_steps from max_context_tokens (128k → 80, floored)", async () => {
+  it("scales max_phase_steps from max_context_tokens (128k → 128)", async () => {
     const cfg = await loadConfig(await makeCwd('{"max_context_tokens":128000}'));
-    expect(cfg.max_phase_steps).toBe(80);
+    expect(cfg.max_phase_steps).toBe(128);
   });
 
-  it("scales max_phase_steps from max_context_tokens (250k → 125)", async () => {
+  it("scales max_phase_steps from max_context_tokens (250k → 250)", async () => {
     const cfg = await loadConfig(await makeCwd('{"max_context_tokens":250000}'));
-    expect(cfg.max_phase_steps).toBe(125);
+    expect(cfg.max_phase_steps).toBe(250);
   });
 
   it("explicit max_phase_steps overrides scaling even with context budget set", async () => {

@@ -257,25 +257,26 @@ export interface ExecResult {
   durationMs: number;
   /** Number of opencode steps completed (step_start events seen). */
   steps: number;
-  /** Peak input-token count seen across all step_finish events. Issue #82:
-   * this is the finished-step truth — it only moves when a step COMPLETES,
-   * so during a long step that thrashes toward an OOM it is stale (it can
-   * underread the request actually being assembled by multiples). The live
-   * number to watch is `inFlightTokens`. */
+  /** Peak complete-context size seen across all step_finish events — input
+   * plus cache-read and cache-write tokens, the full request the window must
+   * hold. Issue #82: this is the finished-step truth — it only moves when a
+   * step COMPLETES, so during a long step that thrashes toward an OOM it is
+   * stale (it can underread the request actually being assembled by
+   * multiples). The live number to watch is `inFlightTokens`. */
   peakTokens: number;
   /** Issue #82: the railhead's running estimate of the request currently
-   * being assembled — the last reported step_finish input (or the pre-flight
-   * prompt estimate before any step completed) plus the tokens of every
-   * text/reasoning/tool event streamed since. Where `peakTokens` is stale
-   * mid-step, this rises with the content that will form the next request.
-   * On a kill it is the size the guard saw; on a normal finish it converges
-   * to the last reported input. */
+   * being assembled — the last reported step_finish complete context (or the
+   * pre-flight prompt estimate before any step completed) plus the tokens of
+   * every text/reasoning/tool event streamed since. Where `peakTokens` is
+   * stale mid-step, this rises with the content that will form the next
+   * request. On a kill it is the size the guard saw; on a normal finish it
+   * converges to the last reported complete context. */
   inFlightTokens: number;
-  /** Issue #82: at the last step_finish, the server's reported input tokens
-   * minus the railhead's pre-reconcile estimate of that request. Non-zero is
-   * expected — the server counts template/KV terms the railhead cannot see —
-   * and a systematically large magnitude is the signal for a calibration
-   * factor. 0 when no step has reported input tokens yet. */
+  /** Issue #82: at the last step_finish, the server's reported complete
+   * context minus the railhead's pre-reconcile estimate of that request.
+   * Non-zero is expected — the server counts template/KV terms the railhead
+   * cannot see — and a systematically large magnitude is the signal for a
+   * calibration factor. 0 when no step has reported context tokens yet. */
   estimateDriftTokens: number;
   /** Sum of output tokens across all step_finish events. */
   totalOutputTokens: number;
@@ -655,18 +656,24 @@ export async function executeOpendCode(
   let peakTokens = 0;
   // Issue #82: the streaming in-flight estimate. `reconcileBase` is ground
   // truth — the prompt estimate until the first step reports, then the last
-  // reported step_finish input; `streamedTokens` is the token cost of every
-  // text/reasoning/tool event that has arrived since that anchor. Their sum
-  // estimates the request being assembled, so it rises mid-step where
-  // `peakTokens` is frozen. Each step_finish reconciles the anchor to the
-  // server's reported input (reported is ground truth for the completed
-  // request) and the difference is captured as drift telemetry — rebasing
-  // instead of accumulating keeps the estimate from drifting with every step.
+  // reported step_finish COMPLETE context (fresh input + cache-read/write);
+  // `streamedTokens` is the token cost of every text/reasoning/tool event
+  // that has arrived since that anchor. Their sum estimates the request being
+  // assembled, so it rises mid-step where `peakTokens` is frozen. Each
+  // step_finish reconciles the anchor to the server's reported context
+  // (reported is ground truth for the completed request) and the difference
+  // is captured as drift telemetry — rebasing instead of accumulating keeps
+  // the estimate from drifting with every step.
   let reconcileBase = promptTokens;
   let streamedTokens = 0;
   let estimateDriftTokens = 0;
   let totalOutputTokens = 0;
   let generationMs = 0;
+  // Per-finished-step (output tokens, generation ms) records feeding the
+  // heartbeat's rolling throughput window — the phase-lifetime average cannot
+  // move within a step and reads stale after any rate change.
+  const RATE_WINDOW_STEPS = 10;
+  const stepRates: { out: number; genMs: number }[] = [];
   let firstGenTs: number | null = null;
   let lastGenTs: number | null = null;
   let stepStartEventTs: number | null = null;
@@ -923,25 +930,25 @@ export async function executeOpendCode(
             return;
           }
         }
-        const t = inputTokensOf(line);
-        if (t != null) {
-          peakTokens = Math.max(peakTokens, t);
-          // Issue #82 reconcile: the reported input is ground truth for the
+        const reportedCtx = contextTokensOf(line);
+        if (reportedCtx != null) {
+          peakTokens = Math.max(peakTokens, reportedCtx);
+          // Issue #82 reconcile: the reported context is ground truth for the
           // request that just completed. Capture the estimate's drift against
           // it, then rebase the streaming estimate so it converges to the
           // reported number instead of accumulating error across steps. A
-          // zero-input finish is degenerate (model never ran) — leave the
+          // zero-context finish is degenerate (model never ran) — leave the
           // anchor alone rather than collapsing it to nothing.
-          if (t > 0) {
-            estimateDriftTokens = t - (reconcileBase + streamedTokens);
-            reconcileBase = t;
+          if (reportedCtx > 0) {
+            estimateDriftTokens = reportedCtx - (reconcileBase + streamedTokens);
+            reconcileBase = reportedCtx;
             streamedTokens = 0;
           }
         }
         const ot = outputTokensOf(line);
         if (ot != null) totalOutputTokens += ot;
-        if (t === 0 && ot === 0) zeroTokenStep = true;
-        if ((t !== null && t > 0) || (ot !== null && ot > 0)) realTokenStep = true;
+        if (reportedCtx === 0 && ot === 0) zeroTokenStep = true;
+        if ((reportedCtx !== null && reportedCtx > 0) || (ot !== null && ot > 0)) realTokenStep = true;
         const finishReason = stepFinishReasonOf(line);
         if (finishReason !== null) {
           lastStepReason = finishReason;
@@ -1012,12 +1019,16 @@ export async function executeOpendCode(
         }
         if (isStepFinish(line) && typeof parseTimestamp(line) === "number") {
           const finishTs = parseTimestamp(line)!;
+          let stepGenMs = 0;
           if (firstGenTs !== null && lastGenTs !== null) {
-            const delta = lastGenTs - firstGenTs - stepToolMs;
-            if (delta > 0) generationMs += delta;
+            stepGenMs = lastGenTs - firstGenTs - stepToolMs;
           } else if (stepStartEventTs !== null) {
-            const delta = finishTs - stepStartEventTs - stepToolMs;
-            if (delta > 0) generationMs += delta;
+            stepGenMs = finishTs - stepStartEventTs - stepToolMs;
+          }
+          if (stepGenMs > 0) {
+            generationMs += stepGenMs;
+            stepRates.push({ out: ot ?? 0, genMs: stepGenMs });
+            if (stepRates.length > RATE_WINDOW_STEPS) stepRates.shift();
           }
           firstGenTs = null;
           lastGenTs = null;
@@ -1178,22 +1189,23 @@ export async function executeOpendCode(
       ? setInterval(() => {
           const elapsed = Math.round((Date.now() - start) / 1000);
           const stepElapsed = Math.round((Date.now() - stepStart) / 1000);
-          const ctx = peakTokens ? ` peak ${(peakTokens / 1000).toFixed(1)}k` : "";
-          // Issue #82: show the in-flight estimate beside the finished-step
-          // peak. Mid-step it rises with the content streaming into the next
-          // request — the number that matters while a step thrashes toward an
-          // OOM — and it converges to the reported input at each step_finish.
-          const estNow = reconcileBase + streamedTokens;
-          const estBit = estNow > 0 ? ` est ${(estNow / 1000).toFixed(1)}k` : "";
-          // Rate over COMPLETED steps only. The in-flight step's output is not
-          // known until its step_finish, so folding wall-clock-since-its-first-
-          // token into the denominator (the old behaviour) divided a frozen
-          // numerator by a growing clock — a long or slow step collapsed the
-          // displayed rate toward zero. Show the completed-step rate instead.
-          const tps = generationMs > 0 ? ` ${Math.round((totalOutputTokens / generationMs) * 1000)} tok/s` : "";
+          // The context riding on the current request: the last step_finish's
+          // COMPLETE input (fresh + cache-read + cache-write — the bare
+          // `input` field is only the uncached sliver and reads near-zero on
+          // a warm cache) plus the content streamed toward the next request.
+          const ctxNow = reconcileBase + streamedTokens;
+          const ctxBit = ctxNow > 0 ? ` · ctx ${(ctxNow / 1000).toFixed(1)}k` : "";
+          const outBit = totalOutputTokens > 0 ? ` · out ${(totalOutputTokens / 1000).toFixed(1)}k` : "";
+          // Throughput over the recent window of finished steps, not the
+          // phase-lifetime average: the average is dragged by the run's slow
+          // start and cannot move within a step, while the window tracks the
+          // decode rate the model is at right now.
+          const recentOut = stepRates.reduce((n, r) => n + r.out, 0);
+          const recentGenMs = stepRates.reduce((n, r) => n + r.genMs, 0);
+          const tps = recentGenMs > 0 ? ` · ${Math.round((recentOut / recentGenMs) * 1000)} tok/s` : "";
           const stepInfo = ` step ${steps}${stepCap === Infinity ? "" : ` (cap ${stepCap})`}`;
           const p = livePrefix ? `${livePrefix} ` : "";
-          sink(`${p}… running ${elapsed}s (${stepInfo} this step ${stepElapsed}s${ctx}${estBit}${tps})`);
+          sink(`${p}… running ${elapsed}s (${stepInfo} this step ${stepElapsed}s${ctxBit}${outBit}${tps})`);
         }, heartbeatIntervalSec * 1000)
       : null;
 
@@ -1330,18 +1342,24 @@ function isToolRunning(line: string): boolean {
   }
 }
 
-function inputTokensOf(line: string): number | null {
+/** The COMPLETE context a step_finish reports for its request — fresh input
+ * plus cache-read and cache-write tokens. opencode's bare `tokens.input` is
+ * only the uncached sliver (~0 on a warm cache), so keying the budget guards
+ * and the operator's context readout on it underreads the window by the cache
+ * size — the number that decides a context kill must include it. */
+function contextTokensOf(line: string): number | null {
   let ev: Record<string, any>;
   try {
     ev = JSON.parse(line);
   } catch {
     return null;
   }
-  if (ev.type === "step_finish") {
-    const input = ev.part?.tokens?.input;
-    return typeof input === "number" ? input : null;
-  }
-  return null;
+  if (ev.type !== "step_finish") return null;
+  const tokens = ev.part?.tokens;
+  if (typeof tokens?.input !== "number") return null;
+  const read = typeof tokens.cache?.read === "number" ? tokens.cache.read : 0;
+  const write = typeof tokens.cache?.write === "number" ? tokens.cache.write : 0;
+  return tokens.input + read + write;
 }
 
 /** The `reason` field from a `step_finish` event (e.g. "stop", "tool-calls"),

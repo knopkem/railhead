@@ -657,10 +657,11 @@ export const DEFAULT_MAX_REPLANS = 2;
 export const DEFAULT_INFRA_BACKOFF_SEC = [60, 300, 900, 1800];
 
 /** Fallback step budget when no context budget is configured, and the floor
- * for `resolveStepBudget`. 80 is enough for a typical ticket that needs
- * 3-4 verify cycles with file reads and edits between each. Below this,
- * tickets that hit a few bad attempts exhaust steps before completing. */
-const FALLBACK_STEP_BUDGET = 80;
+ * for `resolveStepBudget`. 120 covers a hard ticket on a small model — the
+ * ADR 0040 incident ticket needed 95 steps, and a routine first ticket
+ * already uses ~50, so 80 left less than one retry of headroom. The durable
+ * builder resumes across the cap, so hitting it is wasteful, never fatal. */
+const FALLBACK_STEP_BUDGET = 120;
 
 /** Fraction of the model's nominal context window used as the request ceiling
  * when the user sets no explicit value. Issue #81: the pool is never empty on
@@ -680,19 +681,21 @@ export const DEFAULT_CONTEXT_TOKENS = 64_000;
 
 /**
  * Scale the step budget from the context-token budget. Each model step
- * consumes roughly 2k tokens of output + tool I/O on average (some steps
- * are a one-line text reply, others are a read+write+cargo test sequence).
- * The budget scales linearly so a 250k context gets ~125 steps (enough for
- * a complex ticket that reads many files and iterates on verify) while a
- * 64k context gets ~32 (tight but proportional to what the model can hold).
+ * consumes roughly 1k tokens of output + tool I/O on average (some steps
+ * are a one-line text reply, others are a read+write+test sequence).
+ * The budget scales linearly so a 250k context gets ~250 steps (enough for
+ * a complex ticket that reads many files and iterates on verify) and a
+ * 128k context ~128.
  *
- * Floors at the fallback (80) so small contexts still get enough steps for
- * a normal ticket — the floor is the real default, not the scaled-down value.
+ * Floors at the fallback (120) so small contexts still get enough steps for
+ * a hard ticket — the floor is the real default below a ~120k window; the
+ * old /2000 slope made the scaling dead below 160k (64k → 32, floor wins),
+ * which is why 80 read as an arbitrary constant rather than a derivation.
  */
 export function resolveStepBudget(contextTokens: number | undefined, explicit?: number | null): number {
   if (typeof explicit === "number" && explicit > 0) return explicit;
   if (!contextTokens || contextTokens <= 0) return FALLBACK_STEP_BUDGET;
-  return Math.max(FALLBACK_STEP_BUDGET, Math.round(contextTokens / 2000));
+  return Math.max(FALLBACK_STEP_BUDGET, Math.round(contextTokens / 1000));
 }
 
 export const DEFAULT_CONFIG: RailheadConfig = {
