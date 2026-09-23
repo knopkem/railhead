@@ -71,9 +71,12 @@ export function buildReport(state: RunState, charterInfo?: CharterReportInfo): s
   const ticketsWithCtx = state.tickets.filter((t) => t.context);
   if (ticketsWithCtx.length) {
     const totalOutput = ticketsWithCtx.reduce((s, t) => s + (t.context!.totalOutputTokens ?? 0), 0);
+    const decodeOutput = ticketsWithCtx.reduce((s, t) => s + (t.context!.decodeOutputTokens ?? 0), 0);
     const totalGenMs = ticketsWithCtx.reduce((s, t) => s + (t.context!.generationMs ?? 0), 0);
-    if (totalOutput > 0 && totalGenMs > 0) {
-      lines.push(`- Avg throughput: ${Math.round((totalOutput / totalGenMs) * 1000)} tok/s across ${ticketsWithCtx.length} ticket${ticketsWithCtx.length > 1 ? "s" : ""} (${k(totalOutput)} output tokens in ${(totalGenMs / 1000).toFixed(0)}s generation)`);
+    const totalWallMs = ticketsWithCtx.reduce((s, t) => s + (t.context!.wallMs ?? 0), 0);
+    if (decodeOutput > 0 && totalGenMs > 0) {
+      const e2eBit = totalOutput > 0 && totalWallMs > 0 ? ` · e2e ${((totalOutput / totalWallMs) * 1000).toFixed(1)} tok/s incl. prefill` : "";
+      lines.push(`- Avg decode: ${Math.round((decodeOutput / totalGenMs) * 1000)} tok/s across ${ticketsWithCtx.length} ticket${ticketsWithCtx.length > 1 ? "s" : ""} (${k(decodeOutput)} output tokens in ${(totalGenMs / 1000).toFixed(0)}s decode)${e2eBit}`);
     }
   }
   const codeMode = state.config.code_review?.mode ?? "light";
@@ -175,7 +178,10 @@ export function buildReport(state: RunState, charterInfo?: CharterReportInfo): s
         );
       }
       if (t.context.outputTokensPerSec > 0) {
-        lines.push(`- Throughput: ${t.context.outputTokensPerSec} tok/s (${k(t.context.totalOutputTokens)} output in ${(t.context.generationMs / 1000).toFixed(0)}s generation)`);
+        const e2e = t.context.endToEndTokensPerSec > 0 ? ` · e2e ${t.context.endToEndTokensPerSec} tok/s incl. prefill` : "";
+        lines.push(`- Throughput: ${t.context.outputTokensPerSec} tok/s decode (${k(t.context.decodeOutputTokens ?? t.context.totalOutputTokens)} output in ${(t.context.generationMs / 1000).toFixed(0)}s)${e2e}`);
+      } else if (t.context.endToEndTokensPerSec > 0) {
+        lines.push(`- Throughput: e2e ${t.context.endToEndTokensPerSec} tok/s incl. prefill (decode rate unmeasurable — no streamed text/reasoning)`);
       }
       const budget = state.config.max_context_tokens;
       if (budget && t.context.peakInputTokens > 0) {

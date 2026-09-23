@@ -2,7 +2,7 @@ import { mkdtemp, writeFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, expect, afterEach } from "vitest";
-import { describeExecFailure, executeOpendCode, isQuotaError, isToolTimeout, isTransientError, resetWorkerForTest, writePayloadOf } from "./executor.ts";
+import { describeExecFailure, executeOpendCode, isQuotaError, isToolTimeout, isTransientError, resetWorkerForTest, stepTimingMs, windowedStepRates, writePayloadOf } from "./executor.ts";
 import { estimateTokens } from "./diff-filter.ts";
 import { CHECKPOINT_RE } from "../core/checkpoint.ts";
 
@@ -2327,6 +2327,162 @@ describe("executeOpendCode phase wall-clock cap (#96)", () => {
       });
       expect(result.status).toBe("ok");
       expect(String(result.errorMessage ?? "")).not.toContain("wall-clock:");
+    } finally {
+      restorePath(env.restorePath);
+    }
+  }, 60000);
+});
+
+/**
+ * The heartbeat's tok/s must be a DECODE rate: the window starts at the first
+ * streamed text/reasoning token (which ends prefill) and never at step_start.
+ * A tool-call-only step has no decode anchor — its wall is prefill + decode
+ * and cannot be split from the event stream, so it contributes to the
+ * end-to-end rate only. Merging the wall into the decode denominator is what
+ * made a local run read 1 tok/s on a server decoding at 40-50 tok/s. The
+ * anchor also requires a nonzero observed stream span: a non-streaming
+ * provider delivers the text part as one buffered event just before
+ * step_finish, and dividing by that ~0 window fabricates a huge rate.
+ */
+describe("stepTimingMs", () => {
+  it("decode starts at the first streamed token and excludes tool time; wall starts at step_start", () => {
+    // step_start 0 → 2000ms prefill → text streams 2000→4000 → tool 5000→10000 → finish 10000.
+    const t = stepTimingMs(10000, 0, 2000, 4000, 5000);
+    expect(t.decodeMs).toBe(3000);
+    expect(t.wallMs).toBe(5000);
+  });
+
+  it("returns no decode window for a step that streamed nothing", () => {
+    const t = stepTimingMs(5000, 1000, null, null, 0);
+    expect(t.decodeMs).toBeNull();
+    expect(t.wallMs).toBe(4000);
+  });
+
+  it("returns no decode window when the text arrived as one buffered chunk (non-streaming provider)", () => {
+    // The single text event's timestamp marks the END of decode, not the
+    // first token — anchoring on it would divide by a ~0 window.
+    const t = stepTimingMs(24000, 0, 23990, 23990, 0);
+    expect(t.decodeMs).toBeNull();
+    expect(t.wallMs).toBe(24000);
+  });
+
+  it("returns no wall when the step_start timestamp is missing", () => {
+    const t = stepTimingMs(5000, null, 2000, 3000, 0);
+    expect(t.decodeMs).toBe(3000);
+    expect(t.wallMs).toBeNull();
+  });
+
+  it("nulls a window the measured tool time fully consumes", () => {
+    const t = stepTimingMs(5000, 0, 2000, 4000, 4000);
+    expect(t.decodeMs).toBeNull();
+    expect(t.wallMs).toBe(1000);
+  });
+});
+
+describe("windowedStepRates", () => {
+  it("returns null rates for an empty window", () => {
+    expect(windowedStepRates([])).toEqual({ decodeTokPerSec: null, e2eTokPerSec: null });
+  });
+
+  it("pairs each rate's numerator with its own denominator across mixed steps", () => {
+    // Anchored step: 100 tokens over a 2000ms decode window → 50 tok/s.
+    // Unanchored step: 900 tokens over a 30000ms wall → e2e only.
+    // E2e: (100+900) tokens over (10000+30000)ms → 25 tok/s.
+    const rates = windowedStepRates([
+      { out: 100, decodeMs: 2000, wallMs: 10000 },
+      { out: 900, decodeMs: null, wallMs: 30000 },
+    ]);
+    expect(rates.decodeTokPerSec).toBe(50);
+    expect(rates.e2eTokPerSec).toBe(25);
+  });
+
+  it("reports no decode rate when every step in the window streamed nothing", () => {
+    const rates = windowedStepRates([
+      { out: 100, decodeMs: null, wallMs: 4000 },
+      { out: 100, decodeMs: null, wallMs: 4000 },
+    ]);
+    expect(rates.decodeTokPerSec).toBeNull();
+    expect(rates.e2eTokPerSec).toBe(25);
+  });
+});
+
+describe("executeOpendCode heartbeat throughput", () => {
+  // Event timestamps are baked with fixed offsets: the rate windows only use
+  // RELATIVE differences, so the assertions below are exact regardless of
+  // when the fake opencode process actually starts.
+  const startAt = (ts: number) =>
+    JSON.stringify({ type: "step_start", timestamp: ts, part: { type: "step-start", id: "p1", messageID: "m1", sessionID: "s1", snapshot: "x" } });
+  const finishAt = (ts: number, output: number) =>
+    JSON.stringify({ type: "step_finish", timestamp: ts, part: { type: "step-finish", id: "p2", messageID: "m1", sessionID: "s1", reason: "tool-calls", tokens: { input: 100, output }, cost: 0 } });
+  const textAt = (ts: number) =>
+    JSON.stringify({ type: "text", timestamp: ts, part: { type: "text", id: "t1", messageID: "m1", sessionID: "s1", text: "hello" } });
+
+  it("shows the decode tok/s and the e2e tok/s separately once a streaming step has finished", async () => {
+    // Step 1: step_start t0, 200ms prefill, text streams t0+200→t0+300,
+    // step_finish at t0+400 with 10 output tokens → decode 10 tok / 200ms =
+    // 50 tok/s, e2e 10 tok / 400ms = 25 tok/s. Step 2 hangs so heartbeats
+    // fire with step 1 in the rate window.
+    const t0 = Date.now();
+    const esc = (s: string) => s.replace(/'/g, "'\\''");
+    const emitter = `printf '%s\\n' '${esc(startAt(t0))}' ; sleep 0.2 ; printf '%s\\n' '${esc(textAt(t0 + 200))}' ; sleep 0.1 ; printf '%s\\n' '${esc(textAt(t0 + 300))}' ; sleep 0.1 ; printf '%s\\n' '${esc(finishAt(t0 + 400, 10))}' ; printf '%s\\n' '${esc(startAt(t0 + 400))}' ; sleep 5 ; exit 0`;
+    const env = await makeFakeOpencode(emitter);
+    const lines: string[] = [];
+    try {
+      const result = await executeOpendCode("test prompt", {
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "hb-rate-decode",
+        model: null,
+        stallTimeoutSec: null,
+        maxStepModelSec: null,
+        heartbeat: true,
+        heartbeatIntervalSec: 0.3,
+        liveSink: (line: string) => {
+          if (line.includes("running")) lines.push(line);
+        },
+      });
+      expect(result.status).toBe("ok");
+      const withRates = lines.filter((l) => l.includes("tok/s"));
+      expect(withRates.length).toBeGreaterThanOrEqual(1);
+      for (const l of withRates) {
+        expect(l).toContain("· 50 tok/s");
+        expect(l).toContain("· e2e 25.0 tok/s");
+      }
+    } finally {
+      restorePath(env.restorePath);
+    }
+  }, 60000);
+
+  it("shows only the e2e rate when the finished steps streamed no text (prefill never feeds tok/s)", async () => {
+    // Step 1 emits no text/reasoning: its 400ms wall is prefill + decode and
+    // cannot be split, so it feeds the e2e rate only — 10 tok / 400ms = 25.
+    const t0 = Date.now();
+    const esc = (s: string) => s.replace(/'/g, "'\\''");
+    const emitter = `printf '%s\\n' '${esc(startAt(t0))}' ; sleep 0.4 ; printf '%s\\n' '${esc(finishAt(t0 + 400, 10))}' ; printf '%s\\n' '${esc(startAt(t0 + 400))}' ; sleep 5 ; exit 0`;
+    const env = await makeFakeOpencode(emitter);
+    const lines: string[] = [];
+    try {
+      const result = await executeOpendCode("test prompt", {
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "hb-rate-e2e-only",
+        model: null,
+        stallTimeoutSec: null,
+        maxStepModelSec: null,
+        heartbeat: true,
+        heartbeatIntervalSec: 0.3,
+        liveSink: (line: string) => {
+          if (line.includes("running")) lines.push(line);
+        },
+      });
+      expect(result.status).toBe("ok");
+      const withRates = lines.filter((l) => l.includes("tok/s"));
+      expect(withRates.length).toBeGreaterThanOrEqual(1);
+      for (const l of withRates) {
+        expect(l).toContain("· e2e 25.0 tok/s");
+        // No bare decode bit: "· <digits> tok/s" must not appear.
+        expect(l).not.toMatch(/· \d+ tok\/s/);
+      }
     } finally {
       restorePath(env.restorePath);
     }

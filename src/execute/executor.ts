@@ -280,9 +280,10 @@ export interface ExecResult {
   estimateDriftTokens: number;
   /** Sum of output tokens across all step_finish events. */
   totalOutputTokens: number;
-  /** Total generation time in ms — per step, the first→last activity span
-   * minus that step's tool-execution time (so a slow `npm test` inside a step
-   * is not counted as model generation). */
+  /** Total DECODE time in ms — per step, the span from the first streamed
+   * text/reasoning token to step_finish minus that step's tool-execution
+   * time (so prefill and a slow `npm test` inside the step are both excluded).
+   * Steps that stream nothing contribute nothing. */
   generationMs: number;
   /** Number of terminal tool calls the phase made (tool_use events with a
    * completed/error state). Issue #69: an implementer that made ZERO tool
@@ -669,11 +670,15 @@ export async function executeOpendCode(
   let estimateDriftTokens = 0;
   let totalOutputTokens = 0;
   let generationMs = 0;
-  // Per-finished-step (output tokens, generation ms) records feeding the
-  // heartbeat's rolling throughput window — the phase-lifetime average cannot
-  // move within a step and reads stale after any rate change.
+  // Per-finished-step rate samples feeding the heartbeat's rolling throughput
+  // window — the phase-lifetime average cannot move within a step and reads
+  // stale after any rate change. Each sample carries the DECODE window
+  // (first streamed token → step end, minus tool time; null when the step
+  // streamed nothing) and the step WALL (step_start → step end, minus tool
+  // time) separately: the decode rate must never see prefill, and a step
+  // whose prefill cannot be separated out contributes to the e2e rate only.
   const RATE_WINDOW_STEPS = 10;
-  const stepRates: { out: number; genMs: number }[] = [];
+  const stepRates: { out: number; decodeMs: number | null; wallMs: number | null }[] = [];
   let firstGenTs: number | null = null;
   let lastGenTs: number | null = null;
   let stepStartEventTs: number | null = null;
@@ -1019,15 +1024,10 @@ export async function executeOpendCode(
         }
         if (isStepFinish(line) && typeof parseTimestamp(line) === "number") {
           const finishTs = parseTimestamp(line)!;
-          let stepGenMs = 0;
-          if (firstGenTs !== null && lastGenTs !== null) {
-            stepGenMs = lastGenTs - firstGenTs - stepToolMs;
-          } else if (stepStartEventTs !== null) {
-            stepGenMs = finishTs - stepStartEventTs - stepToolMs;
-          }
-          if (stepGenMs > 0) {
-            generationMs += stepGenMs;
-            stepRates.push({ out: ot ?? 0, genMs: stepGenMs });
+          const timing = stepTimingMs(finishTs, stepStartEventTs, firstGenTs, lastGenTs, stepToolMs);
+          if (timing.decodeMs !== null) generationMs += timing.decodeMs;
+          if (timing.decodeMs !== null || timing.wallMs !== null) {
+            stepRates.push({ out: ot ?? 0, decodeMs: timing.decodeMs, wallMs: timing.wallMs });
             if (stepRates.length > RATE_WINDOW_STEPS) stepRates.shift();
           }
           firstGenTs = null;
@@ -1199,13 +1199,16 @@ export async function executeOpendCode(
           // Throughput over the recent window of finished steps, not the
           // phase-lifetime average: the average is dragged by the run's slow
           // start and cannot move within a step, while the window tracks the
-          // decode rate the model is at right now.
-          const recentOut = stepRates.reduce((n, r) => n + r.out, 0);
-          const recentGenMs = stepRates.reduce((n, r) => n + r.genMs, 0);
-          const tps = recentGenMs > 0 ? ` · ${Math.round((recentOut / recentGenMs) * 1000)} tok/s` : "";
+          // rate the model is at right now. Decode and end-to-end are reported
+          // separately — the decode rate never includes prefill (steps that
+          // streamed nothing have no decode anchor and feed the e2e rate
+          // only), so a local server chewing a large context reads honestly.
+          const rates = windowedStepRates(stepRates);
+          const decodeBit = rates.decodeTokPerSec !== null ? ` · ${rates.decodeTokPerSec} tok/s` : "";
+          const e2eBit = rates.e2eTokPerSec !== null ? ` · e2e ${rates.e2eTokPerSec.toFixed(1)} tok/s` : "";
           const stepInfo = ` step ${steps}${stepCap === Infinity ? "" : ` (cap ${stepCap})`}`;
           const p = livePrefix ? `${livePrefix} ` : "";
-          sink(`${p}… running ${elapsed}s (${stepInfo} this step ${stepElapsed}s${ctxBit}${outBit}${tps})`);
+          sink(`${p}… running ${elapsed}s (${stepInfo} this step ${stepElapsed}s${ctxBit}${outBit}${decodeBit}${e2eBit})`);
         }, heartbeatIntervalSec * 1000)
       : null;
 
@@ -1472,6 +1475,64 @@ function toolExecMsOf(line: string): number | null {
     }
   } catch { /* ignore */ }
   return null;
+}
+
+/** A finished step's two timing windows, derived from the event timestamps.
+ * `decodeMs` starts at the first streamed text/reasoning token — the moment
+ * prefill ends — and runs to step_finish minus the step's measured tool time.
+ * It is null unless the step demonstrably STREAMED: a non-streaming provider
+ * delivers the whole text part as a single event just before step_finish, and
+ * anchoring on that timestamp would divide the step's output by a ~0 window —
+ * a fabricated thousand-tok/s reading, worse than the prefill-merge it
+ * replaced. The anchor is only trusted when the observed stream span
+ * (lastStreamTs > firstStreamTs) proves tokens arrived over time. `wallMs` is
+ * the full step_start→step_finish interval minus tool time — prefill
+ * included — and is the end-to-end denominator only. Either is null when its
+ * window would be ≤ 0 (a tool that consumed the whole span) or its anchor
+ * timestamp is missing. */
+export function stepTimingMs(
+  finishTs: number,
+  stepStartTs: number | null,
+  firstStreamTs: number | null,
+  lastStreamTs: number | null,
+  toolMs: number,
+): { decodeMs: number | null; wallMs: number | null } {
+  const streamed = firstStreamTs !== null && lastStreamTs !== null && lastStreamTs > firstStreamTs;
+  const decode = streamed ? finishTs - firstStreamTs! - toolMs : null;
+  const wall = stepStartTs !== null ? finishTs - stepStartTs - toolMs : null;
+  return {
+    decodeMs: decode !== null && decode > 0 ? decode : null,
+    wallMs: wall !== null && wall > 0 ? wall : null,
+  };
+}
+
+/** Rolling-window throughput from finished-step samples. The decode rate
+ * pairs only anchored steps' output with their decode windows; the e2e rate
+ * pairs every wall-measured step's output with its wall. Keeping the two
+ * numerators and denominators paired is what stops prefill speed and decode
+ * speed from blending into a single fictitious number. Null when no sample
+ * in the window can support the rate. */
+export function windowedStepRates(
+  samples: { out: number; decodeMs: number | null; wallMs: number | null }[],
+): { decodeTokPerSec: number | null; e2eTokPerSec: number | null } {
+  let decodeOut = 0;
+  let decodeMs = 0;
+  let e2eOut = 0;
+  let e2eMs = 0;
+  for (const s of samples) {
+    if (s.decodeMs !== null) {
+      decodeOut += s.out;
+      decodeMs += s.decodeMs;
+    }
+    if (s.wallMs !== null) {
+      e2eOut += s.out;
+      e2eMs += s.wallMs;
+    }
+  }
+  return {
+    decodeTokPerSec: decodeMs > 0 ? Math.round((decodeOut / decodeMs) * 1000) : null,
+    e2eTokPerSec: e2eMs > 0 ? (e2eOut / e2eMs) * 1000 : null,
+  };
 }
 
 function textEventTimestamp(line: string): number | null {

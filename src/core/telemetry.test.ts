@@ -85,7 +85,7 @@ describe("analyzePhase", () => {
     expect(t.totalOutputTokens).toBe(450);
   });
 
-  it("computes generation time from step_start/step_finish timestamp pairs", async () => {
+  it("accumulates step wall time (prefill included) from step_start/step_finish pairs", async () => {
     const { dir, phase } = await writePhase([
       `{"type":"step_start","timestamp":1000,"part":{"type":"step-start"}}`,
       `{"type":"step_finish","timestamp":3000,"part":{"tokens":{"input":2000,"output":100}}}`,
@@ -93,46 +93,56 @@ describe("analyzePhase", () => {
       `{"type":"step_finish","timestamp":7000,"part":{"tokens":{"input":5000,"output":200}}}`,
     ]);
     const t = await analyzePhase(dir, phase);
-    expect(t.generationMs).toBe(5000);
+    expect(t.wallMs).toBe(5000);
+    // Nothing streamed → no decode measurement; the wall is prefill + decode
+    // and the event stream cannot split it.
+    expect(t.generationMs).toBe(0);
+    expect(t.outputTokensPerSec).toBe(0);
   });
 
-  it("computes tokens/sec from output tokens and generation time", async () => {
+  it("computes end-to-end tokens/sec from output tokens and wall time", async () => {
     const { dir, phase } = await writePhase([
       `{"type":"step_start","timestamp":0,"part":{"type":"step-start"}}`,
       `{"type":"step_finish","timestamp":10000,"part":{"tokens":{"input":2000,"output":500}}}`,
     ]);
     const t = await analyzePhase(dir, phase);
     expect(t.totalOutputTokens).toBe(500);
-    expect(t.generationMs).toBe(10000);
-    expect(t.outputTokensPerSec).toBe(50);
+    expect(t.wallMs).toBe(10000);
+    expect(t.endToEndTokensPerSec).toBe(50);
   });
 
-  it("returns 0 for tokensPerSec when generation time is zero", async () => {
+  it("returns 0 for both rates when no timing exists", async () => {
     const { dir, phase } = await writePhase([
       `{"type":"step_finish","part":{"tokens":{"input":2000,"output":500}}}`,
     ]);
     const t = await analyzePhase(dir, phase);
     expect(t.outputTokensPerSec).toBe(0);
+    expect(t.endToEndTokensPerSec).toBe(0);
   });
 
-  it("uses text-event span, not step_start→step_finish, for generation time", async () => {
-    // step_start at 0ms, first text at 2000ms, last text at 4000ms, step_finish
-    // at 10000ms. Generation time should be 4000-2000=2000ms (the text span),
-    // NOT 10000-0=10000ms (the full step including tool execution after text).
+  it("measures decode from the first streamed token to step end minus tool time — prefill before the first token is never counted", async () => {
+    // step_start at 0, then 2000ms of prefill before the first token. Text
+    // streams 2000→4000, the decoded tool call runs 5000→10000 (state.time),
+    // step_finish at 10000. Decode window = 10000 - 2000 - 5000 = 3000ms:
+    // the 0→2000 prefill is excluded, the measured tool tail is excluded, and
+    // the post-text tool-call decode (4000→5000) IS included — those tokens
+    // are part of the step's output count.
     const { dir, phase } = await writePhase([
       `{"type":"step_start","timestamp":0,"part":{"type":"step-start"}}`,
       `{"type":"text","timestamp":2000,"part":{"text":"hello"}}`,
       `{"type":"text","timestamp":3000,"part":{"text":" world"}}`,
       `{"type":"text","timestamp":4000,"part":{"text":"!"}}`,
-      `{"type":"tool_use","timestamp":5000,"part":{"type":"tool","tool":"bash"}}`,
+      `{"type":"tool_use","timestamp":10000,"part":{"type":"tool","tool":"bash","state":{"status":"completed","time":{"start":5000,"end":10000}}}}`,
       `{"type":"step_finish","timestamp":10000,"part":{"tokens":{"input":2000,"output":100}}}`,
     ]);
     const t = await analyzePhase(dir, phase);
-    expect(t.generationMs).toBe(2000);
-    expect(t.outputTokensPerSec).toBe(50);
+    expect(t.generationMs).toBe(3000);
+    expect(t.decodeOutputTokens).toBe(100);
+    expect(t.outputTokensPerSec).toBe(33);
+    expect(t.wallMs).toBe(5000); // 10000 − 0 − 5000 tool
   });
 
-  it("uses reasoning-event span for generation time when present", async () => {
+  it("starts the decode window at the first reasoning event when reasoning precedes text", async () => {
     const { dir, phase } = await writePhase([
       `{"type":"step_start","timestamp":0,"part":{"type":"step-start"}}`,
       `{"type":"reasoning","timestamp":1000,"part":{"text":"thinking"}}`,
@@ -140,20 +150,27 @@ describe("analyzePhase", () => {
       `{"type":"step_finish","timestamp":8000,"part":{"tokens":{"input":2000,"output":100}}}`,
     ]);
     const t = await analyzePhase(dir, phase);
-    expect(t.generationMs).toBe(2000);
+    expect(t.generationMs).toBe(7000);
   });
 
-  it("falls back to step interval when no text/reasoning events exist", async () => {
+  it("does NOT guess a decode rate for steps that streamed no text/reasoning — their time lands in wallMs only", async () => {
+    // A tool-call-only step on a local server: its wall is mostly prefill.
+    // Folding that wall into the rate denominator would merge prefill speed
+    // into token speed — the bug behind a 1 tok/s reading on a 40 tok/s model.
     const { dir, phase } = await writePhase([
       `{"type":"step_start","timestamp":1000,"part":{"type":"step-start"}}`,
       `{"type":"step_finish","timestamp":5000,"part":{"tokens":{"input":2000,"output":100}}}`,
     ]);
     const t = await analyzePhase(dir, phase);
-    expect(t.generationMs).toBe(4000);
+    expect(t.generationMs).toBe(0);
+    expect(t.wallMs).toBe(4000);
+    expect(t.outputTokensPerSec).toBe(0);
+    expect(t.endToEndTokensPerSec).toBe(25);
   });
 
-  it("counts generation time per step across multiple steps", async () => {
-    // Step 1: text span 2000ms. Step 2: text span 3000ms. Total = 5000ms.
+  it("counts decode time per step across multiple steps", async () => {
+    // Step 1: first token at 1000, finish at 6000 → 5000ms. Step 2: first
+    // token at 8000, finish at 15000 → 7000ms. Total = 12000ms.
     const { dir, phase } = await writePhase([
       `{"type":"step_start","timestamp":0,"part":{"type":"step-start"}}`,
       `{"type":"text","timestamp":1000,"part":{"text":"a"}}`,
@@ -165,23 +182,65 @@ describe("analyzePhase", () => {
       `{"type":"step_finish","timestamp":15000,"part":{"tokens":{"input":5000,"output":200}}}`,
     ]);
     const t = await analyzePhase(dir, phase);
-    expect(t.generationMs).toBe(5000);
+    expect(t.generationMs).toBe(12000);
   });
 
-  it("subtracts tool-execution time so a slow build/test is not counted as generation", async () => {
+  it("subtracts tool-execution time from the wall so a slow build/test is not counted as model time", async () => {
     // Step runs 0→30000ms but 28000ms of that is a single bash tool (an
     // `npm run build`) whose state.time window is 2000→30000. Only 2000ms was
-    // the model emitting tokens. The old code counted all 30000ms, dividing the
-    // step's output by it and reading a fraction of the server's decode rate.
+    // the model's step wall. With no streamed text the decode rate stays
+    // unknown — it must not be fabricated from the wall.
     const { dir, phase } = await writePhase([
       `{"type":"step_start","timestamp":0,"part":{"type":"step-start"}}`,
       `{"type":"tool_use","timestamp":30000,"part":{"type":"tool","tool":"bash","state":{"status":"completed","time":{"start":2000,"end":30000}}}}`,
       `{"type":"step_finish","timestamp":30000,"part":{"tokens":{"input":2000,"output":60}}}`,
     ]);
     const t = await analyzePhase(dir, phase);
-    // No text events → interval fallback: 30000 - stepToolMs(28000) = 2000ms.
+    expect(t.wallMs).toBe(2000);
+    expect(t.endToEndTokensPerSec).toBe(30); // 60 tokens / 2s
+    expect(t.generationMs).toBe(0);
+    expect(t.outputTokensPerSec).toBe(0);
+  });
+
+  it("pairs the decode rate's numerator and denominator so unmeasured steps cannot inflate it", async () => {
+    // Anchored step: 100 output tokens over a 2000ms decode window.
+    // Unanchored step: 900 output tokens over a 30000ms wall (mostly prefill).
+    // Decode rate must be 100/2s = 50 — folding the unanchored step's tokens
+    // into the numerator (or its wall into the denominator) would fabricate a
+    // rate the model never decoded at.
+    const { dir, phase } = await writePhase([
+      `{"type":"step_start","timestamp":0,"part":{"type":"step-start"}}`,
+      `{"type":"text","timestamp":8000,"part":{"text":"a"}}`,
+      `{"type":"text","timestamp":9000,"part":{"text":"b"}}`,
+      `{"type":"step_finish","timestamp":10000,"part":{"tokens":{"input":2000,"output":100}}}`,
+      `{"type":"step_start","timestamp":11000,"part":{"type":"step-start"}}`,
+      `{"type":"step_finish","timestamp":41000,"part":{"tokens":{"input":5000,"output":900}}}`,
+    ]);
+    const t = await analyzePhase(dir, phase);
     expect(t.generationMs).toBe(2000);
-    expect(t.outputTokensPerSec).toBe(30); // 60 tokens / 2s
+    expect(t.decodeOutputTokens).toBe(100);
+    expect(t.outputTokensPerSec).toBe(50);
+    expect(t.totalOutputTokens).toBe(1000);
+    expect(t.wallMs).toBe(40000);
+    expect(t.endToEndTokensPerSec).toBe(25);
+  });
+
+  it("treats a single text event delivered just before step_finish as unmeasurable (non-streaming provider)", async () => {
+    // A buffered provider emits the whole text part as ONE event at the end of
+    // the step — its timestamp marks the END of decode, not the first token.
+    // Anchoring on it would divide 980 output tokens by a ~10ms window and
+    // report a fantasy rate; the step must land in wallMs only.
+    const { dir, phase } = await writePhase([
+      `{"type":"step_start","timestamp":0,"part":{"type":"step-start"}}`,
+      `{"type":"text","timestamp":23990,"part":{"text":"the whole answer, delivered at once"}}`,
+      `{"type":"step_finish","timestamp":24000,"part":{"tokens":{"input":30000,"output":980}}}`,
+    ]);
+    const t = await analyzePhase(dir, phase);
+    expect(t.generationMs).toBe(0);
+    expect(t.decodeOutputTokens).toBe(0);
+    expect(t.outputTokensPerSec).toBe(0);
+    expect(t.wallMs).toBe(24000);
+    expect(t.endToEndTokensPerSec).toBe(41);
   });
 
   it("handles a missing phase and zero-input busy tokens", async () => {
@@ -194,7 +253,10 @@ describe("analyzePhase", () => {
       totalInputTokens: 0,
       totalOutputTokens: 0,
       generationMs: 0,
+      decodeOutputTokens: 0,
       outputTokensPerSec: 0,
+      wallMs: 0,
+      endToEndTokensPerSec: 0,
     });
     const { phase } = await writePhase([`{"type":"step_finish","part":{"tokens":{"total":10}}}`]);
     const t = await analyzePhase(dir, "nope");
@@ -219,7 +281,10 @@ describe("mergePhases", () => {
       totalInputTokens: 0,
       totalOutputTokens: 0,
       generationMs: 0,
+      decodeOutputTokens: 0,
       outputTokensPerSec: 0,
+      wallMs: 0,
+      endToEndTokensPerSec: 0,
     });
   });
 
@@ -231,53 +296,59 @@ describe("mergePhases", () => {
       totalInputTokens: 12000,
       totalOutputTokens: 800,
       generationMs: 4000,
+      decodeOutputTokens: 800,
       outputTokensPerSec: 200,
+      wallMs: 8000,
+      endToEndTokensPerSec: 100,
     };
     expect(mergePhases([p])).toEqual(p);
   });
 
-  it("sums output tokens and generation time across phases", () => {
+  it("sums output tokens, decode tokens, generation time, and wall time across phases", () => {
     const merged = mergePhases([
-      { compactions: 0, peakInputTokens: 3000, finalInputTokens: 3000, totalInputTokens: 3000, totalOutputTokens: 18000, generationMs: 95000, outputTokensPerSec: 189 },
-      { compactions: 0, peakInputTokens: 5000, finalInputTokens: 5000, totalInputTokens: 5000, totalOutputTokens: 1400, generationMs: 8000, outputTokensPerSec: 175 },
-      { compactions: 0, peakInputTokens: 6500, finalInputTokens: 200, totalInputTokens: 6500, totalOutputTokens: 270, generationMs: 1700, outputTokensPerSec: 159 },
+      { compactions: 0, peakInputTokens: 3000, finalInputTokens: 3000, totalInputTokens: 3000, totalOutputTokens: 18000, generationMs: 95000, decodeOutputTokens: 18000, outputTokensPerSec: 189, wallMs: 200000, endToEndTokensPerSec: 90 },
+      { compactions: 0, peakInputTokens: 5000, finalInputTokens: 5000, totalInputTokens: 5000, totalOutputTokens: 1400, generationMs: 8000, decodeOutputTokens: 1000, outputTokensPerSec: 125, wallMs: 20000, endToEndTokensPerSec: 70 },
+      { compactions: 0, peakInputTokens: 6500, finalInputTokens: 200, totalInputTokens: 6500, totalOutputTokens: 270, generationMs: 1700, decodeOutputTokens: 270, outputTokensPerSec: 159, wallMs: 5000, endToEndTokensPerSec: 54 },
     ]);
     expect(merged.totalOutputTokens).toBe(19670);
     expect(merged.generationMs).toBe(104700);
-    expect(merged.outputTokensPerSec).toBe(Math.round((19670 / 104700) * 1000));
+    expect(merged.decodeOutputTokens).toBe(19270);
+    expect(merged.outputTokensPerSec).toBe(184);
+    expect(merged.wallMs).toBe(225000);
+    expect(merged.endToEndTokensPerSec).toBe(87);
   });
 
   it("takes the max peak across phases", () => {
     const merged = mergePhases([
-      { compactions: 0, peakInputTokens: 3000, finalInputTokens: 3000, totalInputTokens: 3000, totalOutputTokens: 100, generationMs: 1000, outputTokensPerSec: 100 },
-      { compactions: 0, peakInputTokens: 19000, finalInputTokens: 19000, totalInputTokens: 19000, totalOutputTokens: 50, generationMs: 500, outputTokensPerSec: 100 },
-      { compactions: 0, peakInputTokens: 6500, finalInputTokens: 200, totalInputTokens: 6500, totalOutputTokens: 200, generationMs: 2000, outputTokensPerSec: 100 },
+      { compactions: 0, peakInputTokens: 3000, finalInputTokens: 3000, totalInputTokens: 3000, totalOutputTokens: 100, generationMs: 1000, decodeOutputTokens: 100, outputTokensPerSec: 100, wallMs: 1000, endToEndTokensPerSec: 100 },
+      { compactions: 0, peakInputTokens: 19000, finalInputTokens: 19000, totalInputTokens: 19000, totalOutputTokens: 50, generationMs: 500, decodeOutputTokens: 50, outputTokensPerSec: 100, wallMs: 500, endToEndTokensPerSec: 100 },
+      { compactions: 0, peakInputTokens: 6500, finalInputTokens: 200, totalInputTokens: 6500, totalOutputTokens: 200, generationMs: 2000, decodeOutputTokens: 200, outputTokensPerSec: 100, wallMs: 2000, endToEndTokensPerSec: 100 },
     ]);
     expect(merged.peakInputTokens).toBe(19000);
   });
 
   it("takes the last non-zero final input tokens", () => {
     const merged = mergePhases([
-      { compactions: 0, peakInputTokens: 3000, finalInputTokens: 3000, totalInputTokens: 3000, totalOutputTokens: 100, generationMs: 1000, outputTokensPerSec: 100 },
-      { compactions: 0, peakInputTokens: 5000, finalInputTokens: 5000, totalInputTokens: 5000, totalOutputTokens: 50, generationMs: 500, outputTokensPerSec: 100 },
-      { compactions: 0, peakInputTokens: 6500, finalInputTokens: 200, totalInputTokens: 6500, totalOutputTokens: 200, generationMs: 2000, outputTokensPerSec: 100 },
+      { compactions: 0, peakInputTokens: 3000, finalInputTokens: 3000, totalInputTokens: 3000, totalOutputTokens: 100, generationMs: 1000, decodeOutputTokens: 100, outputTokensPerSec: 100, wallMs: 1000, endToEndTokensPerSec: 100 },
+      { compactions: 0, peakInputTokens: 5000, finalInputTokens: 5000, totalInputTokens: 5000, totalOutputTokens: 50, generationMs: 500, decodeOutputTokens: 50, outputTokensPerSec: 100, wallMs: 500, endToEndTokensPerSec: 100 },
+      { compactions: 0, peakInputTokens: 6500, finalInputTokens: 200, totalInputTokens: 6500, totalOutputTokens: 200, generationMs: 2000, decodeOutputTokens: 200, outputTokensPerSec: 100, wallMs: 2000, endToEndTokensPerSec: 100 },
     ]);
     expect(merged.finalInputTokens).toBe(200);
   });
 
   it("sums compactions across phases", () => {
     const merged = mergePhases([
-      { compactions: 1, peakInputTokens: 1000, finalInputTokens: 1000, totalInputTokens: 1000, totalOutputTokens: 100, generationMs: 1000, outputTokensPerSec: 100 },
-      { compactions: 0, peakInputTokens: 2000, finalInputTokens: 2000, totalInputTokens: 2000, totalOutputTokens: 200, generationMs: 1000, outputTokensPerSec: 200 },
-      { compactions: 2, peakInputTokens: 3000, finalInputTokens: 3000, totalInputTokens: 3000, totalOutputTokens: 300, generationMs: 1000, outputTokensPerSec: 300 },
+      { compactions: 1, peakInputTokens: 1000, finalInputTokens: 1000, totalInputTokens: 1000, totalOutputTokens: 100, generationMs: 1000, decodeOutputTokens: 100, outputTokensPerSec: 100, wallMs: 1000, endToEndTokensPerSec: 100 },
+      { compactions: 0, peakInputTokens: 2000, finalInputTokens: 2000, totalInputTokens: 2000, totalOutputTokens: 200, generationMs: 1000, decodeOutputTokens: 200, outputTokensPerSec: 200, wallMs: 1000, endToEndTokensPerSec: 200 },
+      { compactions: 2, peakInputTokens: 3000, finalInputTokens: 3000, totalInputTokens: 3000, totalOutputTokens: 300, generationMs: 1000, decodeOutputTokens: 300, outputTokensPerSec: 300, wallMs: 1000, endToEndTokensPerSec: 300 },
     ]);
     expect(merged.compactions).toBe(3);
   });
 
   it("sums total input tokens across phases", () => {
     const merged = mergePhases([
-      { compactions: 0, peakInputTokens: 1000, finalInputTokens: 1000, totalInputTokens: 3000, totalOutputTokens: 100, generationMs: 1000, outputTokensPerSec: 100 },
-      { compactions: 0, peakInputTokens: 2000, finalInputTokens: 2000, totalInputTokens: 5000, totalOutputTokens: 200, generationMs: 1000, outputTokensPerSec: 200 },
+      { compactions: 0, peakInputTokens: 1000, finalInputTokens: 1000, totalInputTokens: 3000, totalOutputTokens: 100, generationMs: 1000, decodeOutputTokens: 100, outputTokensPerSec: 100, wallMs: 1000, endToEndTokensPerSec: 100 },
+      { compactions: 0, peakInputTokens: 2000, finalInputTokens: 2000, totalInputTokens: 5000, totalOutputTokens: 200, generationMs: 1000, decodeOutputTokens: 200, outputTokensPerSec: 200, wallMs: 1000, endToEndTokensPerSec: 200 },
     ]);
     expect(merged.totalInputTokens).toBe(8000);
   });
@@ -325,7 +396,10 @@ describe("summarizePhaseFiles", () => {
       totalInputTokens: 0,
       totalOutputTokens: 0,
       generationMs: 0,
+      decodeOutputTokens: 0,
       outputTokensPerSec: 0,
+      wallMs: 0,
+      endToEndTokensPerSec: 0,
     });
   });
 });

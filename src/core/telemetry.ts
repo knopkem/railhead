@@ -18,17 +18,38 @@ export interface PhaseContext {
   totalInputTokens: number;
   /** Sum of output tokens across all steps — how much the model generated. */
   totalOutputTokens: number;
-  /** Total generation time in ms — the span between the first and last
-   * `text`/`reasoning` streaming events within each step, minus that step's
+  /** Total DECODE time in ms — for each step that demonstrably STREAMED
+   * `text`/`reasoning` events (a nonzero first→last stream span), the span
+   * from the first streamed token to step_finish, minus that step's
    * tool-execution time (from each `tool_use` `state.time`), summed across
-   * steps. Excluding tool runtime keeps a slow `npm test`/`build` from being
-   * counted as model generation, so throughput reflects the decode rate.
-   * Falls back to the step_start→step_finish interval (also minus tool time)
-   * when a step produced no text/reasoning events. */
+   * steps. The first streamed token marks the end of prefill, so this window
+   * never contains prompt processing; the post-text tool-call decode is
+   * included because those tokens count in the step's output. The stream-span
+   * gate matters: a non-streaming provider delivers the whole text part as
+   * one event just before step_finish — anchoring there would divide by a
+   * ~0 window and fabricate a thousand-tok/s rate. Steps without a proven
+   * stream (tool-call-only steps, buffered providers) contribute NOTHING —
+   * folding their wall in would merge prefill speed into token speed.
+   * Subtracting tool runtime keeps a slow `npm test`/`build` from being
+   * counted as decode. Unmeasured tool time (no `state.time`) remains in the
+   * window — the rate then under-reads, never over-reads. */
   generationMs: number;
-  /** Output tokens per second during generation — `totalOutputTokens / (generationMs / 1000)`.
-   * 0 when generation time is unknown or zero. */
+  /** Output tokens of exactly the steps that contributed to `generationMs` —
+   * the rate's numerator must come from the same steps as its denominator,
+   * or unmeasured steps would fabricate a decode rate. */
+  decodeOutputTokens: number;
+  /** Output tokens per second during DECODE — `decodeOutputTokens / (generationMs / 1000)`.
+   * 0 when no step produced a measurable decode window. */
   outputTokensPerSec: number;
+  /** Total step wall in ms — step_start→step_finish minus tool-execution
+   * time, summed over every step with both timestamps. Includes prefill,
+   * so it is the denominator for end-to-end throughput only. */
+  wallMs: number;
+  /** End-to-end output tokens per second — `totalOutputTokens / (wallMs / 1000)`.
+   * Includes prompt-processing time; on a local server with a large context
+   * this reads far below the decode rate, which is honest, not a bug.
+   * 0 when wall time is unknown. */
+  endToEndTokensPerSec: number;
 }
 
 /** Analyze a phase's event stream for compaction and context-window usage. */
@@ -40,7 +61,7 @@ export async function analyzePhase(
   try {
     raw = await readFile(eventPath(ledgerDir, phaseFile), "utf8");
   } catch {
-    return { compactions: 0, peakInputTokens: 0, finalInputTokens: 0, totalInputTokens: 0, totalOutputTokens: 0, generationMs: 0, outputTokensPerSec: 0 };
+    return { compactions: 0, peakInputTokens: 0, finalInputTokens: 0, totalInputTokens: 0, totalOutputTokens: 0, generationMs: 0, decodeOutputTokens: 0, outputTokensPerSec: 0, wallMs: 0, endToEndTokensPerSec: 0 };
   }
 
   let compactions = 0;
@@ -53,6 +74,8 @@ export async function analyzePhase(
   let stepStartTs: number | null = null;
   let stepToolMs = 0;
   let generationMs = 0;
+  let decodeOutput = 0;
+  let wallMs = 0;
 
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
@@ -106,12 +129,17 @@ export async function analyzePhase(
       if (input > 0) final = input;
       total += input;
       totalOutput += output;
-      if (firstGenTs !== null && lastGenTs !== null) {
-        const delta = lastGenTs - firstGenTs - stepToolMs;
-        if (delta > 0) generationMs += delta;
-      } else if (stepStartTs !== null && typeof ev.timestamp === "number") {
-        const delta = ev.timestamp - stepStartTs - stepToolMs;
-        if (delta > 0) generationMs += delta;
+      const finishTs = typeof ev.timestamp === "number" ? ev.timestamp : null;
+      if (stepStartTs !== null && finishTs !== null) {
+        const wall = finishTs - stepStartTs - stepToolMs;
+        if (wall > 0) wallMs += wall;
+      }
+      if (firstGenTs !== null && lastGenTs !== null && lastGenTs > firstGenTs && finishTs !== null) {
+        const decode = finishTs - firstGenTs - stepToolMs;
+        if (decode > 0) {
+          generationMs += decode;
+          decodeOutput += output;
+        }
       }
       firstGenTs = null;
       lastGenTs = null;
@@ -120,9 +148,10 @@ export async function analyzePhase(
     }
   }
 
-  const outputTokensPerSec = generationMs > 0 ? Math.round((totalOutput / generationMs) * 1000) : 0;
+  const outputTokensPerSec = generationMs > 0 ? Math.round((decodeOutput / generationMs) * 1000) : 0;
+  const endToEndTokensPerSec = wallMs > 0 ? Math.round((totalOutput / wallMs) * 1000) : 0;
 
-  return { compactions, peakInputTokens: peak, finalInputTokens: final, totalInputTokens: total, totalOutputTokens: totalOutput, generationMs, outputTokensPerSec };
+  return { compactions, peakInputTokens: peak, finalInputTokens: final, totalInputTokens: total, totalOutputTokens: totalOutput, generationMs, decodeOutputTokens: decodeOutput, outputTokensPerSec, wallMs, endToEndTokensPerSec };
 }
 
 /** Merge multiple per-phase contexts into one aggregate, as for a ticket
@@ -131,7 +160,7 @@ export async function analyzePhase(
  * non-zero for final (the context the ticket actually ended at). */
 export function mergePhases(phases: PhaseContext[]): PhaseContext {
   if (phases.length === 0) {
-    return { compactions: 0, peakInputTokens: 0, finalInputTokens: 0, totalInputTokens: 0, totalOutputTokens: 0, generationMs: 0, outputTokensPerSec: 0 };
+    return { compactions: 0, peakInputTokens: 0, finalInputTokens: 0, totalInputTokens: 0, totalOutputTokens: 0, generationMs: 0, decodeOutputTokens: 0, outputTokensPerSec: 0, wallMs: 0, endToEndTokensPerSec: 0 };
   }
   let compactions = 0;
   let peak = 0;
@@ -139,6 +168,8 @@ export function mergePhases(phases: PhaseContext[]): PhaseContext {
   let total = 0;
   let totalOutput = 0;
   let generationMs = 0;
+  let decodeOutput = 0;
+  let wallMs = 0;
   for (const p of phases) {
     compactions += p.compactions;
     peak = Math.max(peak, p.peakInputTokens);
@@ -146,9 +177,12 @@ export function mergePhases(phases: PhaseContext[]): PhaseContext {
     total += p.totalInputTokens;
     totalOutput += p.totalOutputTokens;
     generationMs += p.generationMs;
+    decodeOutput += p.decodeOutputTokens;
+    wallMs += p.wallMs;
   }
-  const outputTokensPerSec = generationMs > 0 ? Math.round((totalOutput / generationMs) * 1000) : 0;
-  return { compactions, peakInputTokens: peak, finalInputTokens: final, totalInputTokens: total, totalOutputTokens: totalOutput, generationMs, outputTokensPerSec };
+  const outputTokensPerSec = generationMs > 0 ? Math.round((decodeOutput / generationMs) * 1000) : 0;
+  const endToEndTokensPerSec = wallMs > 0 ? Math.round((totalOutput / wallMs) * 1000) : 0;
+  return { compactions, peakInputTokens: peak, finalInputTokens: final, totalInputTokens: total, totalOutputTokens: totalOutput, generationMs, decodeOutputTokens: decodeOutput, outputTokensPerSec, wallMs, endToEndTokensPerSec };
 }
 
 /** Aggregate the context telemetry of a ticket across ALL its implement/build

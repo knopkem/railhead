@@ -39,7 +39,7 @@ function makeState(ctxPeak: number, budget?: number): RunState {
           { phase: "01-02-review", attempt: 2, blocking: false, findings: [] },
         ],
         duration_ms: 120000,
-        context: { compactions: 0, peakInputTokens: ctxPeak, finalInputTokens: ctxPeak, totalInputTokens: ctxPeak, totalOutputTokens: 0, generationMs: 0, outputTokensPerSec: 0 },
+        context: { compactions: 0, peakInputTokens: ctxPeak, finalInputTokens: ctxPeak, totalInputTokens: ctxPeak, totalOutputTokens: 0, generationMs: 0, decodeOutputTokens: 0, outputTokensPerSec: 0, wallMs: 0, endToEndTokensPerSec: 0 },
         logs: [],
       },
     ],
@@ -69,7 +69,7 @@ describe("buildReport context guard-rail", () => {
     // means the budget was mis-set or the model over-read. Surface it so the
     // run's health is visible without digging into the ledger.
     const s = makeState(30000, 100000);
-    s.tickets[0].context = { compactions: 4, peakInputTokens: 30000, finalInputTokens: 30000, totalInputTokens: 30000, totalOutputTokens: 0, generationMs: 0, outputTokensPerSec: 0 };
+    s.tickets[0].context = { compactions: 4, peakInputTokens: 30000, finalInputTokens: 30000, totalInputTokens: 30000, totalOutputTokens: 0, generationMs: 0, decodeOutputTokens: 0, outputTokensPerSec: 0, wallMs: 0, endToEndTokensPerSec: 0 };
     const r = buildReport(s);
     expect(r).toContain("⚠ 4 compactions");
     expect(r).toMatch(/budget may be mis-set|over-read/i);
