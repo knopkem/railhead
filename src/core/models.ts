@@ -391,6 +391,83 @@ export function findModelEntry(models: ModelEntry[], model: string | null): Mode
   return models.find((m) => m.id.slice(m.id.lastIndexOf("/") + 1) === bare) ?? null;
 }
 
+/** The id tail after the last "/" — how findModelEntry strips a provider prefix. */
+function bareTail(id: string): string {
+  return id.slice(id.lastIndexOf("/") + 1);
+}
+
+/** Close registered ids for a reference that did NOT resolve case-sensitively,
+ * first-hit-wins across tiers of decreasing confidence, capped at `max`:
+ * case-insensitive exact id, then bare-id equality, then substring containment
+ * either way — every tier after the first scoped to the typed provider when
+ * the reference carries a provider prefix (a wrong tail/case in the RIGHT
+ * provider is the mistake being corrected; another provider's identically
+ * named model must not be suggested — `splash/qwen3.8-27b` is not rescued by
+ * `llama-cpp/qwen3.8-27b`). opencode's own `--model` matching is
+ * case-sensitive, so a mistyped-case id fails there — this recovers the real
+ * id for the error message. */
+function closeModelIds(entries: ModelEntry[], model: string, max: number): string[] {
+  const lc = (s: string) => s.toLowerCase();
+  const wanted = lc(model);
+  const wantedBare = lc(bareTail(model));
+  const provider = model.includes("/") ? lc(model.slice(0, model.indexOf("/"))) : "";
+  const inProvider = (e: ModelEntry) => provider !== "" && lc(e.id).startsWith(provider + "/");
+  const substring = entries.filter((e) =>
+    lc(e.id).includes(wanted) || wanted.includes(lc(e.id))
+    || lc(bareTail(e.id)).includes(wantedBare) || wantedBare.includes(lc(bareTail(e.id))));
+  const scoped = (group: ModelEntry[]) => (provider === "" ? group : group.filter(inProvider));
+  const tiers: ModelEntry[][] = [
+    entries.filter((e) => lc(e.id) === wanted),
+    scoped(entries.filter((e) => lc(bareTail(e.id)) === wantedBare)),
+    scoped(substring),
+    provider === "" ? substring : substring.filter((e) => !inProvider(e)),
+  ];
+  for (const group of tiers) {
+    if (group.length === 0) continue;
+    const out: string[] = [];
+    for (const e of group) {
+      out.push(e.id);
+      if (out.length >= max) break;
+    }
+    return out;
+  }
+  return [];
+}
+
+/** Mirror of how opencode resolves a `--model` reference (verified against its
+ * case-sensitive lookup): an exact full id always; a BARE reference (no
+ * provider prefix) by tail match across providers; a provider-prefixed
+ * reference only within that provider — opencode never substitutes another
+ * provider's model, it errors. `findModelEntry`'s tolerant bare fallback is
+ * unsuitable here: it would match `splash/qwen3.8-27b` to another provider's
+ * `llama-cpp/qwen3.8-27b` and let an unresolvable id past the gate. */
+function modelResolvable(entries: ModelEntry[], model: string): boolean {
+  if (entries.some((e) => e.id === model)) return true;
+  const slash = model.indexOf("/");
+  if (slash < 0) return entries.some((e) => bareTail(e.id) === model);
+  const provider = model.slice(0, slash);
+  const rest = model.slice(slash + 1);
+  return entries.some((e) => e.id.startsWith(provider + "/") && e.id.slice(provider.length + 1) === rest);
+}
+
+/** Registry gate for the init availability probe. Returns null when the id
+ * resolves in opencode's registry, when there is no id to check (the default
+ * seat), or when the registry capture itself is empty — that last case defers
+ * to the real probe rather than failing every seat on a broken `opencode
+ * models`. Otherwise an actionable message: opencode rejects an unresolvable
+ * `--model` id before any provider request and wraps it as a generic
+ * "Unexpected server error", so an unknown id would otherwise fail the probe
+ * with no hint which id to fix. */
+export function unknownModelMessage(modelsOutput: string, model: string | null): string | null {
+  if (!model || !modelsOutput.trim()) return null;
+  const entries = parseModelList(modelsOutput);
+  if (modelResolvable(entries, model)) return null;
+  const close = closeModelIds(entries, model, 3);
+  if (close.length === 1) return `unknown model id "${model}" — did you mean "${close[0]}"?`;
+  if (close.length > 1) return `unknown model id "${model}" — closest: ${close.map((id) => `"${id}"`).join(", ")}`;
+  return `unknown model id "${model}" — not in \`opencode models\` output`;
+}
+
 /**
  * Parse vision/reasoning/context-limit for a single model from one
  * `opencode models --verbose` capture. An absent/malformed capture or an
@@ -421,8 +498,9 @@ export interface InitProbe {
 
 /**
  * Build a per-seat prober over one shared `opencode models --verbose` capture.
- * Availability (`opencode run`) is deduplicated per availability model and the
- * capability parse per capability reference, so five seats all on the opencode
+ * Availability is registry-gated first (`unknownModelMessage`) and then
+ * deduplicated per availability model via `opencode run`; the capability parse
+ * is deduplicated per capability reference — so five seats all on the opencode
  * default run ONE availability test, not five. The prober itself is a closure
  * because it carries those two caches across the seats it probes.
  */
@@ -433,7 +511,12 @@ export function createInitProber(modelsOutput: string): (model: string | null, c
     const availabilityKey = model ?? "\0default";
     let availability = availabilityCache.get(availabilityKey);
     if (availability === undefined) {
-      availability = await testModel(model);
+      // An unresolvable id never reaches the provider (opencode wraps it as a
+      // generic server error), so fail fast with the corrected id instead.
+      const unknown = unknownModelMessage(modelsOutput, model);
+      availability = unknown !== null
+        ? { available: false, error: unknown }
+        : await testModel(model);
       availabilityCache.set(availabilityKey, availability);
     }
     const capabilityKey = capabilityRef ?? "\0none";

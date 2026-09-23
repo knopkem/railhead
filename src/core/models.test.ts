@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseDefaultModel, parseModelTestResult, parseVisionCapability, parseReasoningCapability, findModelAttachment, findModelCapability, parseModelList, isFree, filterFreeModels, scoreModelForRole, assignFreeModels, modelParameterClass, findModelEntry, parseCapabilityInfo, type ModelEntry, type ModelRole } from "./models.ts";
+import { parseDefaultModel, parseModelTestResult, parseVisionCapability, parseReasoningCapability, findModelAttachment, findModelCapability, parseModelList, isFree, filterFreeModels, scoreModelForRole, assignFreeModels, modelParameterClass, findModelEntry, parseCapabilityInfo, unknownModelMessage, type ModelEntry, type ModelRole } from "./models.ts";
 
 describe("parseDefaultModel", () => {
   it("extracts the model from a valid debug config JSON", () => {
@@ -700,5 +700,79 @@ describe("parseCapabilityInfo", () => {
       }),
     ].join("\n");
     expect(parseCapabilityInfo(output, "gemma-4-31b").vision).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// unknownModelMessage — registry gate for the init availability probe
+// ---------------------------------------------------------------------------
+
+/** The real-world shape that motivated the gate: a case-sensitive custom
+ * provider whose id differs in case AND suffix from what a user types from
+ * memory, while another provider serves the exact lowercase tail — the
+ * combination that made the naive bare-tail lookup misfire. */
+function splashOutput(): string {
+  return [
+    "splash/incoai/Qwen3.8-27B-Splash",
+    makeModelJson("incoai/Qwen3.8-27B-Splash", { providerID: "splash" }),
+    "llama-cpp/qwen3.8-27b",
+    makeModelJson("qwen3.8-27b", { providerID: "llama-cpp" }),
+  ].join("\n");
+}
+
+describe("unknownModelMessage", () => {
+  it("returns null for a registry-known id (exact full-id or bare tail)", () => {
+    expect(unknownModelMessage(capabilityOutput(), "vllm/proxy")).toBeNull();
+    expect(unknownModelMessage(capabilityOutput(), "gemma-4-31b")).toBeNull();
+  });
+
+  it("returns null for the default seat (no id) and for an empty registry capture", () => {
+    expect(unknownModelMessage(capabilityOutput(), null)).toBeNull();
+    expect(unknownModelMessage("", "any/model")).toBeNull();
+    expect(unknownModelMessage("  ", "any/model")).toBeNull();
+  });
+
+  it("flags a wrong-provider-prefix id even though another provider serves that exact tail", () => {
+    expect(unknownModelMessage(splashOutput(), "splash/qwen3.8-27b")).toBe(
+      `unknown model id "splash/qwen3.8-27b" — did you mean "splash/incoai/Qwen3.8-27B-Splash"?`,
+    );
+  });
+
+  it("returns null for the other provider's exact id (the bare tail it owns)", () => {
+    expect(unknownModelMessage(splashOutput(), "llama-cpp/qwen3.8-27b")).toBeNull();
+  });
+
+  it("returns null for a bare reference that matches a tail, keeping the documented tolerance", () => {
+    expect(unknownModelMessage(splashOutput(), "qwen3.8-27b")).toBeNull();
+  });
+
+  it("suggests by case-insensitive bare tail when the reference is typed without provider prefix", () => {
+    expect(unknownModelMessage(splashOutput(), "qwen3.8-27b-splash")).toBe(
+      `unknown model id "qwen3.8-27b-splash" — did you mean "splash/incoai/Qwen3.8-27B-Splash"?`,
+    );
+  });
+
+  it("flags a wrong tail within an existing provider and suggests the right one", () => {
+    expect(unknownModelMessage(splashOutput(), "llama-cpp/qwen3.8-27b-extra")).toBe(
+      `unknown model id "llama-cpp/qwen3.8-27b-extra" — did you mean "llama-cpp/qwen3.8-27b"?`,
+    );
+  });
+
+  it("caps the suggestion list at three for a generic substring match", () => {
+    const output = [
+      "p/x-13b-a", makeModelJson("x-13b-a"),
+      "p/x-13b-b", makeModelJson("x-13b-b"),
+      "p/x-13b-c", makeModelJson("x-13b-c"),
+      "p/x-13b-d", makeModelJson("x-13b-d"),
+    ].join("\n");
+    expect(unknownModelMessage(output, "p/x-13b")).toBe(
+      `unknown model id "p/x-13b" — closest: "p/x-13b-a", "p/x-13b-b", "p/x-13b-c"`,
+    );
+  });
+
+  it("reports plainly when no registered id is close", () => {
+    expect(unknownModelMessage(capabilityOutput(), "nope/nothing")).toBe(
+      `unknown model id "nope/nothing" — not in \`opencode models\` output`,
+    );
   });
 });
