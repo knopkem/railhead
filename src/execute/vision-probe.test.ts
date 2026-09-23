@@ -1,14 +1,17 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { inflateSync } from "node:zlib";
 import { mkdtemp, readFile, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { appendEvent } from "../core/ledger.ts";
 import {
   ANSWER_MARKER,
   NOREAD_MARKER,
   PROBE_COLORS,
   buildProbePng,
   capabilityFilePath,
+  describeVisionOutcome,
+  ensureVisionForGates,
   outcomeToRecord,
   parseProbeAnswer,
   probePrompt,
@@ -20,6 +23,33 @@ import {
   visionGateRequests,
   type VisionProbeOutcome,
 } from "./vision-probe.ts";
+
+/** The mocked executor's behavior: "see" decodes the generated probe PNG and
+ * answers its true order; "blind" answers the correct order rotated by one
+ * (guaranteed wrong for four distinct colors). */
+let probeBehavior: "see" | "blind" = "see";
+let probeCalls = 0;
+
+vi.mock("./executor.ts", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("./executor.ts")>();
+  return {
+    ...mod,
+    executeOpendCode: async (_prompt: string, options: { cwd: string; ledgerDir: string; phaseFile: string }) => {
+      probeCalls++;
+      const png = await readFile(join(options.cwd, ".railhead", "vision-probe", "probe.png"));
+      const raw = inflateSync(pngChunks(png)[1]!.data);
+      const names: string[] = [];
+      for (let cell = 0; cell < 4; cell++) {
+        const off = 1 + cell * 24 * 3;
+        const rgb = [raw[off], raw[off + 1], raw[off + 2]];
+        names.push(PROBE_COLORS.find((c) => c.rgb.every((v, i) => v === rgb[i]))!.name);
+      }
+      if (probeBehavior === "blind") names.push(names.shift()!);
+      await appendEvent(options.ledgerDir, options.phaseFile, JSON.stringify({ type: "text", part: { type: "text", text: `${ANSWER_MARKER} ${names.join(", ")}` } }));
+      return { status: "ok" as const, code: 0, signal: null, errorMessage: null, durationMs: 1, steps: 2, peakTokens: 0, inFlightTokens: 0, estimateDriftTokens: 0, totalOutputTokens: 10, generationMs: 1, toolCalls: 1 };
+    },
+  };
+});
 
 function pngChunks(png: Buffer): { type: string; data: Buffer }[] {
   const chunks: { type: string; data: Buffer }[] = [];
@@ -245,5 +275,60 @@ describe("capability record file", () => {
     await writeFile(capabilityFilePath(cwd), JSON.stringify({ version: 1, probes: [{ model: 7 }, { model: "ok", reads_images: true }] }), "utf8");
     const records = await readVisionCapabilities(cwd);
     expect(records.map((r) => r.model)).toEqual(["ok"]);
+  });
+});
+
+describe("describeVisionOutcome", () => {
+  // The snake-run misdiagnosis: the probe claimed "did not receive the pixels"
+  // while the transcript showed the image block attached and ~23k input tokens.
+  // The message must split the two causes — they have different remedies.
+  it("splits the failure cause on sawImageBlock: pixels delivered-but-misread vs pixels never delivered", () => {
+    const wrong = out({ ok: false, answerCorrect: false, answerColors: ["blue", "yellow", "red", "green"], expectedColors: ["blue", "yellow", "green", "red"] });
+    expect(describeVisionOutcome({ ...wrong, sawImageBlock: true })).toContain("reached the model but it misread");
+    expect(describeVisionOutcome({ ...wrong, sawImageBlock: false })).toContain("never reached the model");
+  });
+
+  it("keeps the agent-error and self-report branches", () => {
+    expect(describeVisionOutcome(out({ ok: false, answerCorrect: false, error: "agent exited 1 — boom" }))).toContain("exited 1");
+    expect(describeVisionOutcome(out({ ok: false, answerCorrect: false, selfReportedNoRead: true }))).toContain("cannot read image files");
+  });
+});
+
+describe("ensureVisionForGates", () => {
+  it("collects a refusal per blind gate instead of throwing, probing a shared model once", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "vision-probe-"));
+    probeBehavior = "blind";
+    probeCalls = 0;
+    const { records, refusals } = await ensureVisionForGates({
+      cwd,
+      requests: [
+        { gate: "visual", model: "test/model" },
+        { gate: "goal", model: "test/model" },
+      ],
+    });
+    expect(probeCalls).toBe(1);
+    expect(records).toHaveLength(1);
+    expect(records[0]!.reads_images).toBe(false);
+    expect(refusals.map((r) => r.gate)).toEqual(["visual", "goal"]);
+    expect(refusals[0]!.reason).toContain("failed the vision probe");
+  });
+
+  it("returns no refusals when the seat model reads the probe", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "vision-probe-"));
+    probeBehavior = "see";
+    probeCalls = 0;
+    const { records, refusals } = await ensureVisionForGates({ cwd, requests: [{ gate: "visual", model: "test/model" }] });
+    expect(probeCalls).toBe(1);
+    expect(refusals).toEqual([]);
+    expect(records[0]!.reads_images).toBe(true);
+  });
+
+  it("a gate with no configured model is a refusal without spending a probe", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "vision-probe-"));
+    probeCalls = 0;
+    const { refusals } = await ensureVisionForGates({ cwd, requests: [{ gate: "goal", model: null }] });
+    expect(probeCalls).toBe(0);
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]!.reason).toContain("no goal model is configured");
   });
 });

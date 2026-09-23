@@ -633,17 +633,28 @@ export async function ensureInitialized(cwd: string, yes: boolean = false): Prom
  * first — always, because a local server can swap the checkpoint behind a
  * model id — and refuses in seconds, before the plan or the run spends hours.
  * The probe result is recorded for the report and for prompt injection.
+ *
+ * The refusal is interactive-aware: an unattended run (no TTY, or `build -a`)
+ * still hard-fails — silently dropping a requested gate is worse than
+ * stopping — but an interactive operator is asked whether to continue with
+ * the affected gates off (the operator with no vision-capable model at hand).
+ * A continue downgrades the gates to "off" on the passed config (and the
+ * returned modes) and the run proceeds unverified-visually. `persists` names
+ * whether the caller will write the downgraded modes to railhead.json (build
+ * does — the run it starts re-reads the file; run/resume are in-memory).
+ * Returns the effective modes after any downgrade.
  */
-async function ensureVisionGates(
+async function ensureVisionGates<M extends { visual: GateMode; goal: GateMode }>(
   cwd: string,
-  modes: { visual: GateMode; goal: GateMode },
+  modes: M,
   models: Pick<ResolvedModels, "visual" | "goal">,
   config: RailheadConfig,
-): Promise<void> {
+  opts: { canAsk?: boolean; persists?: boolean } = {},
+): Promise<M> {
   const requests = visionGateRequests(modes, models);
-  if (requests.length === 0) return;
+  if (requests.length === 0) return modes;
   console.log("vision probe required — a vision-dependent review gate is enabled (ADR 0036)");
-  const records = await ensureVisionForGates({
+  const { records, refusals } = await ensureVisionForGates({
     cwd,
     requests,
     maxContextTokens: config.max_context_tokens,
@@ -651,6 +662,30 @@ async function ensureVisionGates(
   for (const record of records) {
     console.log(`vision probe: ${record.model} can read images (verified ${record.verified_at})`);
   }
+  if (refusals.length === 0) return modes;
+  for (const refusal of refusals) {
+    console.log(`vision gate problem: ${refusal.reason}`);
+  }
+  const gates = [...new Set(refusals.map((r) => r.gate))];
+  const canAsk = opts.canAsk ?? process.stdin.isTTY === true;
+  if (canAsk) {
+    const cont = await askYesNo(
+      `Continue with the vision-dependent gates disabled (${gates.join(", ")} → off)? The run will NOT be visually verified`,
+      true,
+    );
+    if (cont) {
+      const next: M = { ...modes };
+      for (const gate of gates) (next as { visual: GateMode; goal: GateMode })[gate] = "off";
+      if (gates.includes("visual")) config.visual_review = { ...config.visual_review, mode: "off" };
+      if (gates.includes("goal")) config.goal_review = { ...config.goal_review, mode: "off" };
+      const scope = opts.persists
+        ? "saved to railhead.json — re-enable later with --vision/--goal or by editing the file"
+        : "for this run only — railhead.json is unchanged";
+      console.log(`vision gates disabled (${scope}): ${gates.join(", ")} → off`);
+      return next;
+    }
+  }
+  throw new Error(refusals.map((r) => `vision gate refused: ${r.reason}`).join("\n"));
 }
 
 async function cmdBuild(cwd: string, prefs: PlanArgs): Promise<void> {
@@ -742,7 +777,7 @@ async function cmdBuild(cwd: string, prefs: PlanArgs): Promise<void> {
     ? await askGateCadence()
     : null;
   const visualEnabled = config.visual_review?.mode !== "off";
-  const modes = resolveGateModes({
+  let modes = resolveGateModes({
     preset: prefs.preset,
     overrides,
     fixMode: mode === "fix",
@@ -757,7 +792,10 @@ async function cmdBuild(cwd: string, prefs: PlanArgs): Promise<void> {
 
   // ADR 0036: a requested vision gate must not run on a model the railhead has
   // measured blind — refuse here, before the planner spends hours, not after.
-  await ensureVisionGates(cwd, modes, models, config);
+  // An interactive operator may instead continue with the blind gates off;
+  // the downgrade persists through the cadence write below (the run started
+  // from build re-reads railhead.json), so `persists` is set.
+  modes = await ensureVisionGates(cwd, modes, models, config, { canAsk: !auto, persists: true });
 
   // TDD test phase (issue #5): presets default it off (`--full` keeps it on);
   // `--tdd`/`--no-tdd` override; fix mode forces it off — the bug reproducer
@@ -1055,17 +1093,18 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } 
   }
 
   // ADR 0036: refuse a vision-dependent gate whose seat model cannot see —
-  // before a fresh run spends hours, and before a resume continues one. The
-  // message names the escape hatches (a vision model, or mode "off"). A run
-  // started from `build` already probed in this process seconds ago, so it
-  // does not pay for the same measurement twice.
-  const visionModes = {
+  // before a fresh run spends hours, and before a resume continues one. An
+  // interactive operator may instead continue with the blind gates off (the
+  // downgrade is in-memory here — railhead.json is untouched). A run started
+  // from `build` already probed in this process seconds ago, so it does not
+  // pay for the same measurement twice.
+  let visionModes = {
     visual: (config.visual_review?.mode ?? "off") as GateMode,
     goal: (config.goal_review?.mode ?? "off") as GateMode,
   };
   const visionModels = resolveModels(config, modelSeatFlags(rest));
   if (opts.fromPlan !== true) {
-    await ensureVisionGates(cwd, visionModes, visionModels, config);
+    visionModes = await ensureVisionGates(cwd, visionModes, visionModels, config);
   }
 
   // ADR 0036: a surfaced project also wants a current implement-seat record,
@@ -1184,11 +1223,14 @@ async function cmdResume(cwd: string, runIdArg?: string): Promise<void> {
   await detectContextLimit(state);
   // ADR 0036: a resume that still owes a vision-dependent gate gets the same
   // refusal as a fresh run — an interrupted run is not a reason to judge blind.
-  const resumeModes = {
+  // The interactive continue-without-vision choice applies here too; the
+  // downgrade lands on state.config (re-read from railhead.json above), so the
+  // resumed run itself honors it without touching the file.
+  let resumeModes = {
     visual: (state.config.visual_review?.mode ?? "off") as GateMode,
     goal: (state.config.goal_review?.mode ?? "off") as GateMode,
   };
-  await ensureVisionGates(cwd, resumeModes, state._models, state.config);
+  resumeModes = await ensureVisionGates(cwd, resumeModes, state._models, state.config);
   if (state.config.projectInterface === "browser-ui" || state.config.projectInterface === "canvas") {
     const probed = new Set(visionGateRequests(resumeModes, state._models).map((r) => r.model).filter((m): m is string => m !== null));
     await ensureImplementerVision({ cwd, model: state._models.implement, skip: probed, maxContextTokens: state.config.max_context_tokens });

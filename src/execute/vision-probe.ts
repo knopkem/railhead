@@ -332,25 +332,43 @@ The railhead measured this seat's model and it does NOT receive image pixels. Do
 function describeProbeFailure(request: VisionGateRequest, outcome: VisionProbeOutcome): string {
   const seat = request.gate;
   const label = outcome.model === DEFAULT_MODEL ? "the opencode default model" : outcome.model;
-  return `vision gate refused: ${seat} review needs a model that can actually see images, but ${label} failed the vision probe (${describeVisionOutcome(outcome)}). Configure a vision-capable model for the ${seat} seat, or set ${seat}_review.mode to "off". Probe transcript: .railhead/vision-probe/events/vision-probe.jsonl`;
+  return `${seat} review needs a model that can actually see images, but ${label} failed the vision probe (${describeVisionOutcome(outcome)}). Configure a vision-capable model for the ${seat} seat, or set ${seat}_review.mode to "off". Probe transcript: .railhead/vision-probe/events/vision-probe.jsonl`;
+}
+
+/** A gate that cannot run vision-verified: either no model is configured for
+ * the seat, or the probe measured it blind. `reason` is operator-facing. */
+export interface VisionGateRefusal {
+  gate: "visual" | "goal";
+  model: string | null;
+  reason: string;
 }
 
 /** Probe each distinct seat model once (always — a model id's backing model can
  * change under it, so a cached "yes" is not evidence), record the outcomes, and
- * refuse when a requested gate's model cannot see. Budgets are deliberately
- * tight and independent of the run's phase limits: a probe is three steps of
- * work, and a wedged probe must never inherit a multi-hour stall tolerance. */
+ * COLLECT the gates that cannot run vision-verified. This function no longer
+ * refuses itself: the caller decides what a refusal means — an unattended run
+ * still hard-fails, but an interactive operator may choose to continue with
+ * the affected gates off (a user with no vision-capable model at hand).
+ * Budgets are deliberately tight and independent of the run's phase limits: a
+ * probe is three steps of work, and a wedged probe must never inherit a
+ * multi-hour stall tolerance. */
 export async function ensureVisionForGates(options: {
   cwd: string;
   requests: VisionGateRequest[];
   maxContextTokens?: number | null;
-}): Promise<VisionCapabilityRecord[]> {
+}): Promise<{ records: VisionCapabilityRecord[]; refusals: VisionGateRefusal[] }> {
   const { cwd, requests } = options;
   const byModel = new Map<string, VisionProbeOutcome>();
   const records: VisionCapabilityRecord[] = [];
+  const refusals: VisionGateRefusal[] = [];
   for (const request of requests) {
     if (request.model === null) {
-      throw new Error(`vision gate refused: ${request.gate} review is enabled but no ${request.gate} model is configured (set model.${request.gate} or ${request.gate}_review.mode to "off").`);
+      refusals.push({
+        gate: request.gate,
+        model: null,
+        reason: `${request.gate} review is enabled but no ${request.gate} model is configured (set model.${request.gate} or ${request.gate}_review.mode to "off").`,
+      });
+      continue;
     }
     let outcome = byModel.get(request.model);
     if (!outcome) {
@@ -364,9 +382,11 @@ export async function ensureVisionForGates(options: {
       byModel.set(request.model, outcome);
       records.push(await recordVisionCapability(cwd, outcome));
     }
-    if (!outcome.ok) throw new Error(describeProbeFailure(request, outcome));
+    if (!outcome.ok) {
+      refusals.push({ gate: request.gate, model: request.model, reason: describeProbeFailure(request, outcome) });
+    }
   }
-  return records;
+  return { records, refusals };
 }
 
 export function describeVisionOutcome(outcome: VisionProbeOutcome): string {
@@ -375,7 +395,21 @@ export function describeVisionOutcome(outcome: VisionProbeOutcome): string {
   }
   if (outcome.error) return `the agent ${outcome.error}`;
   if (outcome.selfReportedNoRead) return "the model reported it cannot read image files";
-  return `it answered "${outcome.answerColors.join(", ") || "nothing"}" instead of "${outcome.expectedColors.join(", ")}" — it did not receive the pixels`;
+  const answered = outcome.answerColors.join(", ") || "nothing";
+  const expected = outcome.expectedColors.join(", ");
+  // sawImageBlock splits two failure modes with different remedies: the image
+  // part never reached the model (provider/tool stripped it — fix the wiring)
+  // vs pixels delivered but misread (weak vision, or a text-only checkpoint
+  // behind a vision-declaring id). Claiming the first unconditionally was the
+  // snake-run misdiagnosis: the probe transcript showed the image block
+  // attached and ~23k input tokens, and the answer was the right set in the
+  // wrong order — the set is disclosed in the prompt, so only order carries
+  // signal, and one wrong-order answer cannot distinguish blind-lucky from
+  // weak-vision.
+  if (outcome.sawImageBlock) {
+    return `the image block reached the model but it misread the probe (answered "${answered}" instead of "${expected}") — weak vision, or a text-only checkpoint behind a vision-declaring id`;
+  }
+  return `the read returned no image block — the image part never reached the model (answered "${answered}" instead of "${expected}"); the provider or the read tool stripped the pixels`;
 }
 
 /** ADR 0036: the implementer's visual self-check is optional, so a surfaced

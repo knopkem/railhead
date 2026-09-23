@@ -140,3 +140,37 @@ the colors — an attachment-only check would have passed the blind model.
 - `.railhead/capabilities.json` is the first railhead-owned, model-facing
   capability record; later work (retraction-triggers-reprobe, structural
   review seats) can build on the same shape.
+
+## Amendment (2026-09-23): honest failure causes, and the operator may choose to continue blind
+
+The snake run `run-20260923-1815` surfaced two defects in §3's refusal:
+
+1. **The diagnosis overclaimed.** `k3-256k` failed the probe answering the
+   right color set in the wrong order, and the refusal said "it did not
+   receive the pixels" — while the transcript showed the image block attached
+   to the `read` result and ~23k input tokens (the prompt alone is ~150). The
+   probe prompt discloses the color set, so only the order carries signal;
+   one wrong-order answer cannot distinguish a blind-lucky guess (p ≈ 1/12
+   for that pattern) from weak vision misreading a 96×24 strip.
+   `describeVisionOutcome` now splits on `sawImageBlock`: *pixels never
+   reached the model* (provider/tool stripped the image part — fix the
+   wiring) vs *the image block reached the model but it misread the probe*
+   (weak vision, or a text-only checkpoint behind a vision-declaring id).
+2. **The hard refuse was the only landing.** An operator with no
+   vision-capable model at hand could not proceed at all. §3's "no silent
+   downgrade" stands for unattended runs — no TTY or `build -a` still throws
+   — but an interactive operator is now asked: *continue with the affected
+   gates off?* (default yes). A continue is an explicit, announced operator
+   choice, not the quiet auto-degrade the non-goal rejects; the run prints
+   that it is not visually verified. The downgrade persists only on the
+   `build` path (the run it starts re-reads railhead.json); standalone
+   `run`/`resume` downgrades are in-memory for that process.
+
+Mechanically, `ensureVisionForGates` no longer throws: it collects
+`refusals` (probe failures and unconfigured seats alike), and the CLI layer
+(`ensureVisionGates`, used by build/run/resume) owns the ask-or-throw policy.
+
+Still open from the same incident: the probe image is a degenerate vision
+input (24 px cells smear under patchifying encoders), and a single trial
+refuses on one bit of signal — enlarging the probe cells and re-probing once
+with a fresh permutation before refusing were deferred.
