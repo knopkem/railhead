@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { shouldSummarize, buildOutputSummaryPrompt, parseSummary, buildRunSummaryPrompt, SUMMARIZE_THRESHOLD_CHARS } from "./summary.ts";
+import { shouldSummarize, buildOutputSummaryPrompt, parseSummary, buildRunSummaryPrompt, contextPressureLine, SUMMARIZE_THRESHOLD_CHARS } from "./summary.ts";
 
 describe("shouldSummarize", () => {
   it("returns false for short output (under the threshold)", () => {
@@ -106,5 +106,28 @@ describe("buildRunSummaryPrompt", () => {
   it("handles an empty ticket list without crashing", () => {
     const p = buildRunSummaryPrompt([]);
     expect(p).toContain("Per-ticket logs:");
+  });
+});
+
+describe("contextPressureLine", () => {
+  const t = (number: string, compactions: number | undefined) => ({
+    number,
+    context: compactions === undefined ? undefined : { compactions, peakInputTokens: 0, finalInputTokens: 0, totalInputTokens: 0, totalOutputTokens: 0, generationMs: 0, decodeOutputTokens: 0, outputTokensPerSec: 0, wallMs: 0, endToEndTokensPerSec: 0 },
+  });
+
+  it("is null when no ticket compacted", () => {
+    expect(contextPressureLine([t("01", 0), t("02", undefined)])).toBeNull();
+  });
+
+  it("names compacted tickets with their counts, as sizing feedback", () => {
+    const line = contextPressureLine([t("01", 2), t("03", 1), t("04", 0)])!;
+    expect(line).toContain("01");
+    expect(line).toContain("2");
+    expect(line).toContain("03");
+  });
+
+  it("escalates the wording when a ticket hit the spiral threshold (2+)", () => {
+    expect(contextPressureLine([t("01", 2)])).toMatch(/too big|does not fit|split/i);
+    expect(contextPressureLine([t("01", 1)])).not.toMatch(/too big|does not fit|split/i);
   });
 });

@@ -4429,6 +4429,56 @@ describe("session builder (issue #95)", () => {
     expect(final.builder!.last_green_commit).toMatch(/^[0-9a-f]{40}$/);
   });
 
+  it("spiral detection: a build that compacts twice without checkpointing is routed to capacity — fresh session, not an in-session resume", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({ session_builder: true, checkpoint_granularity: "ticket" });
+    const state = await twoTicketState(cwd, ticketsDir, config);
+
+    const buildSessions: (string | null | undefined)[] = [];
+    const buildPrompts: string[] = [];
+    let builds = 0;
+    mockExec.mockImplementation(async (prompt, options) => {
+      const kind = kindOf(options);
+      if (options.phaseFile.endsWith("-build")) {
+        builds++;
+        buildSessions.push(options.session);
+        buildPrompts.push(prompt);
+        if (builds === 1) {
+          // The observed spiral shape: auto-compaction markers in the stream,
+          // no checkpoint — the session re-reads after each compaction instead
+          // of finishing the ticket.
+          await appendEvent(ledgerDir, options.phaseFile, JSON.stringify({ type: "text", part: { type: "text", text: "(compacted)", metadata: { compaction_continue: true } } }));
+          await appendEvent(ledgerDir, options.phaseFile, JSON.stringify({ type: "text", part: { type: "text", text: "(compacted again)", metadata: { compaction_continue: true } } }));
+          return { ...okResult(), sessionId: "sess-spiral", checkpointTicket: null };
+        }
+        await writeTicketFile(cwd, options.phaseFile.slice(0, 2) === "01" ? "01" : "02");
+        await emitText(ledgerDir, options.phaseFile, "$CHECKPOINT ticket=" + options.phaseFile.slice(0, 2));
+        return builderOk(options.phaseFile.slice(0, 2));
+      }
+      if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    // The second build must be a FRESH session (the capacity verdict dropped
+    // the spiraling one), not a resume of sess-spiral.
+    expect(buildSessions).toEqual([null, null, "sess-abc123"]);
+    expect(final.builder!.restarts.some((r) => r.cause.includes("capacity"))).toBe(true);
+    // The re-driven invocation is the seeded advance — a findings prompt would
+    // reference work the fresh session never wrote.
+    expect(buildPrompts[1]).toContain("## Work to do");
+    expect(buildPrompts[1]).not.toContain("gate found problems");
+  });
+
   it("issue #106 (A): the FIRST advance of a fresh builder seeds full context blocks; a warm no-compaction resume sends standing pointers instead of re-injecting them", async () => {
     const cwd = await freshRepo();
     const ticketsDir = ticketsDirOf(cwd);

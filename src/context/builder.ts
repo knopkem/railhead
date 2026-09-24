@@ -318,6 +318,17 @@ ${rows.join("\n")}`;
 
 const BUILDER_ROLE = `You are the Builder in an unattended, gate-verified build. You run as ONE durable opencode session resumed across checkpoints: the repo is the durable state, your conversation is the working memory, and the railhead runs fresh verification and review gates between your invocations. Compaction inside this session is normal and permitted — it is your context manager, not an error. Do not fight it or pre-shrink your work to avoid it.`;
 
+/** The builder-seat port of the implementer's dependency/tool-output
+ * discipline (prompt.ts). The durable session makes thrift MORE load-bearing,
+ * not less: every source dump read stays in the window until compaction, so a
+ * seat that pre-verifies an API by reading installed dependency source fills
+ * its window before writing a line (the ticket-01 scaffold spiral). Rides the
+ * seeded/full-context prompt only — a warm pointer resume already holds it. */
+const CONTEXT_ECONOMY = `## Context economy (this session persists — every token you read stays until compaction)
+Write first, then build to correct. When the ticket needs an external API, write the call from memory NOW and run the build command: a compile error is a ~100-token oracle that names the real API. Reading the dependency's installed source to pre-verify a call is the context bomb this rule exists to prevent — one source dump can cost 5k tokens and answer a question you never had.
+When the build proves memory wrong, escalate in order: (1) the dependency's examples/ directory — read ONE example file; (2) the package manifest (features, entry points); (3) a minimal compile probe — a five-line file that imports the API; (4) only after two failed builds on the same symbol, ONE scoped grep (grep -n ... | head -30), never a full file dump.
+Scope every command's output before reading it back (\`2>&1 | tail -30\`, \`--stat\`, \`--name-only\`) — a 10k-token log slows every later step of every later ticket.`;
+
 const OUTPUT_DISCIPLINE = `## Output discipline
 You run unattended — no human reads your narration, and every prose token you emit stays in the session's context. Be terse. Do not re-read files you already hold; use targeted reads and scoped command output. Only a checkpoint marker (or DONE, in product mode) ends a phase; everything else is work.`;
 
@@ -391,6 +402,9 @@ export function buildBuilderPrompt(opts: {
 ${ticketBlocks}`,
     verifyBlock(verify),
     forwardLine,
+    // Full-context sends only: a warm pointer resume already holds the block
+    // from its seed (the #106 dedup cadence the content blocks follow).
+    opts.contextPointers ? "" : CONTEXT_ECONOMY,
     stateBlock,
     checkpointDirective(granularity, tickets),
     outputDisciplineFor(tickets) + budget,

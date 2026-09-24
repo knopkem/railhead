@@ -2361,3 +2361,20 @@ describe("detectIntegrationPromise (plan completeness)", () => {
     expect(detectIntegrationPromise("the scaffold ticket mounts a minimal running shell and later panels dock into its mount contract")).toBe(false);
   });
 });
+
+describe("QUALITY_PREFERENCES — API stability steering for small execute seats", () => {
+  // The measured failure behind this steer: the planner (a large cloud model)
+  // chose a recently-redesigned windowing API; the 27B implement seat did not
+  // know its new shape and burned most of its context window rediscovering it
+  // from installed source. Popularity is not the signal — API stability is.
+  it("tells every planner stage to weigh API stability, not just popularity", () => {
+    for (const prompt of [
+      planDesignSystemPrompt({ contractsSummary: "(none)" }),
+      planTicketsSystemPrompt({ contractsSummary: "(none)" }),
+      planFixSystemPrompt("(none)"),
+    ]) {
+      expect(prompt).toContain("recent breaking redesign");
+      expect(prompt).toContain("stable for years");
+    }
+  });
+});

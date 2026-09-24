@@ -2,6 +2,7 @@ import { HANDOFF_START, HANDOFF_END } from "./handoff.ts";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describeExecFailure, executeOpendCode } from "../execute/executor.ts";
+import { SPIRAL_COMPACTION_THRESHOLD } from "../execute/failure-ladder.ts";
 import { extractAssistantText } from "../core/ledger.ts";
 import { contextBudget } from "../config/config.ts";
 import type { RunState } from "../core/state.ts";
@@ -13,6 +14,26 @@ import type { RunState } from "../core/state.ts";
  * cargo rebuild log gets compressed before it fills the next implementer's
  * context window. ADR 0014 / issue #8. */
 export const SUMMARIZE_THRESHOLD_CHARS = 8000;
+
+/** Per-ticket compaction counts as ticket-SIZING feedback: a ticket that had
+ * to compact to fit is a ticket whose scope barely fit the model's window.
+ * One compaction is normal fill management on a durable builder session; at
+ * the spiral threshold the ticket provably did not fit (the ladder routes
+ * that to a fresh session — failure-ladder.ts). The run summary surfaces the
+ * counts so the human can re-slice the plan or raise the window instead of
+ * just observing "the run felt slow". Pure; null when nothing compacted. */
+export function contextPressureLine(
+  tickets: { number: string; context?: { compactions: number } | undefined }[],
+): string | null {
+  const compacted = tickets.filter((t) => (t.context?.compactions ?? 0) > 0);
+  if (compacted.length === 0) return null;
+  const named = compacted.map((t) => `${t.number} (${t.context!.compactions} compaction${t.context!.compactions === 1 ? "" : "s"})`).join(", ");
+  const spiral = compacted.some((t) => t.context!.compactions >= SPIRAL_COMPACTION_THRESHOLD);
+  return spiral
+    ? `Context pressure: ${named} — a ticket that compacts twice does not fit the model's context window; split it finer or raise max_context_tokens for this seat.`
+    : `Context pressure: ${named} — tolerable, but the window filled once; watch for growth on later tickets.`;
+}
+
 
 /** Whether a blob is large enough to warrant summarization. Pure logic. */
 export function shouldSummarize(blob: string): boolean {
@@ -127,11 +148,12 @@ export async function writeRunSummary(state: RunState, ledger: string): Promise<
     const summary = state.tickets
       .map((t) => `${t.number} ${t.title} — ${t.status}${(t.unverified?.length ?? 0) > 0 ? `\n  UNVERIFIED CRITERIA (not proven by any seat): ${t.unverified!.join(" | ")}` : ""}${t.logs.length ? `\n  ${t.logs.slice(-3).join("\n  ")}` : ""}`)
       .join("\n\n");
-    await writeFile(join(ledger, "..", "run-summary.md"), `# Run Summary\n\n${summary}\n`, "utf8").catch(() => {});
+    const pressure = contextPressureLine(state.tickets);
+    await writeFile(join(ledger, "..", "run-summary.md"), `# Run Summary\n\n${pressure ? `${pressure}\n\n` : ""}${summary}\n`, "utf8").catch(() => {});
     return;
   }
   const ticketSummaries = state.tickets.map((t) =>
-    `${t.number} ${t.title} — status: ${t.status}, attempts: ${t.attempts}${(t.unverified?.length ?? 0) > 0 ? `, UNVERIFIED CRITERIA: ${t.unverified!.join(" | ")}` : ""}${t.logs.length ? ` | last logs: ${t.logs.slice(-3).join("; ")}` : ""}`,
+    `${t.number} ${t.title} — status: ${t.status}, attempts: ${t.attempts}${(t.context?.compactions ?? 0) > 0 ? `, compactions: ${t.context!.compactions}` : ""}${(t.unverified?.length ?? 0) > 0 ? `, UNVERIFIED CRITERIA: ${t.unverified!.join(" | ")}` : ""}${t.logs.length ? ` | last logs: ${t.logs.slice(-3).join("; ")}` : ""}`,
   );
   const prompt = buildRunSummaryPrompt(ticketSummaries);
   const summaryPhase = "run-summary";

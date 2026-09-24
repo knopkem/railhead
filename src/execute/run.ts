@@ -17,7 +17,8 @@ import { readPlanOrigin, checkPlanOrigin, readPlanRulings, readPlanWallMs } from
 import { replanFromCheckpoint } from "../gates/replan.ts";
 import type { BlockReport } from "../core/blocked.ts";
 import { describeExecFailure, executeOpendCode, killActiveChild, withPersistentWorker, startPersistentWorker, stopPersistentWorker } from "./executor.ts";
-import { withFailureLadder, withFailureLadderOnThrow, PhaseFailure, evidenceFromResult, type FailureEvidence } from "./failure-ladder.ts";
+import { withFailureLadder, withFailureLadderOnThrow, PhaseFailure, evidenceFromResult, SPIRAL_COMPACTION_THRESHOLD, type FailureEvidence } from "./failure-ladder.ts";
+import { setDependencySourceDeny } from "./guard.ts";
 import { buildImplementerPrompt, buildTestPhasePrompt, type AttemptRound } from "../context/prompt.ts";
 import { readVisionCapabilityFor } from "./vision-probe.ts";
 import { summarizeIfNeeded, writeRunSummary } from "../context/summary.ts";
@@ -364,6 +365,9 @@ async function runLoopInner(state: RunState, ledger: string, onUpdate?: () => vo
   // show a stale "Stop:" line on a run that has since progressed.
   clearStop();
   state.stop_reason = null;
+  // Arm the project-configured dependency-source deny globs before any phase
+  // spawns (the guard composes them into every phase's inline opencode config).
+  setDependencySourceDeny(state.config.dependency_source_deny ?? []);
   const cleanupSignals = installSignalHandlers(state, ledger);
   // gh: replay the gates a prior stop left owed — a per-ticket visual review
   // the process died before joining, and any post-commit group checkpoint the
@@ -2366,7 +2370,8 @@ async function runBuilderStep(
 
   if (result.status !== "ok") {
     const err = `build ${phaseFile} ${describeExecFailure(result)}`;
-    return { ok: false, err, evidence: result.evidence ?? evidenceFromResult(result) };
+    const { compactions } = await analyzePhase(ledger, phaseFile);
+    return { ok: false, err, evidence: { ...(result.evidence ?? evidenceFromResult(result)), compactions } };
   }
 
   // ADR 0040: a terminal `$BLOCKED` ends the invocation. Record it durably
@@ -2390,7 +2395,16 @@ async function runBuilderStep(
     const err =
       `build ${phaseFile}: exited ok but ${markerTicket ? `checkpointed ticket ${markerTicket}` : "emitted no checkpoint marker"} — expected a $CHECKPOINT ticket=${expectedTicket} (${granularity} granularity). The session stopped for a reason other than a clean checkpoint; continue in this session and drive it to checkpoint ${expectedTicket}.`;
     ticket.logs.push(err);
-    return { ok: false, err, evidence: null };
+    // Spiral detection: a session that already compacted past the threshold
+    // without producing its checkpoint does not fit the window — carrying the
+    // compaction count as ladder evidence routes this to capacity (fresh
+    // session from the last green commit) instead of the in-session "keep
+    // driving" retry, which would re-enter the same compaction spiral.
+    const { compactions } = await analyzePhase(ledger, phaseFile);
+    const evidence = compactions >= SPIRAL_COMPACTION_THRESHOLD
+      ? { ...evidenceFromResult(result), errorMessage: err, compactions }
+      : null;
+    return { ok: false, err, evidence };
   }
 
   ticket.context = await analyzePhase(ledger, phaseFile);

@@ -36,6 +36,16 @@ export const LEDGER_GUARD_CONFIG = JSON.stringify({
   },
 });
 
+/** Project-configured dependency-source bash globs (railhead.json's
+ * `dependency_source_deny`), set once per run. Process-local by design: one
+ * railhead process runs one project at a time, and the run loop re-sets it on
+ * entry, so a resumed run never inherits a stale list. */
+let dependencyDenyGlobs: string[] = [];
+
+export function setDependencySourceDeny(globs: string[]): void {
+  dependencyDenyGlobs = [...globs];
+}
+
 /**
  * A copy of `base` with the ledger guard AND the reviewer agents injected as
  * inline config — never mutates the input, so a caller's shared `process.env`
@@ -46,6 +56,8 @@ export const LEDGER_GUARD_CONFIG = JSON.stringify({
  * change their opencode behaviour). Both vanish with the subprocess.
  */
 export function guardedEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const config = { ...JSON.parse(LEDGER_GUARD_CONFIG), ...reviewerAgentConfig() };
+  const guard = JSON.parse(LEDGER_GUARD_CONFIG) as { permission: { bash: Record<string, string> } };
+  for (const glob of dependencyDenyGlobs) guard.permission.bash[glob] = "deny";
+  const config = { ...guard, ...reviewerAgentConfig() };
   return { ...base, OPENCODE_CONFIG_CONTENT: JSON.stringify(config) };
 }

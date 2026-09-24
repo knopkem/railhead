@@ -27,6 +27,26 @@ const ticket02: BuilderTicket = {
 
 const fresh = { session: {}, granularity: "ticket" as const, tickets: [ticket01], verify: ["npm test"] };
 
+describe("buildBuilderPrompt context economy (builder-seat dependency discipline)", () => {
+  it("arms the seeded builder with memory-first API use and the compiler-as-oracle escalation ladder", () => {
+    // The gap behind a live spiral: a builder seat spent 35 of 54 tool calls
+    // grepping a dependency's installed source to pre-verify an API — the
+    // implementer prompt forbids this, but the builder prompt never carried
+    // the rule. The seeded session must hear it.
+    const p = buildBuilderPrompt(fresh);
+    expect(p).toContain("Context economy");
+    expect(p).toContain("from memory");
+    expect(p).toContain("compile error is a ~100-token oracle");
+    expect(p).toContain("examples/ directory");
+    expect(p).toContain("never a full file dump");
+  });
+
+  it("does NOT repeat the block on a warm pointer resume (the session holds it from its seed — #106 dedup)", () => {
+    const p = buildBuilderPrompt({ ...fresh, session: { sessionId: "ses_x" }, contextPointers: { contracts: "railhead.contracts.json" } });
+    expect(p).not.toContain("Context economy");
+  });
+});
+
 describe("buildBuilderPrompt (issue #84)", () => {
   it("carries the ticket body, criteria, file, mission and the verify command into a fresh builder", () => {
     const p = buildBuilderPrompt(fresh);

@@ -41,6 +41,19 @@ describe("DEFAULT_INFRA_BACKOFF_SEC", () => {
   });
 });
 
+describe("dependency_source_deny", () => {
+  it("defaults to an empty list", async () => {
+    expect(DEFAULT_CONFIG.dependency_source_deny).toEqual([]);
+    const cfg = await loadConfig(await makeCwd(null));
+    expect(cfg.dependency_source_deny).toEqual([]);
+  });
+
+  it("loads the project's deny globs verbatim and drops non-strings", async () => {
+    const cfg = await loadConfig(await makeCwd('{"dependency_source_deny":["*/.cargo/registry/src/*",42]}'));
+    expect(cfg.dependency_source_deny).toEqual(["*/.cargo/registry/src/*"]);
+  });
+});
+
 describe("max_step_model_sec (#78)", () => {
   it("defaults to 3600 in the resolved config", async () => {
     expect(DEFAULT_MAX_STEP_MODEL_SEC).toBe(3600);

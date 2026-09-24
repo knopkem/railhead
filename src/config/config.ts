@@ -265,6 +265,18 @@ export interface RailheadConfig {
    * enable on a project you'd let an agent touch freely. Defaults to false.
    */
   yolo_permissions?: boolean;
+  /**
+   * Bash command globs the phase subprocesses must NOT run, injected as
+   * opencode `deny` rules alongside the ledger guard. The mechanical backstop
+   * for the prompt-level dependency-source rule: a model that greps a
+   * dependency cache to pre-verify an API pulls multi-thousand-token source
+   * dumps into its context — a durable builder session can fill its window
+   * before writing a line. The railhead core stays technology-agnostic, so the
+   * language-specific globs live HERE, in the project's railhead.json (e.g.
+   * globs matching the package manager's registry-cache source directory or
+   * the project's dependency install directory). Defaults to [] (off).
+   */
+  dependency_source_deny?: string[];
   /** Issue #39: keep one `opencode serve` process alive for the whole run
    * (or plan session), and have each `executeOpendCode` phase attach to it
    * via `opencode run --attach <url>` instead of spawning a standalone
@@ -715,6 +727,7 @@ export const DEFAULT_CONFIG: RailheadConfig = {
   on_block: "continue",
   sharpen_max_rounds: DEFAULT_SHARPEN_MAX_ROUNDS,
   yolo_permissions: false,
+  dependency_source_deny: [],
   persistent_worker: false,
   session_builder: true,
   checkpoint_granularity: "product",
@@ -796,6 +809,9 @@ export async function loadConfig(cwd: string): Promise<RailheadConfig> {
       // whose existing config suddenly stopped disabling the interview.
       sharpen_max_rounds: j.sharpen_max_rounds ?? legacyNumber(j, "grill_max_rounds") ?? DEFAULT_CONFIG.sharpen_max_rounds,
       yolo_permissions: j.yolo_permissions ?? DEFAULT_CONFIG.yolo_permissions,
+      dependency_source_deny: Array.isArray(j.dependency_source_deny)
+        ? j.dependency_source_deny.filter((g: unknown): g is string => typeof g === "string")
+        : DEFAULT_CONFIG.dependency_source_deny,
       persistent_worker: j.persistent_worker ?? DEFAULT_CONFIG.persistent_worker,
       session_builder: j.session_builder == null ? DEFAULT_CONFIG.session_builder : j.session_builder === true,
       checkpoint_granularity: parseCheckpointGranularity(j.checkpoint_granularity) ?? DEFAULT_CONFIG.checkpoint_granularity,

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { LEDGER_GUARD_CONFIG, guardedEnv } from "./guard.ts";
+import { LEDGER_GUARD_CONFIG, guardedEnv, setDependencySourceDeny } from "./guard.ts";
 
 describe("LEDGER_GUARD_CONFIG", () => {
   it("is valid inline opencode config that denies deleting the ledger", () => {
@@ -51,5 +51,31 @@ describe("guardedEnv", () => {
     const cfg = JSON.parse(out.OPENCODE_CONFIG_CONTENT!) as { permission: Record<string, unknown>; agent: Record<string, unknown> };
     expect(cfg.permission).toBeDefined();
     expect(cfg.agent).toBeDefined();
+  });
+});
+
+describe("setDependencySourceDeny", () => {
+  it("merges project-configured dependency-source globs as bash denies alongside the ledger guard", () => {
+    // The backstop for the prompt-level rule: a model that greps a dependency
+    // cache despite the Context-economy block hits a permission deny instead of
+    // pulling a 5k-token source dump into a durable session.
+    setDependencySourceDeny(["*/.cargo/registry/src/*", "*cd ~/.cargo*"]);
+    const out = guardedEnv({} as NodeJS.ProcessEnv);
+    const cfg = JSON.parse(out.OPENCODE_CONFIG_CONTENT!) as { permission: { bash: Record<string, string> } };
+
+    expect(cfg.permission.bash["*/.cargo/registry/src/*"]).toBe("deny");
+    expect(cfg.permission.bash["*cd ~/.cargo*"]).toBe("deny");
+    expect(cfg.permission.bash["rm -rf .railhead*"]).toBe("deny");
+    expect(cfg.permission.bash["*"]).toBe("allow");
+    setDependencySourceDeny([]);
+  });
+
+  it("clears cleanly — no stale denies leak into the next run in this process", () => {
+    setDependencySourceDeny(["*node_modules/*"]);
+    setDependencySourceDeny([]);
+    const out = guardedEnv({} as NodeJS.ProcessEnv);
+    const cfg = JSON.parse(out.OPENCODE_CONFIG_CONTENT!) as { permission: { bash: Record<string, string> } };
+
+    expect(cfg.permission.bash["*node_modules/*"]).toBeUndefined();
   });
 });

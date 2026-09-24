@@ -46,6 +46,18 @@ describe("classifyFailure (#80)", () => {
   it("defaults empty/unknown evidence to blip", () => {
     expect(classifyFailure(ev(), BUDGET)).toBe("blip");
   });
+
+  it("classifies repeated compaction as capacity even below the peak gate", () => {
+    // The spiral shape observed in a live builder run: peak 81.6k of a 100k
+    // budget (under the 0.9 gate), no error wording — the session compacted
+    // twice without reaching its checkpoint. Today that falls through to blip
+    // and gets an identical retry, which re-enters the same spiral.
+    expect(classifyFailure(ev({ peakTokens: 81_000, compactions: 2 }), BUDGET)).toBe("capacity");
+  });
+
+  it("a single compaction stays blip — one compaction is normal fill management on a durable session", () => {
+    expect(classifyFailure(ev({ peakTokens: 81_000, compactions: 1 }), BUDGET)).toBe("blip");
+  });
 });
 
 describe("nextRung (#80)", () => {
@@ -55,6 +67,13 @@ describe("nextRung (#80)", () => {
     expect(rung.rung).toBe(3);
     expect(rung.backoffSec).toBe(0);
     expect(rung.diagnosis).toContain("95000");
+  });
+
+  it("a compaction spiral short-circuits to capacity-fail on the first attempt, naming the compaction count", () => {
+    const rung = nextRung(ev({ peakTokens: 81_000, compactions: 3 }), 1, BUDGET, []);
+    expect(rung.action).toBe("capacity-fail");
+    expect(rung.class).toBe("capacity");
+    expect(rung.diagnosis).toContain("3 times");
   });
 
   it("auth error hard-fails immediately with zero retries", () => {

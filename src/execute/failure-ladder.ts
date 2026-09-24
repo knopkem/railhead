@@ -28,6 +28,14 @@ export interface FailureEvidence {
   code: number | null;
   signal: string | null;
   durationMs: number;
+  /** Compaction events seen in the phase's stream (telemetry.analyzePhase).
+   * A durable builder session that compacts repeatedly without reaching its
+   * checkpoint is spiraling: each compaction summarizes away the working
+   * notes, the session re-reads, refills, and compacts again. Peak tokens
+   * stay BELOW the peak gate (compaction caps fill), so without this signal
+   * the spiral classifies as blip and gets an identical retry into the same
+   * wall. Undefined on phases that never analyzed their stream. */
+  compactions?: number;
 }
 
 export interface LadderRung {
@@ -60,6 +68,12 @@ const CAPACITY_PATTERNS = [
  * using it here is not brittle. */
 export const CAPACITY_PEAK_FRACTION = 0.9;
 
+/** Compactions within ONE failed phase at which the phase is treated as
+ * capacity-limited. One compaction is normal fill management on a durable
+ * session (ADR 0022); two or more without completing means the unit of work
+ * does not fit the window — retrying identically only re-enters the spiral. */
+export const SPIRAL_COMPACTION_THRESHOLD = 2;
+
 /** Backoff per rung when the wrapper does not supply its own schedule (rung 3
  * is terminal — zero backoff). Mirrors `infra_backoff_sec`'s leading entries. */
 const DEFAULT_BACKOFF_SEC = [5, 15, 0];
@@ -81,6 +95,7 @@ export function classifyFailure(evidence: FailureEvidence, budget: number): Fail
   const message = evidence.errorMessage ?? "";
   if (matches(message, FATAL_CONFIG_PATTERNS)) return "fatal-config";
   if (isCapacity(evidence, budget)) return "capacity";
+  if ((evidence.compactions ?? 0) >= SPIRAL_COMPACTION_THRESHOLD) return "capacity";
   return "blip";
 }
 
@@ -96,6 +111,7 @@ export function evidenceFromResult(result: {
   code: number | null;
   signal: string | null;
   durationMs: number;
+  compactions?: number;
 }): FailureEvidence {
   return {
     status: result.status,
@@ -106,6 +122,7 @@ export function evidenceFromResult(result: {
     code: result.code,
     signal: result.signal,
     durationMs: result.durationMs,
+    compactions: result.compactions,
   };
 }
 
@@ -145,13 +162,16 @@ export function nextRung(
   }
   if (cls === "capacity") {
     const peakGate = evidence.peakTokens >= budget * CAPACITY_PEAK_FRACTION;
+    const spiral = !peakGate && (evidence.compactions ?? 0) >= SPIRAL_COMPACTION_THRESHOLD;
     return {
       rung: 3,
       action: "capacity-fail",
       backoffSec: 0,
       diagnosis: peakGate
         ? `capacity failure: peak ${evidence.peakTokens} tokens is at/above ${Math.round(CAPACITY_PEAK_FRACTION * 100)}% of the ${budget}-token budget — the request is too large, not the code`
-        : `capacity failure: capacity wording matched (${evidence.errorMessage ?? "unknown"}) — the request is too large, not the code`,
+        : spiral
+          ? `capacity failure: the phase compacted ${evidence.compactions} times without finishing — the unit of work does not fit the ${budget}-token window; a fresh session from the last green commit is cheaper than another compaction cycle`
+          : `capacity failure: capacity wording matched (${evidence.errorMessage ?? "unknown"}) — the request is too large, not the code`,
       class: "capacity",
     };
   }
