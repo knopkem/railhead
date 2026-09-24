@@ -166,9 +166,18 @@ into ONE user message, the builder grew append-only.
    by the prompt-cache telemetry, never a rebuild (#133).
 4. **`persistent_worker` is not the cache lever.** It can stay off; #39's
    process-startup amortization remains its only justification.
-5. **Policy**: planning tries the fast 35B-A3B first, with the dense model as
-   an explicit server-swap fallback; the validation ticket (#135) decides
-   whether that default holds.
+5. **Policy (decided by #135, 2026-09-24)**: planning does **not** try the
+   fast 35B-A3B first. Measured on the Splash fixture (122,880 ctx): the 35B
+   failed the goal-coverage audit in both repair rounds and rejected even a
+   one-line fixture goal, while the dense 27B passed and emitted a clean
+   4-ticket graph — at a raised request ceiling, since ticket decomposition
+   exceeded the default 60k budget. The same 35B caught a seeded contract
+   violation in only 1 of 4 completed judge runs, and a baseline-plan E2E on
+   it failed ticket 01 after four attempts (verify green throughout, a false
+   compile blocker among the findings). The dense model stays the default
+   plan/build/judge seat; the fast model is an executor, not yet a dependable
+   planner or judge. Evidence: `npm run bench` (`scripts/bench.mts`) results
+   and the #135 verdict.
 
 Telemetry (#130) records every phase's first-step cold/cached split in the
 report, with a run-level hit ratio and a warning when a review/goal/contract
