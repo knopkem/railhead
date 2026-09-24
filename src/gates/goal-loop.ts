@@ -4,7 +4,7 @@ import { loadTickets, type Ticket } from "../core/ticket.ts";
 import { contextBudget, firesAtRunEnd, goalCheckpointIsAdvisory, goalFiresCheckpointsMidRun, DEFAULT_MAX_REPLANS } from "../config/config.ts";
 import { reviewSummary, runReviewAgent } from "./reviewer.ts";
 import { runCommandFromVerify } from "./visual.ts";
-import { detectGameCanvas } from "../core/project-assets.ts";
+import { detectGameCanvas, RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
 import { touchesVisualSurface } from "../context/surface.ts";
 import { pushLearnings, readLearnings } from "../context/learnings.ts";
 import { pushDigest, readDigest } from "../context/digest.ts";
@@ -306,7 +306,7 @@ export async function runGoalReview(
     ledgerDir: ledger,
     phaseFile,
     model: goalModel,
-    agent: null,
+    agent: RAILHEAD_AGENT_NAMES.observe,
     live: !state.quiet,
     verbose: state.verbose,
     heartbeat: true,

@@ -6,6 +6,7 @@ import { readLearnings } from "../context/learnings.ts";
 import { readDigest } from "../context/digest.ts";
 import { writeFile } from "node:fs/promises";
 import { indexOfOutsideFences, indexOfLiteralOutsideFences, lastIndexOfLiteralOutsideFences } from "../core/fences.ts";
+import { RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
 
 export interface ReviewOutcome {
   blocking: string;
@@ -324,7 +325,7 @@ export async function review(options: ReviewArgs): Promise<ReviewOutcome> {
     ledgerDir: options.ledgerDir,
     phaseFile: options.phaseFile,
     model: options.model,
-    agent: options.readMode || useDiffFile ? "railhead-reviewer-readmode" : "railhead-reviewer",
+    agent: options.readMode || useDiffFile ? RAILHEAD_AGENT_NAMES.reviewReadmode : RAILHEAD_AGENT_NAMES.review,
     live: options.live,
     verbose: options.verbose,
     heartbeat: options.heartbeat,

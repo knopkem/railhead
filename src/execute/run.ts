@@ -44,7 +44,7 @@ export { nextTicketNumber } from "../gates/corrective.ts";
 import { CEILING_FRACTION, DEFAULT_MAX_REPLANS, DEFAULT_MODEL, codeReviewRunsMidRun, contextBudget, effectiveContextTokens, firesAtRunEnd, firesMidRun, goalFiresCheckpointsMidRun, queryOpencodeContextLimit, resolveModels, severityTriggersRetry, visualFiresAtRunEnd, type CheckpointGranularity } from "../config/config.ts";
 import { analyzePhase, summarizePhaseFiles } from "../core/telemetry.ts";
 import { advanceRetry, INITIAL_COUNTERS, type GateCounters, type GateLimits } from "../gates/gate.ts";
-import { ensureProjectGitignore, ensureProjectOpenCodePermissions, frameworkExternalDirsForVerify, detectFramework, frameworkSmokeRun } from "../core/project-assets.ts";
+import { ensureProjectGitignore, ensureProjectOpenCodePermissions, frameworkExternalDirsForVerify, detectFramework, frameworkSmokeRun, RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
 import { nowClock } from "../cli/overview.ts";
 import { haltReason } from "../core/halt.ts";
 import {
@@ -1520,7 +1520,7 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
             ledgerDir: ledger,
             phaseFile: isPhase,
             model: interactModel,
-            agent: null,
+            agent: RAILHEAD_AGENT_NAMES.observe,
             live: !state.quiet,
             verbose: state.verbose,
             heartbeat: true,
@@ -1961,6 +1961,7 @@ async function runTestPhase(
     ledgerDir: ledger,
     phaseFile,
     model: state._models?.implement ?? null,
+    agent: RAILHEAD_AGENT_NAMES.build,
     live: !state.quiet, verbose: state.verbose,
     heartbeat: true,
     livePrefix: `${ticket.number} test`,
@@ -2303,6 +2304,7 @@ async function runBuilderStep(
       ledgerDir: ledger,
       phaseFile,
       model: state._models?.implement ?? null,
+      agent: RAILHEAD_AGENT_NAMES.build,
       session: opts.sessionIdForPrompt,
       guardMode: "telemetry",
       live: !state.quiet, verbose: state.verbose,
@@ -2648,6 +2650,7 @@ async function runImplement(
     ledgerDir: ledger,
     phaseFile,
     model: state._models?.implement ?? null,
+    agent: RAILHEAD_AGENT_NAMES.build,
     live: !state.quiet, verbose: state.verbose,
     heartbeat: true,
     livePrefix: `${ticket.number} implement`,

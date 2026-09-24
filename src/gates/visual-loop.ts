@@ -14,7 +14,7 @@ import { eventPath, writeState } from "../core/ledger.ts";
 import { hasVisualEvidence, hasInteractionEvidence, parseToolCalls, BUILD_TEST_EXCLUDE_RE } from "./evidence.ts";
 import { requiresRealInputEvidence, type ProjectInterface } from "../config/interface.ts";
 import { contextBudget, firesAtRunEnd, firesMidRun, DEFAULT_VISUAL_ROUND_WALL_SEC } from "../config/config.ts";
-import { detectGameCanvas } from "../core/project-assets.ts";
+import { detectGameCanvas, RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
 import { nowClock } from "../cli/overview.ts";
 import { readVisionCapabilityFor } from "../execute/vision-probe.ts";
 import { processCorrectiveFindings, type RunTicket } from "./corrective.ts";
@@ -96,9 +96,10 @@ export async function runVisualReview(options: {
     ledgerDir: ledger,
     phaseFile,
     model: state._models?.visual ?? null,
-    // Visual review needs bash to run the app and capture screenshots. The
-    // default opencode agent has bash; the railhead-reviewer agent is read-only.
-    agent: null,
+    // Visual review needs bash to run the app and capture screenshots, so it
+    // runs as the observe seat — the one shared system prompt with the
+    // project's ordinary toolset, not the read-only reviewer.
+    agent: RAILHEAD_AGENT_NAMES.observe,
     live: !state.quiet,
     verbose: state.verbose,
     heartbeat: true,

@@ -14,6 +14,7 @@ import { nowClock } from "../cli/overview.ts";
 import { writeState } from "../core/ledger.ts";
 import { detectGroupCheckpoints } from "./goal-loop.ts";
 import { addPendingCheckpoint, clearPendingCheckpoint } from "../core/pending-checkpoints.ts";
+import { RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
 
 /** The structural gate's unreviewed reached checkpoints — `structural_reviews`
  * is its own dedup set, so goal firing first (or at all) no longer suppresses
@@ -104,7 +105,7 @@ export async function runStructuralReview(
     ledgerDir: ledger,
     phaseFile,
     model: goalModel,
-    agent: null,
+    agent: RAILHEAD_AGENT_NAMES.observe,
     live: !state.quiet,
     verbose: state.verbose,
     heartbeat: true,

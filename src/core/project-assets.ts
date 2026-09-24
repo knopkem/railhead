@@ -2,25 +2,69 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 /**
- * One reviewer agent as opencode's `agent` config schema (description, mode,
+ * One railhead agent as opencode's `agent` config schema (description, mode,
  * permission map, prompt). The railhead no longer writes these into the
  * project's `.opencode/agent/` directory — that permanently altered the user's
  * opencode behaviour. They are injected per-subprocess as inline config via
  * `OPENCODE_CONFIG_CONTENT` (see guard.ts) so they exist only for the lifetime
- * of the review subprocess and leave nothing behind.
+ * of the phase and leave nothing behind.
+ *
+ * `permission` is optional on purpose: a seat that needs the ordinary project
+ * toolset (builder, run-the-app observer) omits it and inherits the project's
+ * permission config exactly as opencode's default agent does, ledger guard
+ * included. Only seats whose job REQUIRES a reduced toolset (the reviewers,
+ * the base session) carry an explicit map.
  */
-export interface ReviewerAgent {
+export interface RailheadAgent {
   description: string;
   mode: "primary";
-  permission: Record<string, string | Record<string, string>>;
+  permission?: Record<string, string | Record<string, string>>;
   prompt: string;
 }
+
+/**
+ * The one system prompt every railhead agent carries, byte-identical across
+ * seats. Prefix caching restores at the last complete shared message, so an
+ * identical message 0 is what lets one seat's phase warm the server cache for
+ * another's (ADR 0020 amendment). A role-specific system prompt — even one
+ * that differs in a single word — kills every cross-seat restore.
+ *
+ * It is deliberately role-neutral: a seat's role, task, and exact output
+ * contract live in the task message after it, where volatile and
+ * role-specific material belongs. What it carries are the behaviour rules
+ * shared by every seat — act through tools, never claim unobserved results,
+ * follow the repo's conventions, verify your own work, never touch git or the
+ * run ledger, keep replies in the requested format. These are the essentials
+ * the builder seat gives up by leaving opencode's default agent.
+ */
+export const RAILHEAD_AGENT_PROMPT = `You are a railhead agent: one seat of an unattended, gate-verified build. Your role, your task, and the exact format of your reply are in the task message that follows. Read that message and follow it precisely — this system prompt is deliberately role-neutral, identical for every railhead seat, and carries only the behaviour shared by all of them.
+
+Act through the tools you are granted, and keep going until the task is completely resolved. Never report a result you did not observe yourself: no command output, file change, screenshot, or test result may be claimed without the tool call that produced it.
+
+Rules shared by every seat:
+- The repository is the source of truth. Search and read the existing code before writing, and follow the project's established conventions, dependencies, and layout.
+- Verify your own work with the project's build and test commands, and report exactly what you ran and what it printed.
+- Git and the run ledger belong to the railhead: never commit, and never create, modify, or delete anything under .railhead/run-*.
+- Never expose or commit secrets, credentials, or tokens.
+- Stay inside the task's scope, and reply terse in the exact format the task message requests — no preamble, no recap, no closing summary.`;
+
+/** The write-capable builder seat: implements tickets, authors tests, and
+ * applies gate findings. It inherits the project's toolset and the injected
+ * ledger guard, so its write access remains governed by the same permission
+ * config opencode's default agent used. */
+export const RAILHEAD_BUILD_AGENT: RailheadAgent = {
+  description:
+    "Write-capable builder seat for the Railhead. Implements tickets, writes tests, and applies gate findings in the project workspace.",
+  mode: "primary",
+  prompt: RAILHEAD_AGENT_PROMPT,
+};
 
 /**
  * The reviewer agent the Railhead uses for diff-mode review. One catch-all
  * deny hides every tool, so the reviewer can only critique the diff already
  * present in its prompt — it must not explore the repo or balloon its context
- * by reading files. This is the mechanism that keeps reviews cheap.
+ * by reading files. This is the mechanism that keeps reviews cheap. The
+ * read-only role text lives in the review task message, not here.
  *
  * The catch-all is load-bearing, not shorthand: opencode matches permission
  * keys as globs against the tool NAME and takes the LAST matching rule, so
@@ -29,25 +73,24 @@ export interface ReviewerAgent {
  * opencode config. Enumerating built-ins is how a reviewer denied `bash` once
  * held Blender's `execute_blender_code`, i.e. arbitrary Python.
  */
-export const REVIEWER_AGENT: ReviewerAgent = {
+export const RAILHEAD_REVIEW_AGENT: RailheadAgent = {
   description:
-    "Read-only critique of a ticket's diff for the Railhead. Every tool is denied — reviews only the diff in the prompt.",
+    "Read-only critique of a ticket's diff for the Railhead. Every tool is denied — reviews only the material in the prompt.",
   mode: "primary",
   permission: {
     "*": "deny",
   },
-  prompt:
-    "You are the Reviewer for one ticket of an unattended build. You are read-only and do not explore the project: every file a review needs is already in the prompt below (the ticket body, its acceptance criteria, and the diff). You have no read, search, or command tools. Critically evaluate only the code in the diff against the criteria, and answer in the exact format the railhead prompt requests.",
+  prompt: RAILHEAD_AGENT_PROMPT,
 };
 
 /**
  * A second reviewer agent variant for large diffs (#30): identical to
- * REVIEWER_AGENT except `read` is allowed, so the reviewer can read the diff
- * file or the touched source files one at a time instead of having the entire
- * diff injected into its initial prompt. Compaction handles context growth
- * between read calls — the same mechanism that works for the Implementer. The
- * catch-all deny still hides every other tool, so the reviewer cannot explore,
- * just read the named files.
+ * RAILHEAD_REVIEW_AGENT except `read` is allowed, so the reviewer can read the
+ * diff file or the touched source files one at a time instead of having the
+ * entire diff injected into its initial prompt. Compaction handles context
+ * growth between read calls — the same mechanism that works for the
+ * Implementer. The catch-all deny still hides every other tool, so the
+ * reviewer cannot explore, just read the named files.
  *
  * `read` must follow the catch-all (last match wins), and its patterns deny
  * the `mcp:*` pattern space: opencode gates its MCP-resource tools under the
@@ -55,7 +98,7 @@ export const REVIEWER_AGENT: ReviewerAgent = {
  * a channel into every configured MCP server. File reads use worktree-relative
  * paths and never match `mcp:*`.
  */
-export const REVIEWER_READMODE_AGENT: ReviewerAgent = {
+export const RAILHEAD_REVIEW_READMODE_AGENT: RailheadAgent = {
   description:
     "Read-mode critique for the Railhead. Reads the diff file or the touched source files the prompt names — never edits, runs commands, or explores the repo.",
   mode: "primary",
@@ -63,23 +106,61 @@ export const REVIEWER_READMODE_AGENT: ReviewerAgent = {
     "*": "deny",
     read: { "*": "allow", "mcp:*": "deny" },
   },
-  prompt:
-    "You are the Reviewer for one ticket of an unattended build. You review by reading the files or the diff file the prompt names — never edit, run commands, or explore the repo beyond what the prompt lists. Read each file the prompt instructs you to read (a diff file, the touched source files, or both), check it against the acceptance criteria, and answer in the exact format the railhead prompt requests.",
+  prompt: RAILHEAD_AGENT_PROMPT,
 };
 
+/** The run-the-app reviewer seat (visual, goal, structural): it launches the
+ * build, drives it with real input, and judges evidence — so it needs bash,
+ * reads, and the user's MCP tooling. It omits `permission` and inherits the
+ * project config like the builder; a catch-all deny here would strip the very
+ * tools these seats exist to use. */
+export const RAILHEAD_OBSERVE_AGENT: RailheadAgent = {
+  description:
+    "Run-the-app reviewer seat for the Railhead (visual, goal, structural): launches the build, drives it with real input, and judges the evidence.",
+  mode: "primary",
+  prompt: RAILHEAD_AGENT_PROMPT,
+};
+
+/** The base-session seat (#133): establishes the shared `[system][preamble]`
+ * prefix a run's phases fork, so it must have no side effects. Every tool is
+ * denied, the same catch-all the diff reviewer uses. */
+export const RAILHEAD_BASE_AGENT: RailheadAgent = {
+  description:
+    "Base-session seat for the Railhead. Every tool is denied — the base call only establishes the shared prefix and must have no side effects.",
+  mode: "primary",
+  permission: {
+    "*": "deny",
+  },
+  prompt: RAILHEAD_AGENT_PROMPT,
+};
+
+/** The `--agent <name>` values, in one place: call sites and the injected
+ * config both key off these, so a seat name can never drift between the
+ * runner and the agent definition. */
+export const RAILHEAD_AGENT_NAMES = {
+  build: "railhead-build",
+  review: "railhead-review",
+  reviewReadmode: "railhead-review-readmode",
+  observe: "railhead-observe",
+  base: "railhead-base",
+} as const;
+
 /**
- * The reviewer agents as inline opencode `agent` config, keyed by the names
- * the reviewer runner passes to `opencode run --agent <name>`. Injected into
- * every review subprocess's `OPENCODE_CONFIG_CONTENT` (see guard.ts), so the
- * agents resolve without ever touching the project's `.opencode/` directory.
+ * Every railhead agent as inline opencode `agent` config, keyed by the names
+ * `opencode run --agent <name>` resolves. Injected into every phase's
+ * subprocess `OPENCODE_CONFIG_CONTENT` (see guard.ts), so the agents resolve
+ * without ever touching the project's `.opencode/` directory.
  */
-export function reviewerAgentConfig(): { agent: Record<string, ReviewerAgent> } {
-  return {
-    agent: {
-      "railhead-reviewer": REVIEWER_AGENT,
-      "railhead-reviewer-readmode": REVIEWER_READMODE_AGENT,
-    },
-  };
+export const RAILHEAD_AGENTS: Record<string, RailheadAgent> = {
+  [RAILHEAD_AGENT_NAMES.build]: RAILHEAD_BUILD_AGENT,
+  [RAILHEAD_AGENT_NAMES.review]: RAILHEAD_REVIEW_AGENT,
+  [RAILHEAD_AGENT_NAMES.reviewReadmode]: RAILHEAD_REVIEW_READMODE_AGENT,
+  [RAILHEAD_AGENT_NAMES.observe]: RAILHEAD_OBSERVE_AGENT,
+  [RAILHEAD_AGENT_NAMES.base]: RAILHEAD_BASE_AGENT,
+};
+
+export function railheadAgentConfig(): { agent: Record<string, RailheadAgent> } {
+  return { agent: RAILHEAD_AGENTS };
 }
 
 /**

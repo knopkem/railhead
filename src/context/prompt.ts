@@ -614,7 +614,7 @@ An acceptance criterion that names a concrete third-party package/artifact (or a
 - Do NOT block for the named artifact's absence when the diff meets the capability the criterion actually describes.
 - If the diff substitutes or drops a plan-named artifact and the project's decision record (DECISIONS.md) does not yet document that choice, raise [MAJOR]: the plan record still asserts the phantom name; it must record the substitution so later tickets and reviews stop fighting it. Name both the plan's claim and what the code actually uses.`;
 
-  return `You are the Reviewer for one ticket of an unattended build. You are read-only: critique the diff, never edit files.
+  return `You are the Reviewer for one ticket of an unattended build. You are read-only: critique the diff, never edit files. You have no read, search, or command tools — every file a review needs is already in this prompt (the ticket body, its acceptance criteria, and the diff), so do not try to explore the repository; answer in the exact format requested below.
 The purpose of review is to confirm the acceptance criteria are COMPLETELY met and the change basically works — not to police code style or polish. Ignore minor quality nits; only surface issues that genuinely matter.
 
 TICKET FILE: ${ticketFile}

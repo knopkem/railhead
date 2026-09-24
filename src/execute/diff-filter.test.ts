@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { stripNonSource, estimateTokens, isNonSourceFile, NESTED_REVIEW_SUFFIX } from "./diff-filter.ts";
-import { REVIEWER_READMODE_AGENT } from "../core/project-assets.ts";
+import { RAILHEAD_REVIEW_READMODE_AGENT } from "../core/project-assets.ts";
 
 describe("isNonSourceFile", () => {
   it("flags lock files", () => {
@@ -188,9 +188,9 @@ describe("estimateTokens", () => {
   });
 });
 
-describe("REVIEWER_READMODE_AGENT", () => {
+describe("RAILHEAD_REVIEW_READMODE_AGENT", () => {
   it("allows read but denies all other tools", () => {
-    const permission = REVIEWER_READMODE_AGENT.permission;
+    const permission = RAILHEAD_REVIEW_READMODE_AGENT.permission!;
     // One catch-all deny covers every other tool family (built-in and MCP);
     // read is re-allowed after it because opencode's last matching rule wins.
     expect(permission["*"]).toBe("deny");
@@ -205,7 +205,7 @@ describe("REVIEWER_READMODE_AGENT", () => {
   });
 
   it("describes read-only file access (not zero-tool like diff mode)", () => {
-    expect(REVIEWER_READMODE_AGENT.description).toMatch(/read.*file/i);
+    expect(RAILHEAD_REVIEW_READMODE_AGENT.description).toMatch(/read.*file/i);
   });
 });
 

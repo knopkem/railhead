@@ -72,7 +72,7 @@ function okResult(steps = 1, toolCalls = 1) {
 
 /** Identify which kind of phase a mocked executeOpendCode call represents, purely from the options run.ts passes — mirrors how a human reading the ledger would tell them apart. */
 function kindOf(options: { phaseFile: string; agent?: string | null }): "review" | "contracts" | "implement" | "visual" | "test" | "goal" | "structural" | "replan" | "reconcile" {
-  if (options.agent === "railhead-reviewer") return "review";
+  if (options.agent === "railhead-review" || options.agent === "railhead-review-readmode") return "review";
   if (options.phaseFile.includes("-contracts")) return "contracts";
   if (options.phaseFile.endsWith("-visual") || options.phaseFile.startsWith("visual-")) return "visual";
   if (options.phaseFile.endsWith("-test")) return "test";

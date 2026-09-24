@@ -1,4 +1,4 @@
-import { reviewerAgentConfig } from "../core/project-assets.ts";
+import { railheadAgentConfig } from "../core/project-assets.ts";
 
 /**
  * The opencode permission snippet injected into every agent phase. The railhead
@@ -47,17 +47,17 @@ export function setDependencySourceDeny(globs: string[]): void {
 }
 
 /**
- * A copy of `base` with the ledger guard AND the reviewer agents injected as
+ * A copy of `base` with the ledger guard AND every railhead agent injected as
  * inline config — never mutates the input, so a caller's shared `process.env`
- * object is not clobbered. The reviewer agents ride in the same
- * `OPENCODE_CONFIG_CONTENT` so the review subprocess can resolve
- * `opencode run --agent railhead-reviewer` without the railhead ever writing
+ * object is not clobbered. All five seats ride in the same
+ * `OPENCODE_CONFIG_CONTENT`, so any phase can resolve
+ * `opencode run --agent railhead-*` without the railhead ever writing
  * `.opencode/agent/*.md` into the user's project (which would permanently
- * change their opencode behaviour). Both vanish with the subprocess.
+ * change their opencode behaviour). All of it vanishes with the subprocess.
  */
 export function guardedEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const guard = JSON.parse(LEDGER_GUARD_CONFIG) as { permission: { bash: Record<string, string> } };
   for (const glob of dependencyDenyGlobs) guard.permission.bash[glob] = "deny";
-  const config = { ...guard, ...reviewerAgentConfig() };
+  const config = { ...guard, ...railheadAgentConfig() };
   return { ...base, OPENCODE_CONFIG_CONTENT: JSON.stringify(config) };
 }

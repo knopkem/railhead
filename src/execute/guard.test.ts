@@ -33,23 +33,47 @@ describe("guardedEnv", () => {
     expect(out.PATH).toBe("/bin");
   });
 
-  it("injects the reviewer agents alongside the ledger guard", () => {
+  it("injects every railhead agent alongside the ledger guard", () => {
     const out = guardedEnv({} as NodeJS.ProcessEnv);
     const cfg = JSON.parse(out.OPENCODE_CONFIG_CONTENT!) as {
-      agent: Record<string, { mode: string; permission: Record<string, unknown>; prompt: string }>;
+      agent: Record<string, { mode: string; permission?: Record<string, unknown>; prompt: string }>;
     };
 
-    expect(Object.keys(cfg.agent).sort()).toEqual(["railhead-reviewer", "railhead-reviewer-readmode"]);
+    expect(Object.keys(cfg.agent).sort()).toEqual([
+      "railhead-base",
+      "railhead-build",
+      "railhead-observe",
+      "railhead-review",
+      "railhead-review-readmode",
+    ]);
     // The catch-all deny is the guard: opencode takes the LAST matching rule,
     // so denying `*` hides MCP/custom tools an enumerated denylist cannot name
     // (the chrome-devtools/blender escape the diff reviewer used to read files).
-    expect(cfg.agent["railhead-reviewer"].permission["*"]).toBe("deny");
-    expect(cfg.agent["railhead-reviewer"].permission.read).toBeUndefined();
-    expect(cfg.agent["railhead-reviewer-readmode"].permission["*"]).toBe("deny");
+    expect(cfg.agent["railhead-review"].permission!["*"]).toBe("deny");
+    expect(cfg.agent["railhead-review"].permission!.read).toBeUndefined();
+    expect(cfg.agent["railhead-review-readmode"].permission!["*"]).toBe("deny");
     // read is re-allowed AFTER the catch-all, but only for the filesystem: the
     // pattern map denies the `mcp:*` space opencode gates its MCP-resource
     // tools under (the same `read` permission).
-    expect(cfg.agent["railhead-reviewer-readmode"].permission.read).toEqual({ "*": "allow", "mcp:*": "deny" });
+    expect(cfg.agent["railhead-review-readmode"].permission!.read).toEqual({ "*": "allow", "mcp:*": "deny" });
+    // The base session must have no side effects; one catch-all deny, like the
+    // diff reviewer.
+    expect(cfg.agent["railhead-base"].permission!["*"]).toBe("deny");
+    // The write-capable (build) and run-the-app (observe) seats inherit the
+    // project's toolset and the ledger guard rather than carrying their own
+    // permission map — an agent-level catch-all would override the guard's
+    // ledger denies (agent rules are matched last).
+    expect(cfg.agent["railhead-build"].permission).toBeUndefined();
+    expect(cfg.agent["railhead-observe"].permission).toBeUndefined();
+  });
+
+  it("gives every railhead agent the byte-identical shared system prompt", () => {
+    const out = guardedEnv({} as NodeJS.ProcessEnv);
+    const cfg = JSON.parse(out.OPENCODE_CONFIG_CONTENT!) as { agent: Record<string, { prompt: string }> };
+
+    const prompts = new Set(Object.values(cfg.agent).map((a) => a.prompt));
+    expect(prompts.size).toBe(1);
+    expect([...prompts][0]).toContain("one seat of an unattended, gate-verified build");
   });
 
   it("overrides a pre-existing inline config with the guard + agents", () => {
