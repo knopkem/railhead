@@ -7,6 +7,7 @@ import type { RunState, TicketState } from "../core/state.ts";
 import { loadTickets } from "../core/ticket.ts";
 import { touchesVisualSurface } from "../context/surface.ts";
 import { detectGameCanvas } from "../core/project-assets.ts";
+import { collectCacheStats, type RunCacheStats } from "../core/telemetry.ts";
 
 const STATUS_SYM: Record<string, string> = {
   ready: "○",
@@ -46,7 +47,7 @@ export interface CharterReportInfo {
   interactionInterface: string | null;
 }
 
-export function buildReport(state: RunState, charterInfo?: CharterReportInfo): string {
+export function buildReport(state: RunState, charterInfo?: CharterReportInfo, cacheStats?: RunCacheStats): string {
   const lines: string[] = [];
   lines.push(`# Railhead Run Report`);
   lines.push(``);
@@ -78,6 +79,15 @@ export function buildReport(state: RunState, charterInfo?: CharterReportInfo): s
       const e2eBit = totalOutput > 0 && totalWallMs > 0 ? ` · e2e ${((totalOutput / totalWallMs) * 1000).toFixed(1)} tok/s incl. prefill` : "";
       lines.push(`- Avg decode: ${Math.round((decodeOutput / totalGenMs) * 1000)} tok/s across ${ticketsWithCtx.length} ticket${ticketsWithCtx.length > 1 ? "s" : ""} (${k(decodeOutput)} output tokens in ${(totalGenMs / 1000).toFixed(0)}s decode)${e2eBit}`);
     }
+  }
+  // Issue #130: the run's prompt-cache hit ratio over first steps. This is the
+  // signal that separates "the model is slow" from "the prompt prefix is not
+  // being restored" — the snake run prefilled 8–33k tokens per fresh phase at
+  // cache=0 while every report looked throughput-normal.
+  if (cacheStats && cacheStats.cold + cacheStats.cached > 0) {
+    const promptTotal = cacheStats.cold + cacheStats.cached;
+    const pct = Math.round((cacheStats.cached / promptTotal) * 100);
+    lines.push(`- Prompt cache (#130): ${kc(cacheStats.cached)}/${kc(promptTotal)} first-step input tokens reused (${pct}%)`);
   }
   const codeMode = state.config.code_review?.mode ?? "light";
   const visualMode = state.config.visual_review?.mode ?? "off";
@@ -201,6 +211,25 @@ export function buildReport(state: RunState, charterInfo?: CharterReportInfo): s
     }
     lines.push(``);
   }
+  // Issue #130: per-phase first-step cache accounting from the ledger. Every
+  // model phase gets a line; review/goal/contract phases flagged when they
+  // re-prefilled a non-trivial prompt with zero reuse.
+  if (cacheStats && cacheStats.perPhase.length > 0) {
+    lines.push(`## Prompt cache (first step per phase, #130)`);
+    lines.push(``);
+    const misses = cacheStats.perPhase.filter(
+      (p) => expectsSharedPrefix(p.phaseFile) && p.cache.cached === 0 && p.cache.cold >= PREFIX_MISS_MIN_COLD,
+    );
+    if (misses.length > 0) {
+      lines.push(`- ⚠ ${misses.length} phase(s) that should share a prefix reported zero cache reuse — their prompts were prefilled from scratch.`);
+    }
+    for (const p of cacheStats.perPhase) {
+      const total = p.cache.cold + p.cache.cached;
+      const miss = expectsSharedPrefix(p.phaseFile) && p.cache.cached === 0 && p.cache.cold >= PREFIX_MISS_MIN_COLD;
+      lines.push(`- ${p.phaseFile}: ${p.cache.cached ? kc(p.cache.cached) : "0"}/${total ? kc(total) : "0"} first-step tokens reused${miss ? " ⚠" : ""}`);
+    }
+    lines.push(``);
+  }
   if (state.visual_findings && state.visual_findings.length > 0) {
     lines.push(`## Visual review findings`);
     lines.push(``);
@@ -299,6 +328,24 @@ function k(tokens: number): string {
   return tokens ? `${(tokens / 1000).toFixed(1)}k` : "—";
 }
 
+/** Issue #130: exact for small token counts (a 32-token prefix restored reads
+ * as "32", not a misleading "0.0k"), one-decimal k above 1000. */
+function kc(tokens: number): string {
+  return tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1)}k`;
+}
+
+/** Issue #130: the smallest first-step prompt that could plausibly carry a
+ * shared project prefix. Below this a zero-reuse step is just a small prompt,
+ * not a cache miss worth flagging. */
+const PREFIX_MISS_MIN_COLD = 4000;
+
+/** Issue #130: phases that run a fresh session against the same project
+ * context as earlier phases (review/goal/contract extraction). A zero-reuse
+ * first step here means the shared prefix was not restored. */
+function expectsSharedPrefix(phaseFile: string): boolean {
+  return /review|goal|contract/i.test(phaseFile);
+}
+
 /** Human-readable duration between two ISO timestamps, e.g. "1h 12m 34s". */
 export function elapsedLabel(startIso: string, endIso: string): string {
   const s = new Date(startIso).getTime();
@@ -323,7 +370,8 @@ export function nowClock(): string {
 }
 
 export async function writeReport(cwd: string, runId: string, state: RunState): Promise<void> {
-  await writeFile(join(cwd, ".railhead", runId, "report.md"), buildReport(state, await collectCharterReportInfo(state)), "utf8");
+  const cacheStats = await collectCacheStats(join(cwd, ".railhead", runId));
+  await writeFile(join(cwd, ".railhead", runId, "report.md"), buildReport(state, await collectCharterReportInfo(state), cacheStats), "utf8");
 }
 
 /** Read the report's charter facts from disk at report time: whether the

@@ -120,3 +120,55 @@ be the reason to enable it.
   supersede) ADR 0001: the default behavior is unchanged, and the
   fresh-context property holds in the persistent path via `--attach`'s
   per-call session isolation.
+
+## Amendment (2026-09-24, issues #129–#135): the lever is message-boundary prefix caching, not the worker
+
+The "Default stays `false`" note above correctly rejected the worker as the KV
+lever, but left the real lever unnamed. A controlled probe against the live
+Splash server (`incoai/Qwen3.6-35B-A3B-Splash`, 122,880 ctx, Apple M4 Max,
+2026-09-24) measured it:
+
+| wire shape | first call | cached_tokens |
+|---|---|---|
+| `[sys][preamble+taskA]` cold | 8.1–12.3 s | 0 |
+| `[sys][preamble][taskA]` then `[sys][preamble][taskB]` | **0.12 s** | 9,024 |
+| `[sys][preamble+taskA]` then `[…+taskB]` (same message) | 7.9–9.5 s | **0** |
+| exact replay / append | 0.09–0.27 s | ≈ full prefix |
+| different final task, same `[sys][preamble]` | 0.12–0.24 s | ≈ full prefix |
+| `prompt_cache_key` | supported | no behavioral difference |
+
+The rule: the cache restores at the **last complete shared user message** (or
+an exact token-prefix extension). A branch that diverges *inside* a message
+re-prefills from scratch; a branch that diverges in a NEW message restores
+everything before it. Splash's docs agree ("Existing exact-prefix caching
+reuses model work while the server remains alive"; "reuse tokenized history at
+literal message-end boundaries"). The cache is process-local, so a server
+restart costs one cold prefill.
+
+This explains the snake run (`run-20260923-2102`) exactly: reviewer/goal/
+contract first calls reported `cache=0` on 8–33k-token prompts (68–421 s) while
+builder resumes reported 26–81k cached — the reviewers packed preamble+task
+into ONE user message, the builder grew append-only.
+
+### Decisions
+
+1. **One shared system-prompt text across all railhead agents** (permissions
+   may still differ). Divergence at message 0 kills all reuse.
+2. **A canonical preamble as its own user message** — mission, AGENTS.md,
+   CONTEXT.md, docs/design|architecture|coherence — byte-stable; volatile
+   material (ticket, contracts slice, learnings, diff, findings) lives in the
+   task message after it (#132).
+3. **A base session per run**, forked by every fresh-context phase
+   (`opencode run --session <base> --fork`) and by the builder's first session;
+   the base excludes volatile content by construction and is rebuilt when its
+   inputs change or after a provider restart (#133).
+4. **`persistent_worker` is not the cache lever.** It can stay off; #39's
+   process-startup amortization remains its only justification.
+5. **Policy**: planning tries the fast 35B-A3B first, with the dense model as
+   an explicit server-swap fallback; the validation ticket (#135) decides
+   whether that default holds.
+
+Telemetry (#130) records every phase's first-step cold/cached split in the
+report, with a run-level hit ratio and a warning when a review/goal/contract
+phase re-prefills a non-trivial prompt with zero reuse. Related: #13, #124,
+#129–#135.

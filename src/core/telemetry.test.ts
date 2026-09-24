@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { eventPath } from "./ledger.ts";
-import { analyzePhase, mergePhases, summarizePhaseFiles } from "./telemetry.ts";
+import { analyzePhase, collectCacheStats, firstStepCacheFromEvents, mergePhases, summarizePhaseFiles } from "./telemetry.ts";
 
 async function writePhase(lines: string[]): Promise<{ dir: string; phase: string }> {
   const dir = await mkdtemp(join(tmpdir(), "tel-"));
@@ -401,5 +401,74 @@ describe("summarizePhaseFiles", () => {
       wallMs: 0,
       endToEndTokensPerSec: 0,
     });
+  });
+});
+
+describe("firstStepCacheFromEvents (#130)", () => {
+  it("returns null when the stream has no step_finish with token counts", () => {
+    expect(firstStepCacheFromEvents("")).toBeNull();
+    expect(firstStepCacheFromEvents(`{"type":"step_start","part":{}}`)).toBeNull();
+    expect(firstStepCacheFromEvents(`{"type":"step_finish","part":{"tokens":{"output":5}}}`)).toBeNull();
+  });
+
+  it("returns the FIRST completed step's split, not a later step's", () => {
+    const raw = [
+      `{"type":"step_finish","part":{"tokens":{"input":400,"output":10,"cache":{"write":0,"read":9000}}}}`,
+      `{"type":"step_finish","part":{"tokens":{"input":120,"output":10,"cache":{"write":0,"read":9500}}}}`,
+    ].join("\n");
+    expect(firstStepCacheFromEvents(raw)).toEqual({ cold: 400, cached: 9000 });
+  });
+
+  it("treats a missing cache field as a fully cold first step", () => {
+    expect(firstStepCacheFromEvents(`{"type":"step_finish","part":{"tokens":{"input":12000,"output":50}}}`)).toEqual({ cold: 12000, cached: 0 });
+  });
+
+  it("includes cache writes in cold", () => {
+    expect(firstStepCacheFromEvents(`{"type":"step_finish","part":{"tokens":{"input":300,"output":5,"cache":{"write":700,"read":0}}}}`)).toEqual({ cold: 1000, cached: 0 });
+  });
+
+  it("ignores malformed lines and tokens from non-step_finish events", () => {
+    const raw = [
+      `not json`,
+      `{"type":"text","part":{"tokens":{"input":1}}}`,
+      `{"type":"step_finish","part":{"tokens":{"input":10,"output":1,"cache":{"read":0}}}}`,
+    ].join("\n");
+    expect(firstStepCacheFromEvents(raw)).toEqual({ cold: 10, cached: 0 });
+  });
+});
+
+describe("collectCacheStats (#130)", () => {
+  it("collects first-step cold/cached per phase, sorted, with run totals", async () => {
+    const dir = await writePhases({
+      "02-02-review": [
+        `{"type":"step_finish","part":{"tokens":{"input":1500,"output":40,"cache":{"write":0,"read":8000}}}}`,
+      ],
+      "01-01-build": [
+        `{"type":"step_finish","part":{"tokens":{"input":12000,"output":90,"cache":{"write":0,"read":0}}}}`,
+      ],
+      "goal-look": [
+        `{"type":"step_finish","part":{"tokens":{"input":200,"output":10,"cache":{"write":0,"read":9000}}}}`,
+      ],
+    });
+    const stats = await collectCacheStats(dir);
+    expect(stats.perPhase.map((p) => p.phaseFile)).toEqual(["01-01-build", "02-02-review", "goal-look"]);
+    expect(stats.perPhase[0]!.cache).toEqual({ cold: 12000, cached: 0 });
+    expect(stats.cold).toBe(13700);
+    expect(stats.cached).toBe(17000);
+  });
+
+  it("returns empty stats when the events dir is missing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "tel-"));
+    expect(await collectCacheStats(dir)).toEqual({ perPhase: [], cold: 0, cached: 0 });
+  });
+
+  it("skips files with no step_finish token data", async () => {
+    const dir = await writePhases({
+      "01-01-build": [`{"type":"step_start","part":{}}`],
+      "02-02-review": [`{"type":"step_finish","part":{"tokens":{"input":100,"output":5,"cache":{"read":500}}}}`],
+    });
+    const stats = await collectCacheStats(dir);
+    expect(stats.perPhase).toHaveLength(1);
+    expect(stats.perPhase[0]!.phaseFile).toBe("02-02-review");
   });
 });

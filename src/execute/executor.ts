@@ -9,6 +9,7 @@ import { CHECKPOINT_RE, endsWithCheckpoint, readCheckpointTicket } from "../core
 import { endsWithBlockReport, parseBlockReport, type BlockReport } from "../core/blocked.ts";
 import { DEFAULT_STALL_TIMEOUT_SEC, DEFAULT_MAX_STEP_MODEL_SEC, DEFAULT_MODEL } from "../config/config.ts";
 import type { FailureEvidence } from "./failure-ladder.ts";
+import type { FirstStepCache } from "../core/telemetry.ts";
 import { haltReason } from "../core/halt.ts";
 import { guardedEnv } from "./guard.ts";
 import { hardStopRequested, requestAbort, runStopHandlerInstalled } from "./stop.ts";
@@ -313,6 +314,14 @@ export interface ExecResult {
    * an ok exit with no marker) means the builder stopped for a reason other
    * than a clean checkpoint. */
   checkpointTicket?: string | null;
+  /** Issue #130: prompt-cache accounting of the phase's FIRST completed step.
+   * `cached` is the prefix the provider restored from its prompt cache; `cold`
+   * is the uncached prompt it had to prefill. A phase that shares a prefix
+   * with an earlier one but reports `cached: 0` is a prompt-cache miss — the
+   * first-step signal the snake run's report lacked (reviewer/goal first calls
+   * re-prefilled 8–33k tokens at cache=0 while the builder resumed at
+   * 26–81k). null when no step_finish reported token counts. */
+  firstStepCache?: FirstStepCache | null;
   /** ADR 0040: when the phase was stopped at a terminal `$BLOCKED ticket=NN`
    * marker, the parsed report; null otherwise. A block is neither a checkpoint
    * nor a failure — the run loop routes it by kind. */
@@ -609,6 +618,7 @@ export async function executeOpendCode(
           generationMs: 0,
           toolCalls: 0,
           errorMessage: null,
+          firstStepCache: null,
           evidence: {
             status: "budget_exceeded",
             errorMessage: null,
@@ -669,6 +679,10 @@ export async function executeOpendCode(
   let streamedTokens = 0;
   let estimateDriftTokens = 0;
   let totalOutputTokens = 0;
+  // Issue #130: the first completed step's cache accounting, captured once.
+  // Later steps move the same cached prefix plus the growing tail, so only the
+  // first step measures whether the phase's prompt was restored or prefilled.
+  let firstStepCache: FirstStepCache | null = null;
   let generationMs = 0;
   // Per-finished-step rate samples feeding the heartbeat's rolling throughput
   // window — the phase-lifetime average cannot move within a step and reads
@@ -948,6 +962,18 @@ export async function executeOpendCode(
             estimateDriftTokens = reportedCtx - (reconcileBase + streamedTokens);
             reconcileBase = reportedCtx;
             streamedTokens = 0;
+          }
+        }
+        // Issue #130: the first completed step's prompt-cache split, captured
+        // once and surfaced live — an operator sees immediately whether a
+        // phase's prompt was restored (small cold, large cached) or had to be
+        // prefilled from scratch (large cold, zero cached).
+        if (firstStepCache === null) {
+          const cache = firstStepCacheOf(line);
+          if (cache !== null) {
+            firstStepCache = cache;
+            const p = livePrefix ? `${livePrefix} ` : "";
+            sink(`${p}cache: ${cache.cached}/${cache.cold + cache.cached} first-step tokens reused`);
           }
         }
         const ot = outputTokensOf(line);
@@ -1293,6 +1319,7 @@ export async function executeOpendCode(
     toolCalls,
     errorMessage: finalError,
     sessionId,
+    firstStepCache,
     // Surface the checkpoint ticket whenever the stop marker appeared — a
     // clean natural exit after `$CHECKPOINT ticket=NN` (marker as the model's
     // last line, process closes 0) is the EXPECTED path, not the kill path, so
@@ -1438,6 +1465,26 @@ function outputTokensOf(line: string): number | null {
     return typeof output === "number" ? output : null;
   }
   return null;
+}
+
+/** Issue #130: the first `step_finish` line's prompt-cache split, or null for
+ * any other line / a finish without token counts. Mirrors `contextTokensOf`'s
+ * token reading: `tokens.input` is the uncached sliver, so cold is input plus
+ * cache writes and cached is cache reads. */
+function firstStepCacheOf(line: string): FirstStepCache | null {
+  if (!line.includes('"step_finish"') || !line.includes('"tokens"')) return null;
+  let ev: Record<string, any>;
+  try {
+    ev = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (ev.type !== "step_finish") return null;
+  const tokens = ev.part?.tokens;
+  if (typeof tokens?.input !== "number") return null;
+  const read = typeof tokens.cache?.read === "number" ? tokens.cache.read : 0;
+  const write = typeof tokens.cache?.write === "number" ? tokens.cache.write : 0;
+  return { cold: tokens.input + write, cached: read };
 }
 
 /** The durable session id carried by a JSON event line, or null for any line

@@ -691,6 +691,79 @@ describe("executeOpendCode in-flight token estimate (#82)", () => {
   }, 60000);
 });
 
+describe("executeOpendCode first-step cache telemetry (#130)", () => {
+  it("captures the FIRST step's cache split and emits the per-phase line", async () => {
+    const start = stepStartLine().replace(/'/g, "'\\''");
+    const cold = stepFinishLineWithCache(12_000, 0, 0).replace(/'/g, "'\\''");
+    const warm = stepFinishLineWithCache(200, 15_000, 0).replace(/'/g, "'\\''");
+    const emitter = `printf '%s\\n%s\\n' '${start}' '${cold}' ; sleep 0.1 ; printf '%s\\n%s\\n' '${start}' '${warm}' ; exit 0`;
+    const env = await makeFakeOpencode(emitter);
+    const seen: string[] = [];
+    try {
+      const result = await executeOpendCode("test prompt", {
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "first-step-cache",
+        model: null,
+        stallTimeoutSec: null,
+        maxStepModelSec: null,
+        live: false,
+        heartbeat: false,
+        liveSink: (line: string) => seen.push(line),
+      });
+      expect(result.status).toBe("ok");
+      // The second step's large warm cache must not overwrite the first step's.
+      expect(result.firstStepCache).toEqual({ cold: 12_000, cached: 0 });
+      expect(seen.some((l) => l.includes("cache: 0/12000 first-step tokens reused"))).toBe(true);
+    } finally {
+      restorePath(env.restorePath);
+    }
+  }, 60000);
+
+  it("reads a warm first step as a large restored prefix with a small cold tail", async () => {
+    const start = stepStartLine().replace(/'/g, "'\\''");
+    const warm = stepFinishLineWithCache(300, 9_000, 0).replace(/'/g, "'\\''");
+    const emitter = `printf '%s\\n%s\\n' '${start}' '${warm}' ; exit 0`;
+    const env = await makeFakeOpencode(emitter);
+    try {
+      const result = await executeOpendCode("test prompt", {
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "first-step-cache-warm",
+        model: null,
+        stallTimeoutSec: null,
+        maxStepModelSec: null,
+        live: false,
+        heartbeat: false,
+      });
+      expect(result.firstStepCache).toEqual({ cold: 300, cached: 9_000 });
+    } finally {
+      restorePath(env.restorePath);
+    }
+  }, 60000);
+
+  it("reports null when no step_finish carried token counts", async () => {
+    const start = stepStartLine().replace(/'/g, "'\\''");
+    const emitter = `printf '%s\\n' '${start}' ; exit 0`;
+    const env = await makeFakeOpencode(emitter);
+    try {
+      const result = await executeOpendCode("test prompt", {
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "first-step-cache-none",
+        model: null,
+        stallTimeoutSec: null,
+        maxStepModelSec: null,
+        live: false,
+        heartbeat: false,
+      });
+      expect(result.firstStepCache).toBeNull();
+    } finally {
+      restorePath(env.restorePath);
+    }
+  }, 60000);
+});
+
 /**
  * A step_finish with 0 input + 0 output tokens means the model never ran —
  * the proxy or provider surfaced a connection error as a text event and

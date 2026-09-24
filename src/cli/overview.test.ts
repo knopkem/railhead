@@ -368,3 +368,57 @@ describe("buildReport — goal review checkpoints (ADR 0029, #102)", () => {
     expect(r).not.toContain("## Goal review checkpoints");
   });
 });
+
+describe("buildReport — prompt cache (first step per phase, #130)", () => {
+  it("renders the run-level cache ratio and the per-phase section", () => {
+    const r = buildReport(makeState(10000, 100000), undefined, {
+      perPhase: [
+        { phaseFile: "01-01-build", cache: { cold: 12000, cached: 0 } },
+        { phaseFile: "02-02-review", cache: { cold: 300, cached: 9000 } },
+      ],
+      cold: 12300,
+      cached: 9000,
+    });
+    expect(r).toContain("- Prompt cache (#130): 9.0k/21.3k first-step input tokens reused (42%)");
+    expect(r).toContain("## Prompt cache (first step per phase, #130)");
+    expect(r).toContain("- 01-01-build: 0/12.0k first-step tokens reused");
+    expect(r).toContain("- 02-02-review: 9.0k/9.3k first-step tokens reused");
+  });
+
+  it("flags a review/goal/contract phase that re-prefilled a non-trivial prompt with zero reuse", () => {
+    const r = buildReport(makeState(10000, 100000), undefined, {
+      perPhase: [{ phaseFile: "03-01-review", cache: { cold: 8000, cached: 0 } }],
+      cold: 8000,
+      cached: 0,
+    });
+    expect(r).toContain("⚠ 1 phase(s) that should share a prefix reported zero cache reuse");
+    expect(r).toContain("- 03-01-review: 0/8.0k first-step tokens reused ⚠");
+  });
+
+  it("does not flag a small zero-reuse review prompt (below the shared-prefix floor)", () => {
+    const r = buildReport(makeState(10000, 100000), undefined, {
+      perPhase: [{ phaseFile: "03-01-review", cache: { cold: 900, cached: 0 } }],
+      cold: 900,
+      cached: 0,
+    });
+    expect(r).not.toContain("zero cache reuse");
+    expect(r).not.toContain("⚠");
+  });
+
+  it("omits the cache lines when no stats were collected", () => {
+    const r = buildReport(makeState(10000, 100000));
+    expect(r).not.toContain("Prompt cache (#130)");
+    expect(r).not.toContain("## Prompt cache");
+  });
+});
+
+describe("buildReport — prompt cache formatting (#130)", () => {
+  it("renders sub-1000 cached counts exactly, not as 0.0k", () => {
+    const r = buildReport(makeState(10000, 100000), undefined, {
+      perPhase: [{ phaseFile: "01-contracts-x", cache: { cold: 26201, cached: 32 } }],
+      cold: 26201,
+      cached: 32,
+    });
+    expect(r).toContain("- 01-contracts-x: 32/26.2k first-step tokens reused");
+  });
+});

@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
+import { join } from "node:path";
 import { eventPath } from "./ledger.ts";
 
 /**
@@ -210,4 +211,74 @@ export async function summarizePhaseFiles(
     }
   }
   return mergePhases(phases);
+}
+
+/** Issue #130: prompt-cache accounting of a phase's FIRST completed step.
+ * `cold` is the uncached prompt the provider had to prefill (uncached input
+ * plus cache writes); `cached` is the prefix it restored from its prompt
+ * cache. A fresh phase that shares a prefix with an earlier one but reports
+ * `cached: 0` is a prompt-cache miss — the signal the snake run's report
+ * lacked when reviewer/goal first calls re-prefilled 8–33k tokens at cache=0. */
+export interface FirstStepCache {
+  cold: number;
+  cached: number;
+}
+
+/** Parse the first `step_finish` carrying token counts out of an archived
+ * phase event stream. opencode's bare `tokens.input` is the uncached sliver
+ * only (a warm cache moves the bulk into `cache.read`), so cold is
+ * `input + write` and cached is `read`. Returns null when no step_finish
+ * reported token counts (pre-flight refusal, killed before the first step,
+ * or a stream shape predating the field). */
+export function firstStepCacheFromEvents(raw: string): FirstStepCache | null {
+  for (const line of raw.split("\n")) {
+    if (!line.includes('"step_finish"')) continue;
+    let ev: Record<string, any>;
+    try {
+      ev = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (ev.type !== "step_finish") continue;
+    const tokens = ev.part?.tokens;
+    if (typeof tokens?.input !== "number") continue;
+    const read = typeof tokens.cache?.read === "number" ? tokens.cache.read : 0;
+    const write = typeof tokens.cache?.write === "number" ? tokens.cache.write : 0;
+    return { cold: tokens.input + write, cached: read };
+  }
+  return null;
+}
+
+export interface RunCacheStats {
+  perPhase: Array<{ phaseFile: string; cache: FirstStepCache }>;
+  cold: number;
+  cached: number;
+}
+
+/** Scan a run ledger's `events/` dir for every phase's first-step cache
+ * accounting. Sorted by phase file so the report is deterministic; a missing
+ * events dir yields empty stats rather than an error (a run mid-setup). */
+export async function collectCacheStats(ledgerDir: string): Promise<RunCacheStats> {
+  let names: string[];
+  try {
+    names = await readdir(join(ledgerDir, "events"));
+  } catch {
+    return { perPhase: [], cold: 0, cached: 0 };
+  }
+  const perPhase: Array<{ phaseFile: string; cache: FirstStepCache }> = [];
+  for (const name of names.sort()) {
+    if (!name.endsWith(".jsonl")) continue;
+    const phaseFile = name.slice(0, -".jsonl".length);
+    let raw = "";
+    try {
+      raw = await readFile(eventPath(ledgerDir, phaseFile), "utf8");
+    } catch {
+      continue;
+    }
+    const cache = firstStepCacheFromEvents(raw);
+    if (cache) perPhase.push({ phaseFile, cache });
+  }
+  const cold = perPhase.reduce((s, p) => s + p.cache.cold, 0);
+  const cached = perPhase.reduce((s, p) => s + p.cache.cached, 0);
+  return { perPhase, cold, cached };
 }
