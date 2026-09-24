@@ -13,6 +13,7 @@ import type { FirstStepCache } from "../core/telemetry.ts";
 import { haltReason } from "../core/halt.ts";
 import { guardedEnv } from "./guard.ts";
 import { hardStopRequested, requestAbort, runStopHandlerInstalled } from "./stop.ts";
+import { probeConfiguredProvider, noteProviderHealth } from "./provider-health.ts";
 
 export type ExecStatus = "ok" | "error" | "transient" | "budget_exceeded" | "timeout" | "spin_loop" | "degraded_target" | "halted";
 
@@ -619,6 +620,53 @@ export async function executeOpendCode(
     const seat = model !== null && model !== DEFAULT_MODEL ? model : "opencode default";
     sink(`${p}── prompt (${seat}, est ~${promptTokens} tokens) ──`);
     rawSink(prompt);
+  }
+
+  // Issue #134: the operator-declared provider health probe. A wedged engine
+  // refuses or never answers here, so the phase fails in seconds and the
+  // caller's failure ladder owns the retry — instead of burning the stall
+  // guard's hour on a request the provider cannot serve. Undeclared = no
+  // probe, exactly today's behavior.
+  const providerHealth = await probeConfiguredProvider();
+  if (providerHealth !== null) {
+    const p = livePrefix ? `${livePrefix} ` : "";
+    if (!providerHealth.ok) {
+      noteProviderHealth(false);
+      const msg = `provider-unhealthy: health probe failed (${providerHealth.detail})`;
+      sink(`${p}✖ ${msg} — failing the phase now instead of waiting on the stall guard`);
+      return {
+        status: "transient",
+        code: null,
+        signal: null,
+        durationMs: 0,
+        steps: 0,
+        peakTokens: 0,
+        inFlightTokens: 0,
+        estimateDriftTokens: 0,
+        totalOutputTokens: 0,
+        generationMs: 0,
+        toolCalls: 0,
+        errorMessage: msg,
+        sessionId: null,
+        firstStepCache: null,
+        evidence: {
+          status: "transient",
+          errorMessage: msg,
+          peakTokens: 0,
+          steps: 0,
+          toolCalls: 0,
+          code: null,
+          signal: null,
+          durationMs: 0,
+        },
+      };
+    }
+    if (noteProviderHealth(true)) {
+      // Fail→ok transition: the server went away and came back. Its prefix
+      // cache is cold; the session itself persists (opencode storage is
+      // client-side), so nothing is rebuilt — the next phase re-warms it.
+      sink(`${p}provider restarted — prefix cache cold; re-warms on next phase`);
+    }
   }
 
   if (maxContextTokens && maxContextTokens > 0) {
@@ -1778,6 +1826,14 @@ const TRANSIENT_PATTERNS = [
   "etimedout",
   "socket hang up",
   "econnrefused",
+  // Issue #134: the connect-time family — a refused connection, DNS failure,
+  // or Node's `fetch failed` wrapper around either. These are always worth a
+  // retry (the provider may simply be restarting) and never a code problem.
+  "connection refused",
+  "enotfound",
+  "getaddrinfo",
+  "eai_again",
+  "fetch failed",
   "temporarily unavailable",
   "try again later",
 ];

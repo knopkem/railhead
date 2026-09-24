@@ -18,6 +18,7 @@ import { replanFromCheckpoint } from "../gates/replan.ts";
 import type { BlockReport } from "../core/blocked.ts";
 import { describeExecFailure, executeOpendCode, executeFreshPhase, killActiveChild, withPersistentWorker, startPersistentWorker, stopPersistentWorker } from "./executor.ts";
 import { baseSessionId, ensureBaseSession, forkPhase } from "./base-session.ts";
+import { setProviderHealth } from "./provider-health.ts";
 import { withFailureLadder, withFailureLadderOnThrow, PhaseFailure, evidenceFromResult, SPIRAL_COMPACTION_THRESHOLD, type FailureEvidence } from "./failure-ladder.ts";
 import { setDependencySourceDeny } from "./guard.ts";
 import { buildImplementerPrompt, buildTestPhasePrompt, type AttemptRound } from "../context/prompt.ts";
@@ -377,6 +378,10 @@ async function runLoopInner(state: RunState, ledger: string, onUpdate?: () => vo
   // Arm the project-configured dependency-source deny globs before any phase
   // spawns (the guard composes them into every phase's inline opencode config).
   setDependencySourceDeny(state.config.dependency_source_deny ?? []);
+  // Issue #134: install the operator-declared provider health probe (if any)
+  // for every phase in this process. The startup timeout warnings are logged
+  // once by the CLI, which owns process-startup diagnostics.
+  setProviderHealth(state.config.provider);
   const cleanupSignals = installSignalHandlers(state, ledger);
   // gh: replay the gates a prior stop left owed — a per-ticket visual review
   // the process died before joining, and any post-commit group checkpoint the

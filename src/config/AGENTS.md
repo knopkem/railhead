@@ -8,6 +8,7 @@
 - `args.ts` — `parsePlanArgs`/`parseRunArgs`, presets and per-gate overrides.
 - `run-policy.ts` — resolves and persists run decisions: `resolveGateModes`, `resolveTdd`, `resolveYolo`, `persistPolicy`. Persisted decisions are honored by `resume`/`run` without re-passing flags.
 - `interface.ts` — `ProjectInterface` vocabulary and interaction guidance.
+- `provider.ts` — the operator-declared provider surface (#134): `parseProviderConfig` (shape validation, throws on a typo), `resolveHealthUrl`, `evaluateHealthResponse` (pass rule over a JSON body). Pure; the network probe and restart tracking live in `src/execute/provider-health.ts`.
 
 ## Invariants
 

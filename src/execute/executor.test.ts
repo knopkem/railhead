@@ -1,8 +1,11 @@
 import { mkdtemp, writeFile, mkdir, readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { createServer, type Server } from "node:http";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, expect, afterEach } from "vitest";
 import { describeExecFailure, executeFreshPhase, executeOpendCode, isQuotaError, isToolTimeout, isTransientError, resetWorkerForTest, stepTimingMs, windowedStepRates, writePayloadOf } from "./executor.ts";
+import { resetProviderHealthForTest, setProviderHealth } from "./provider-health.ts";
 import { estimateTokens } from "./diff-filter.ts";
 import { CHECKPOINT_RE } from "../core/checkpoint.ts";
 
@@ -2701,4 +2704,83 @@ describe("executeOpendCode heartbeat throughput", () => {
       restorePath(env.restorePath);
     }
   }, 60000);
+});
+
+describe("provider health probe before a phase (#134)", () => {
+  afterEach(() => {
+    resetProviderHealthForTest();
+  });
+
+  it("fast-fails a phase without spawning opencode when the provider is unhealthy", async () => {
+    const marker = join(tmpdir(), `spawned-${process.pid}-${Date.now()}.txt`);
+    const emitter = `echo spawned > '${marker}' ; printf '%s\\n%s\\n' '${stepStartLine()}' '${stepFinishLine()}'`;
+    const env = await makeFakeOpencode(emitter);
+    try {
+      // Port 1 refuses connections; the probe must end the phase in
+      // milliseconds, before any subprocess is spawned.
+      setProviderHealth({ base_url: "http://127.0.0.1:1", health: { url: "/status", timeout_sec: 1 } });
+      const seen: string[] = [];
+      const result = await executeOpendCode("prompt", {
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "probe-unhealthy",
+        model: null,
+        live: false,
+        heartbeat: false,
+        liveSink: (line: string) => seen.push(line),
+      });
+      expect(result.status).toBe("transient");
+      expect(result.errorMessage).toContain("provider-unhealthy");
+      expect(existsSync(marker)).toBe(false);
+      expect(seen.some((l) => l.includes("failing the phase now instead of waiting on the stall guard"))).toBe(true);
+    } finally {
+      restorePath(env.restorePath);
+    }
+  }, 60000);
+
+  it("logs the cold-cache line on the first phase after the provider comes back", async () => {
+    let healthy = false;
+    const server: Server = createServer((_req, res) => {
+      res.writeHead(healthy ? 200 : 503);
+      res.end("{}");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as import("node:net").AddressInfo).port;
+    const env = await makeFakeOpencode(`printf '%s\\n%s\\n' '${stepStartLine()}' '${stepFinishLine()}'`);
+    try {
+      setProviderHealth({ base_url: `http://127.0.0.1:${port}`, health: { url: "/status", timeout_sec: 2 } });
+
+      const down = await executeOpendCode("prompt", {
+        cwd: env.cwd, ledgerDir: env.ledgerDir, phaseFile: "probe-down", model: null,
+        live: false, heartbeat: false,
+      });
+      expect(down.status).toBe("transient");
+
+      healthy = true;
+      const seen: string[] = [];
+      const up = await executeOpendCode("prompt", {
+        cwd: env.cwd, ledgerDir: env.ledgerDir, phaseFile: "probe-up", model: null,
+        live: false, heartbeat: false, liveSink: (line: string) => seen.push(line),
+      });
+      expect(up.status).toBe("ok");
+      expect(seen.some((l) => l.includes("provider restarted — prefix cache cold; re-warms on next phase"))).toBe(true);
+    } finally {
+      restorePath(env.restorePath);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 60000);
+
+  it("classifies the connect-time family as transient (#134)", () => {
+    for (const message of [
+      "connect ECONNREFUSED 127.0.0.1:8080",
+      "fetch failed",
+      "getaddrinfo ENOTFOUND model-box.local",
+      "getaddrinfo EAI_AGAIN model-box.local",
+      "connection refused",
+    ]) {
+      expect(isTransientError(message)).toBe(true);
+    }
+    expect(isTransientError("model not found: qwen9")).toBe(false);
+    expect(isTransientError("invalid api key")).toBe(false);
+  });
 });

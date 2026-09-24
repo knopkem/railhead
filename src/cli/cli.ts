@@ -68,6 +68,7 @@ import { loadTickets, toTicketState } from "../core/ticket.ts";
 import { getDefaultModel, queryReasoningCapability, modelParameterClass, queryFreeModels, assignFreeModels, fetchModelsVerbose, createInitProber, type InitProbe } from "../core/models.ts";
 import { runScreenshotDiagnostic, renderDiagnoseResult } from "./diagnose.ts";
 import { describeVisionOutcome, ensureImplementerVision, ensureVisionForGates, recordVisionCapability, runVisionProbe, visionGateRequests } from "../execute/vision-probe.ts";
+import { configureProvider } from "../execute/provider-health.ts";
 import { resumeRefusal } from "../core/halt.ts";
 
 export async function main(argv: string[]): Promise<void> {
@@ -896,6 +897,10 @@ async function cmdBuild(cwd: string, prefs: PlanArgs): Promise<void> {
     }
   }
 
+  // Issue #134: install the declared provider health probe and warn about
+  // disabled timeouts before planning spawns any phase; `runLoop` installs
+  // the same config for the run half.
+  configureProvider(config.provider, cwd);
   const { outDir, tickets: ordered, verify } = await runPlan({
     cwd,
     prompt: enrichedPrompt,
@@ -1076,6 +1081,10 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } 
 
   const config = await loadConfig(cwd);
   if (maxRetriesRaw) config.max_retries = Number(maxRetriesRaw);
+  // Issue #134: install the declared provider health probe and warn once about
+  // providers whose request timeouts are all disabled — the shape that let the
+  // snake run's wedged request reach the stall guard.
+  configureProvider(config.provider, cwd);
   // Per-gate cadence overrides (--review/--vision/--goal/--structural, issue
   // #73). --review with a gate-mode value is a code-review override; with a
   // model name it is the review-seat model override (legacy) — the model-seat
@@ -1220,6 +1229,7 @@ async function cmdResume(cwd: string, runIdArg?: string): Promise<void> {
   // config frozen at startRun, and reading only that silently discards any edit
   // made between cancel and resume.
   state.config = await loadConfig(cwd);
+  configureProvider(state.config.provider, cwd);
   state._models = resolveModels(state.config, []);
   await detectContextLimit(state);
   // ADR 0036: a resume that still owes a vision-dependent gate gets the same

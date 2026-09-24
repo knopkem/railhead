@@ -11,7 +11,7 @@ The run/ticket data model, its durable persistence, and the bare host adapters. 
 - `contracts.ts` — `railhead.contracts.json` index: load/save/merge/slice/verify. This is the O(ticket) context seam (ADR 0008).
 - `recovery.ts` — pure resume logic: `planRecovery`, `reconcileCommittedButUnsaved`, `rebaseFrontier`.
 - `fences.ts` — fence-aware text primitives. Every `$MARKER`/regex parser must use these, never raw `indexOf`.
-- `git.ts`, `models.ts`, `project-assets.ts`, `permissions.ts` — process-boundary adapters (git CLI, opencode model registry, scaffolded project assets).
+- `git.ts`, `models.ts`, `project-assets.ts`, `permissions.ts`, `provider-config.ts` — process-boundary adapters (git CLI, opencode model registry, scaffolded project assets, resolved-config provider timeout scan).
 - `halt.ts`, `blocked.ts`, `checkpoint.ts`, `pending-checkpoints.ts` — marker/file grammars shared by execute and gates.
 
 ## Invariants

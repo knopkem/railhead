@@ -97,6 +97,14 @@ railhead diagnose screenshots [--model M]  check that a model can take a screens
   "visual_review":     { "mode": "off", "round_wall_sec": null },
   "goal_review":       { "mode": "off" },  // add "checkpoint_action": "advisory" for advisory goal checkpoints
   "structural_review": { "mode": "off" },
+  "provider": {                    // optional: probe the model server before each phase
+    "base_url": "http://127.0.0.1:8080",
+    "health": {
+      "url": "/status",            // absolute, or a path resolved against base_url
+      "timeout_sec": 5,
+      "pass": { "path": "ready", "equals": true }
+    }
+  },
   "session_builder": true,                 // one durable session; false = fresh subprocess per ticket
   "checkpoint_granularity": "product"      // "ticket" | "group" | "product"
 }
@@ -183,6 +191,8 @@ The one critical setting is the **per-model context limit** — opencode cannot 
 ```
 
 Set `request_ceiling_tokens` in `railhead.json` to bound the largest single request (prompt + output reserve) a phase may send. Leave it unset and Railhead uses **0.6× the model's window** — a value that survives a warm KV pool. Only set it below the window; never mirror the server's full capacity. After a run, `report.md` shows whether any ticket's peak context approached the ceiling.
+
+**Set finite request timeouts.** A provider configured with `timeout: false`, `headerTimeout: false`, and `chunkTimeout: false` lets a wedged request run until Railhead's stall guard ends it (~an hour). Railhead warns at startup when it sees that triple. Pair it with the optional `provider.health` probe above: an unhealthy server then fails a phase in seconds — through the normal failure ladder — instead of stalling. The probe is operator-declared and vendor-neutral (an HTTP URL plus a pass rule over the JSON body); no server is auto-detected, and with no `provider` block nothing changes. A restarted provider only colds the prompt cache — the base session persists and the next phase re-warms it.
 
 ## Design principles
 

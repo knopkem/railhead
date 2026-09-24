@@ -846,3 +846,20 @@ describe("updateConfig", () => {
     expect(raw.visual_review).toEqual({ mode: "full", max_rounds: 2, custom_hint: "keep" });
   });
 });
+
+describe("provider config (#134)", () => {
+  it("is null when undeclared and parsed when present", async () => {
+    expect((await loadConfig(await makeCwd(null))).provider).toBeNull();
+    const cfg = await loadConfig(await makeCwd(JSON.stringify({
+      provider: { base_url: "http://box:8080", health: { url: "/status", pass: { path: "ready", equals: true } } },
+    })));
+    expect(cfg.provider?.health?.pass).toEqual({ path: "ready", equals: true });
+  });
+
+  it("throws on a malformed declared provider instead of silently falling back (#134)", async () => {
+    await expect(loadConfig(await makeCwd('{"provider":{"health":{"url":"/status"}}}')))
+      .rejects.toThrow(/provider\.base_url/);
+    await expect(loadConfig(await makeCwd('{"provider":{"health":{}}}')))
+      .rejects.toThrow(/provider\.health\.url/);
+  });
+});

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { argValue } from "./args.ts";
 import { parseProjectInterface, type ProjectInterface } from "./interface.ts";
+import { parseProviderConfig, type ProviderConfig } from "./provider.ts";
 export type { ProjectInterface } from "./interface.ts";
 
 export interface ModelConfig {
@@ -93,6 +94,15 @@ export interface RailheadConfig {
    * row of data, never a silent coercion.
    */
   projectInterface?: ProjectInterface | null;
+  /**
+   * Issue #134: the operator-declared provider surface — `base_url` for
+   * resolving a relative health URL, and the `health` probe config. The
+   * railhead probes before every phase and fast-fails into the failure ladder
+   * when the provider is unhealthy; unset = no probe, today's behavior. No
+   * provider is ever auto-detected, and no vendor's payload shape is known
+   * here (see `provider.ts`). Malformed values throw at load.
+   */
+  provider?: ProviderConfig | null;
   /**
    * Whether the planner must own the look of a rendered surface with ONE
    * open-ended craft ticket (`open_ended: true`) — a single agent that creates
@@ -740,6 +750,7 @@ export const DEFAULT_CONFIG: RailheadConfig = {
   goal_review: { mode: "off", fallback_cadence: 4, max_rounds: null, max_replans: DEFAULT_MAX_REPLANS, interaction_hints: null },
   structural_review: { mode: "off" },
   interaction_smoke: false,
+  provider: null,
 };
 
 /** Read railhead.json, falling back to DEFAULT_CONFIG for missing keys or a bad file. */
@@ -763,6 +774,9 @@ export async function loadConfig(cwd: string): Promise<RailheadConfig> {
   // fallback, so a railhead.json typo surfaces at run start instead of quietly
   // running with legacy (undeclared) behavior.
   const projectInterface = parseProjectInterface(j["interface"]);
+  // Issue #134: a malformed declared provider block is a typo that must fail
+  // at load, not silently disable the health probe (same rule as `interface`).
+  const provider = parseProviderConfig(j.provider);
   try {
     const model = (j.model ?? {}) as Record<string, any>;
     const codeReview = (j.code_review ?? {}) as Record<string, any>;
@@ -783,6 +797,7 @@ export async function loadConfig(cwd: string): Promise<RailheadConfig> {
     return {
       verify: Array.isArray(j.verify) ? j.verify : DEFAULT_CONFIG.verify,
       projectInterface,
+      provider,
       smoke: Array.isArray(j.smoke) ? j.smoke : DEFAULT_CONFIG.smoke,
       lint: Array.isArray(j.lint) ? j.lint : DEFAULT_CONFIG.lint,
       max_retries: j.max_retries ?? DEFAULT_CONFIG.max_retries,
