@@ -124,7 +124,11 @@ export async function startPersistentWorker(opts: { cwd: string; quiet?: boolean
 
   const child = spawn("opencode", ["serve", "--port", "0", "--hostname", "127.0.0.1"], {
     cwd: opts.cwd,
-    env: guardedEnv(process.env),
+    // `spawn`'s cwd does not update PWD, and opencode resolves its project
+    // root from PWD — a stale value makes every file tool read the PARENT
+    // process's project (bench/tests proved it: globs returned railhead's
+    // sources while cwd was a scratch project).
+    env: { ...guardedEnv(process.env), PWD: opts.cwd },
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
   });
@@ -732,7 +736,9 @@ export async function executeOpendCode(
 
   const child = spawn("opencode", base, {
     cwd,
-    env: guardedEnv(process.env),
+    // See startPersistentWorker: PWD must match cwd or opencode roots the
+    // phase's file tools in the parent process's project.
+    env: { ...guardedEnv(process.env), PWD: cwd },
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
   });

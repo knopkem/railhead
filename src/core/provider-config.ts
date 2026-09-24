@@ -53,6 +53,8 @@ export function disabledTimeoutWarnings(cwd: string): string[] {
   try {
     const raw = execFileSync("opencode", ["debug", "config"], {
       cwd,
+      // opencode resolves the project from PWD; execFile's cwd does not set it.
+      env: { ...process.env, PWD: cwd },
       encoding: "utf8",
       timeout: 10_000,
       stdio: ["pipe", "pipe", "pipe"],

@@ -2784,3 +2784,28 @@ describe("provider health probe before a phase (#134)", () => {
     expect(isTransientError("invalid api key")).toBe(false);
   });
 });
+
+describe("phase PWD matches the phase cwd (#135 bench find)", () => {
+  it("sets PWD to cwd so opencode anchors its project on the phase directory", async () => {
+    const marker = join(tmpdir(), `pwd-${process.pid}-${Date.now()}.txt`);
+    const emitter = `printf '%s' "$PWD" > '${marker}' ; printf '%s\\n%s\\n' '${stepStartLine()}' '${stepFinishLine()}'`;
+    const env = await makeFakeOpencode(emitter);
+    try {
+      const result = await executeOpendCode("prompt", {
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "pwd-check",
+        model: null,
+        live: false,
+        heartbeat: false,
+        stallTimeoutSec: null,
+        maxStepModelSec: null,
+      });
+      expect(result.status).toBe("ok");
+      expect((await readFile(marker, "utf8")).trim()).toBe(env.cwd);
+    } finally {
+      restorePath(env.restorePath);
+      await import("node:fs/promises").then((fs) => fs.rm(marker, { force: true }));
+    }
+  }, 60000);
+});

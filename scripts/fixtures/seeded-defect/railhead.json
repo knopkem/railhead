@@ -1,0 +1,9 @@
+{
+  "verify": ["node --test"],
+  "smoke": ["node counter.mjs"],
+  "test_phase": false,
+  "yolo_permissions": true,
+  "code_review": { "mode": "light" },
+  "visual_review": { "mode": "off" },
+  "goal_review": { "mode": "light" }
+}

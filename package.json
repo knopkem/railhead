@@ -38,7 +38,8 @@
     "build": "esbuild src/cli/cli.ts --bundle --platform=node --format=esm --outfile=dist/cli.js && node ./bin/railhead >/dev/null",
     "prepare": "npm run build",
     "start": "node ./bin/railhead",
-    "dev": "tsx src/cli/cli.ts"
+    "dev": "tsx src/cli/cli.ts",
+    "bench": "tsx scripts/bench.mts"
   },
   "engines": {
     "node": ">=20"

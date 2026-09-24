@@ -169,6 +169,20 @@ Every run writes to `.railhead/<run-id>/`:
 
 After each commit, a diff-only extract pass updates `railhead.contracts.json` with the files and symbols that changed. Later tickets receive exact pointers instead of "go explore the codebase" — this is what keeps per-ticket context O(ticket).
 
+## Bench
+
+`npm run bench` runs the engine/model trials and writes `bench-results/` (gitignored): a JSON per trial plus a running `results.md` comparison table, so a future engine change (Splash vs llama.cpp vs oMLX vs LM Studio) is measured the same way every time. Every mode makes real model calls; none of it is part of `npm test`. Scratch projects default to the system temp dir — keep them outside this repo, or opencode anchors the project at the nearest `package.json` upward and the model sees railhead's own sources.
+
+```sh
+npm run bench -- --mode plan    --project <dir> [--fresh] --prompt "<goal>" --model <provider/model>
+npm run bench -- --mode e2e     --project <dir> --tickets <dir> --model <provider/model>
+npm run bench -- --mode fixture --model <provider/model>
+```
+
+- `plan` — planning only (`runPlan`); records wall time, plan-check rounds, ticket count, dependency-graph sanity, and the plan phases' first-step prefix cache.
+- `e2e` — a full `railhead run` on a prepared ticket set; records wall time, commits, goal/visual verdicts, and per-phase first-step cache.
+- `fixture` — builds `scripts/fixtures/seeded-defect/` (a counter app whose tests encode a defect its README forbids) and asserts a gate still names the discrepancy — the judge-quality check.
+
 ## Setting up opencode
 
 The one critical setting is the **per-model context limit** — opencode cannot infer it for local models:
