@@ -3,6 +3,7 @@ import { isFinished } from "../core/state.ts";
 import { loadTickets } from "../core/ticket.ts";
 import { contextBudget, firesMidRun } from "../config/config.ts";
 import { reviewSummary, runReviewAgent } from "./reviewer.ts";
+import { baseSessionId } from "../execute/base-session.ts";
 import { processCorrectiveFindings, type RunTicket } from "./corrective.ts";
 import { replanFromCheckpoint, drainFrontier } from "./replan.ts";
 import { buildStructuralReviewPrompt, parseStructuralVerdict } from "./structural-review.ts";
@@ -106,6 +107,7 @@ export async function runStructuralReview(
     phaseFile,
     model: goalModel,
     agent: RAILHEAD_AGENT_NAMES.observe,
+    baseSession: baseSessionId(state),
     live: !state.quiet,
     verbose: state.verbose,
     heartbeat: true,

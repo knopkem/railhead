@@ -10,7 +10,7 @@ import { renderPreamble, renderTask, type PhaseMessages } from "./preamble.ts";
 /** Load a project doc for the canonical preamble. A missing file renders an
  *  explicit placeholder so the model can tell "checked and absent" from "not
  *  part of this phase's stable inputs". */
-async function readPreambleDoc(cwd: string, name: string): Promise<string> {
+export async function readPreambleDoc(cwd: string, name: string): Promise<string> {
   return (await readProjectDoc(cwd, name)) ?? "_(not present in this repo)_";
 }
 

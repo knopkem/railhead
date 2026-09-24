@@ -9,6 +9,7 @@ import {
 import { loadTickets, type Ticket } from "../core/ticket.ts";
 import type { RunState, TicketState } from "../core/state.ts";
 import { isBlocker, reviewSummary, runReviewAgent } from "./reviewer.ts";
+import { baseSessionId } from "../execute/base-session.ts";
 import { pushLearnings, readLearnings } from "../context/learnings.ts";
 import { eventPath, writeState } from "../core/ledger.ts";
 import { hasVisualEvidence, hasInteractionEvidence, parseToolCalls, BUILD_TEST_EXCLUDE_RE } from "./evidence.ts";
@@ -100,6 +101,7 @@ export async function runVisualReview(options: {
     // runs as the observe seat — the one shared system prompt with the
     // project's ordinary toolset, not the read-only reviewer.
     agent: RAILHEAD_AGENT_NAMES.observe,
+    baseSession: baseSessionId(state),
     live: !state.quiet,
     verbose: state.verbose,
     heartbeat: true,

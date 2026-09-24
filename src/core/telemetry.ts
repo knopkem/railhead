@@ -229,7 +229,9 @@ export interface FirstStepCache {
  * only (a warm cache moves the bulk into `cache.read`), so cold is
  * `input + write` and cached is `read`. Returns null when no step_finish
  * reported token counts (pre-flight refusal, killed before the first step,
- * or a stream shape predating the field). */
+ * or a stream shape predating the field) — and when a step reported tokens
+ * but no `cache` object at all: that provider does not report cache, so the
+ * phase's reuse is unknown, never a zero-reuse miss (issue #133). */
 export function firstStepCacheFromEvents(raw: string): FirstStepCache | null {
   for (const line of raw.split("\n")) {
     if (!line.includes('"step_finish"')) continue;
@@ -242,8 +244,9 @@ export function firstStepCacheFromEvents(raw: string): FirstStepCache | null {
     if (ev.type !== "step_finish") continue;
     const tokens = ev.part?.tokens;
     if (typeof tokens?.input !== "number") continue;
-    const read = typeof tokens.cache?.read === "number" ? tokens.cache.read : 0;
-    const write = typeof tokens.cache?.write === "number" ? tokens.cache.write : 0;
+    if (typeof tokens.cache !== "object" || tokens.cache === null) return null;
+    const read = typeof tokens.cache.read === "number" ? tokens.cache.read : 0;
+    const write = typeof tokens.cache.write === "number" ? tokens.cache.write : 0;
     return { cold: tokens.input + write, cached: read };
   }
   return null;

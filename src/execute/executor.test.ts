@@ -2,7 +2,7 @@ import { mkdtemp, writeFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, expect, afterEach } from "vitest";
-import { describeExecFailure, executeOpendCode, isQuotaError, isToolTimeout, isTransientError, resetWorkerForTest, stepTimingMs, windowedStepRates, writePayloadOf } from "./executor.ts";
+import { describeExecFailure, executeFreshPhase, executeOpendCode, isQuotaError, isToolTimeout, isTransientError, resetWorkerForTest, stepTimingMs, windowedStepRates, writePayloadOf } from "./executor.ts";
 import { estimateTokens } from "./diff-filter.ts";
 import { CHECKPOINT_RE } from "../core/checkpoint.ts";
 
@@ -1949,6 +1949,147 @@ describe("executeOpendCode session resume + capture (ADR 0022 S0.1, #84)", () =>
         stallTimeoutSec: null,
       });
       expect(result.sessionId).toBeNull();
+    } finally {
+      restorePath(env.restorePath);
+    }
+  }, 60000);
+});
+
+describe("base-session fork args and fallback (#133)", () => {
+  it("forks the base and sends only the task message, not the joined prompt", async () => {
+    const argvMarker = join(tmpdir(), `argv-fork-${process.pid}-${Date.now()}.txt`);
+    const emitter = `printf '%s\\n' "$@" > '${argvMarker}' ; printf '%s\\n%s\\n' '${stepStartLine()}' '${stepFinishLine()}'`;
+    const env = await makeFakeOpencode(emitter);
+    try {
+      const result = await executeOpendCode("JOINED", {
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "fork-args",
+        model: null,
+        session: "ses_base",
+        fork: true,
+        task: "TASKONLY",
+        live: false,
+        heartbeat: false,
+        stallTimeoutSec: null,
+      });
+      expect(result.status).toBe("ok");
+      const argv = (await readFile(argvMarker, "utf8")).trim().split("\n");
+      expect(argv).toContain("--session");
+      expect(argv).toContain("ses_base");
+      expect(argv).toContain("--fork");
+      expect(argv[argv.length - 1]).toBe("TASKONLY");
+      expect(argv).not.toContain("JOINED");
+    } finally {
+      restorePath(env.restorePath);
+      await import("node:fs/promises").then((fs) => fs.rm(argvMarker, { force: true }));
+    }
+  }, 60000);
+
+  it("does not pass --fork for a resume, and sends the joined prompt", async () => {
+    const argvMarker = join(tmpdir(), `argv-nofork-${process.pid}-${Date.now()}.txt`);
+    const emitter = `printf '%s\\n' "$@" > '${argvMarker}' ; printf '%s\\n%s\\n' '${stepStartLine()}' '${stepFinishLine()}'`;
+    const env = await makeFakeOpencode(emitter);
+    try {
+      const result = await executeOpendCode("JOINED", {
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "resume-args",
+        model: null,
+        session: "ses_builder",
+        fork: false,
+        task: "TASKONLY",
+        live: false,
+        heartbeat: false,
+        stallTimeoutSec: null,
+      });
+      expect(result.status).toBe("ok");
+      const argv = (await readFile(argvMarker, "utf8")).trim().split("\n");
+      expect(argv).toContain("--session");
+      expect(argv).not.toContain("--fork");
+      expect(argv[argv.length - 1]).toBe("JOINED");
+    } finally {
+      restorePath(env.restorePath);
+      await import("node:fs/promises").then((fs) => fs.rm(argvMarker, { force: true }));
+    }
+  }, 60000);
+
+  it("retries once without the base when opencode rejects the fork (session gone)", async () => {
+    const argvMarker = join(tmpdir(), `argv-fallback-${process.pid}-${Date.now()}.txt`);
+    // First invocation sees --fork and refuses like a missing session; the
+    // retry carries the joined prompt with no session args and succeeds.
+    const emitter = `printf 'INV %s\\n' "$*" >> '${argvMarker}' ; case "$*" in *--fork*) printf 'Error: Session not found\\n' >&2 ; exit 1 ;; esac ; printf '%s\\n%s\\n' '${stepStartLine()}' '${stepFinishLine()}'`;
+    const env = await makeFakeOpencode(emitter);
+    try {
+      const result = await executeFreshPhase("JOINED", {
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "fork-fallback",
+        model: null,
+        session: "ses_gone",
+        fork: true,
+        task: "TASKONLY",
+        live: false,
+        heartbeat: false,
+        stallTimeoutSec: null,
+      });
+      expect(result.status).toBe("ok");
+      const invocations = (await readFile(argvMarker, "utf8")).trim().split("\n");
+      expect(invocations).toHaveLength(2);
+      expect(invocations[0]).toContain("--fork");
+      expect(invocations[0]).toContain("TASKONLY");
+      expect(invocations[1]).not.toContain("--fork");
+      expect(invocations[1]).not.toContain("--session");
+      expect(invocations[1]).toContain("JOINED");
+    } finally {
+      restorePath(env.restorePath);
+      await import("node:fs/promises").then((fs) => fs.rm(argvMarker, { force: true }));
+    }
+  }, 60000);
+
+  it("does not retry when the failed fork was not rejected for a base-session reason", async () => {
+    const argvMarker = join(tmpdir(), `argv-noretry-${process.pid}-${Date.now()}.txt`);
+    const emitter = `printf 'INV %s\\n' "$*" >> '${argvMarker}' ; printf 'provider exploded\\n' >&2 ; exit 1`;
+    const env = await makeFakeOpencode(emitter);
+    try {
+      const result = await executeFreshPhase("JOINED", {
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "fork-no-retry",
+        model: null,
+        session: "ses_base",
+        fork: true,
+        task: "TASKONLY",
+        live: false,
+        heartbeat: false,
+        stallTimeoutSec: null,
+      });
+      expect(result.status).toBe("error");
+      const invocations = (await readFile(argvMarker, "utf8")).trim().split("\n");
+      expect(invocations).toHaveLength(1);
+    } finally {
+      restorePath(env.restorePath);
+      await import("node:fs/promises").then((fs) => fs.rm(argvMarker, { force: true }));
+    }
+  }, 60000);
+
+  it("reports a token-counting provider with no cache object as unknown (#133)", async () => {
+    const start = stepStartLine().replace(/'/g, "'\\''");
+    const finish = stepFinishLineWithTokens(12_000).replace(/'/g, "'\\''");
+    const emitter = `printf '%s\\n%s\\n' '${start}' '${finish}'`;
+    const env = await makeFakeOpencode(emitter);
+    try {
+      const result = await executeOpendCode("test prompt", {
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "first-step-cache-unknown",
+        model: null,
+        stallTimeoutSec: null,
+        maxStepModelSec: null,
+        live: false,
+        heartbeat: false,
+      });
+      expect(result.firstStepCache).toBeNull();
     } finally {
       restorePath(env.restorePath);
     }

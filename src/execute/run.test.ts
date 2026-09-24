@@ -22,7 +22,17 @@ import * as git from "../core/git.ts";
 // infra-retry-forever loop — see the comments throughout run.ts) lived in.
 vi.mock("./executor.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./executor.ts")>();
-  return { ...actual, executeOpendCode: vi.fn(), startPersistentWorker: vi.fn(), stopPersistentWorker: vi.fn() };
+  const executeOpendCode = vi.fn();
+  return {
+    ...actual,
+    executeOpendCode,
+    // The real `executeFreshPhase` closes over the module-internal runner, so
+    // routing it through the same mock is what keeps every phase invocation
+    // in this suite from spawning a real opencode process.
+    executeFreshPhase: vi.fn((prompt: string, options: Parameters<typeof executeOpendCode>[1]) => executeOpendCode(prompt, options)),
+    startPersistentWorker: vi.fn(),
+    stopPersistentWorker: vi.fn(),
+  };
 });
 
 import { executeOpendCode, startPersistentWorker, stopPersistentWorker } from "./executor.ts";
@@ -71,7 +81,10 @@ function okResult(steps = 1, toolCalls = 1) {
 }
 
 /** Identify which kind of phase a mocked executeOpendCode call represents, purely from the options run.ts passes — mirrors how a human reading the ledger would tell them apart. */
-function kindOf(options: { phaseFile: string; agent?: string | null }): "review" | "contracts" | "implement" | "visual" | "test" | "goal" | "structural" | "replan" | "reconcile" {
+function kindOf(options: { phaseFile: string; agent?: string | null }): "base" | "review" | "contracts" | "implement" | "visual" | "test" | "goal" | "structural" | "replan" | "reconcile" {
+  // Issue #133: the base-session call is not a ticket phase — classify it so
+  // scripted mocks keyed on phase kind never treat it as implement/review.
+  if (options.agent === "railhead-base" || options.phaseFile === "base-session") return "base";
   if (options.agent === "railhead-review" || options.agent === "railhead-review-readmode") return "review";
   if (options.phaseFile.includes("-contracts")) return "contracts";
   if (options.phaseFile.endsWith("-visual") || options.phaseFile.startsWith("visual-")) return "visual";
@@ -6134,5 +6147,134 @@ describe("ADR 0040 — plan-defect auto-replan", () => {
     expect(outcome).toBe("failed");
     expect(replanCalls).toBe(0);
     expect(state.stop_reason).toContain("plan-defect");
+  });
+});
+
+describe("base session + phase fork (#133)", () => {
+  it("creates one base per run and forks it for every fresh phase", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig();
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "base") return { ...okResult(), sessionId: "ses_base" };
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+    expect(final.status).toBe("finished");
+
+    const baseCalls = mockExec.mock.calls.filter(([, o]) => kindOf(o!) === "base");
+    expect(baseCalls).toHaveLength(1);
+    expect(final.base_session?.session_id).toBe("ses_base");
+
+    const fresh = mockExec.mock.calls.filter(([, o]) => kindOf(o!) !== "base");
+    expect(fresh.length).toBeGreaterThan(0);
+    for (const [, options] of fresh) {
+      expect(options!.session).toBe("ses_base");
+      expect(options!.fork).toBe(true);
+      expect((options!.task ?? "").length).toBeGreaterThan(0);
+    }
+  });
+
+  it("falls back to the joined prompt for every phase when no base can be created", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig();
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+
+    // The base call completes without a session id — the fail-open shape a
+    // missing model or an exhausted provider produces.
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "base") return okResult();
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+    expect(final.status).toBe("finished");
+    expect(final.base_session ?? null).toBeNull();
+
+    const fresh = mockExec.mock.calls.filter(([, o]) => kindOf(o!) !== "base");
+    expect(fresh.length).toBeGreaterThan(0);
+    for (const [, options] of fresh) {
+      expect(options!.session ?? null).toBeNull();
+      expect(options!.fork ?? false).toBe(false);
+    }
+  });
+});
+
+describe("builder seed forks the base (#133)", () => {
+  it("forks the base with the first builder task and resumes the forked session after that", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({ session_builder: true });
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+    // A ready base (as runLoop's ensureBaseSession would have persisted).
+    state.base_session = { session_id: "ses_base", preamble_hash: "docs-hash", created_at: "2026-09-24T00:00:00Z" };
+
+    let buildCalls = 0;
+    let reviewCalls = 0;
+    mockExec.mockImplementation(async (_prompt, options) => {
+      if (options.phaseFile.endsWith("-build")) {
+        buildCalls++;
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "$CHECKPOINT ticket=01");
+        return { ...okResult(), sessionId: "ses_builder1", checkpointTicket: "01" };
+      }
+      if (kindOf(options) === "review") {
+        reviewCalls++;
+        await emitText(ledgerDir, options.phaseFile, reviewCalls === 1
+          ? "$BLOCKING\n[BLOCKER] must fix\n$NITS\nNONE\n$OK\nno"
+          : "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+        return okResult();
+      }
+      await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      return okResult();
+    });
+
+    const outcome = await processTicket(state, ledgerDir, ticketState);
+
+    expect(outcome).toBe("ok");
+    expect(ticketState.status).toBe("committed");
+    expect(buildCalls).toBe(2);
+    const builds = mockExec.mock.calls.filter(([, o]) => o!.phaseFile.endsWith("-build"));
+    // Seed: fork the base, send only the builder task.
+    expect(builds[0]![1]!.session).toBe("ses_base");
+    expect(builds[0]![1]!.fork).toBe(true);
+    expect((builds[0]![1]!.task ?? "").length).toBeGreaterThan(0);
+    // Findings retry: the forked durable session, no fork.
+    expect(builds[1]![1]!.session).toBe("ses_builder1");
+    expect(builds[1]![1]!.fork ?? false).toBe(false);
   });
 });

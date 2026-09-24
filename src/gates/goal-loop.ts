@@ -3,6 +3,7 @@ import { isFinished } from "../core/state.ts";
 import { loadTickets, type Ticket } from "../core/ticket.ts";
 import { contextBudget, firesAtRunEnd, goalCheckpointIsAdvisory, goalFiresCheckpointsMidRun, DEFAULT_MAX_REPLANS } from "../config/config.ts";
 import { reviewSummary, runReviewAgent } from "./reviewer.ts";
+import { baseSessionId } from "../execute/base-session.ts";
 import { runCommandFromVerify } from "./visual.ts";
 import { detectGameCanvas, RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
 import { touchesVisualSurface } from "../context/surface.ts";
@@ -307,6 +308,7 @@ export async function runGoalReview(
     phaseFile,
     model: goalModel,
     agent: RAILHEAD_AGENT_NAMES.observe,
+    baseSession: baseSessionId(state),
     live: !state.quiet,
     verbose: state.verbose,
     heartbeat: true,

@@ -254,6 +254,18 @@ export interface RunState {
    * session id to re-attach on resume and the commit a fresh-session recovery
    * seeds from. Present only when `config.session_builder` is true. */
   builder?: BuilderState;
+  /** Issue #133: the run's base session — the `[system][preamble]` prefix
+   * every fresh phase forks (`--session <id> --fork`) so its task message
+   * appends to a shared, cacheable prefix instead of re-prefilling one.
+   * Persisted so a resume reuses the same conversation; `preamble_hash` is
+   * the rebuild trigger (the canonical preamble's inputs changed). Absent or
+   * null = no base: creation failed, the provider cannot fork, or the run
+   * predates the base protocol — phases run the ADR 0001 joined-prompt path. */
+  base_session?: {
+    session_id: string;
+    preamble_hash: string;
+    created_at: string;
+  } | null;
   /** Issue #35: a per-ticket visual review kicked off asynchronously after
    * ticket N commits, joined before ticket N+1 commits. Not persisted (a
    * promise is not serializable); the persisted `visual_pending` marker names

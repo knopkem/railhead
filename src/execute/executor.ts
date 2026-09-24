@@ -295,6 +295,12 @@ export interface ExecResult {
    * error event was emitted. Captured so callers can decide whether the failure
    * is transient (rate-limit / 503) and should be retried. */
   errorMessage: string | null;
+  /** Issue #133: true when the phase asked to fork a base session
+   * (`session` + `fork`) and opencode rejected it — an unknown `--fork` flag
+   * on an older binary, or a session that no longer exists. The joined prompt
+   * was NOT consumed, so a caller (see {@link executeFreshPhase}) can retry
+   * the same phase without the base. Optional: absent/false everywhere else. */
+  forkRejected?: boolean;
   /** Issue #80: the ladder's evidence, self-composed from the fields above so
    * the failure-response wrapper never re-derives it. Optional so existing
    * mocks and partial results stay valid; callers use `evidenceFromResult` to
@@ -345,6 +351,16 @@ export interface ExecOptions {
    * freeing the process between checkpoints loses nothing. Absent = ADR 0001's
    * fresh session per phase. */
   session?: string | null;
+  /** Issue #133: with `session`, fork it (`--session <id> --fork`) instead of
+   * appending to it. The fork inherits the base session's `[system][preamble]`
+   * prefix and nothing from any sibling phase, preserving ADR 0001's fresh
+   * context while sharing the prefill. Ignored without `session`. */
+  fork?: boolean;
+  /** Issue #133: the wire message when forking — the base session already
+   * holds the canonical preamble, so only the phase's volatile task text is
+   * sent. Without it a fork would re-send the joined prompt after the base's
+   * copy (duplicated prefix). Ignored unless `session` + `fork`. */
+  task?: string | null;
   /** Issue #84 (ADR 0022 §5): how the request-ceiling kill guards behave.
    * `"kill"` (default) is the ADR 0014/#81/#82 regime — the railhead kills a
    * phase whose finished-step peak or streaming in-flight estimate crosses 95%
@@ -520,6 +536,11 @@ export const PROMPT_BUDGET_RATIO = 0.5;
  * O(project) — each phase starts with a clean model context, fed only by the
  * railhead's per-ticket prompt.
  *
+ * Issue #133: fresh-context phases reach this runner through
+ * `executeFreshPhase`, which forks the run's base session (`--session <base>
+ * --fork`) and sends only the task message — same isolation, shared prefix.
+ * This function itself stays the one invocation primitive.
+ *
  * Issue #39: when a persistent `opencode serve` worker is active
  * (`startPersistentWorker` was called and set `activeWorkerUrl`), this same
  * function spawns `opencode run --attach <url>` instead of a standalone
@@ -539,6 +560,8 @@ export async function executeOpendCode(
     model,
     agent,
     session,
+    fork = false,
+    task = null,
     live,
     verbose = false,
     heartbeat = false,
@@ -650,8 +673,14 @@ export async function executeOpendCode(
   }
   if (model && model !== DEFAULT_MODEL) base.push("--model", model);
   if (agent) base.push("--agent", agent);
-  if (session) base.push("--session", session);
-  base.push(prompt);
+  if (session) {
+    base.push("--session", session);
+    // Issue #133: fork the base before continuing, so this phase's task
+    // branches off the shared prefix instead of appending to the base (which
+    // every later fork would then see) — isolation and shared prefill at once.
+    if (fork) base.push("--fork");
+  }
+  base.push(session && fork && task ? task : prompt);
 
   const child = spawn("opencode", base, {
     cwd,
@@ -787,6 +816,10 @@ export async function executeOpendCode(
   // payload) can span multiple `data` events. Without buffering, each fragment
   // is written to the ledger as a separate "line," none of which is valid JSON.
   let lineBuffer = "";
+  // Issue #133: the tail of opencode's stderr, kept only to classify a
+  // rejected `--fork` (an unknown flag, or a session that no longer exists)
+  // so the caller can retry the phase without the base. Never used otherwise.
+  let stderrTail = "";
   const killForStall = () => {
     stalled = true;
     const p = livePrefix ? `${livePrefix} ` : "";
@@ -1204,7 +1237,9 @@ export async function executeOpendCode(
   });
   child.stderr?.on("data", (chunk: Buffer) => {
     armStallTimer();
-    for (const line of chunk.toString("utf8").split("\n")) {
+    const text = chunk.toString("utf8");
+    stderrTail = (stderrTail + text).slice(-4000);
+    for (const line of text.split("\n")) {
       void appendEvent(ledgerDir, `${phaseFile}.stderr`, line);
     }
   });
@@ -1304,6 +1339,11 @@ export async function executeOpendCode(
     : "model produced 0 tokens (connection or provider failure)";
   const finalStatus: ExecStatus = halted ? "halted" : markerEarlyExit || blockEmitted ? "ok" : degradedTarget ? "degraded_target" : (spinLoop || editLoop) ? "spin_loop" : budgetExceeded ? "budget_exceeded" : stalled || modelStalled || wallClockExceeded ? "timeout" : zeroOutput ? "transient" : transientError && code !== 0 ? "transient" : code === 0 ? "ok" : "error";
   const finalError = halted ? (haltReasonText ?? "halt file present") : modelStallMessage ?? wallClockMessage ?? (zeroOutput ? zeroOutputMessage : errorMessage);
+  // Issue #133: a failed `--fork` invocation means the base could not be
+  // branched — either this opencode predates the flag or the session is gone.
+  // The prompt was never consumed, so the caller may re-run without the base.
+  const forkRejected = !!(session && fork) && code !== 0 && finalStatus !== "ok" && finalStatus !== "halted"
+    && /session not found|unknown (?:option|argument)[^\n]*fork|fork[^\n]*(?:unknown|unsupported|not supported)/i.test(`${errorMessage ?? ""}\n${stderrTail}`);
   const durationMs = Date.now() - start;
   return {
     status: finalStatus,
@@ -1318,6 +1358,7 @@ export async function executeOpendCode(
     generationMs,
     toolCalls,
     errorMessage: finalError,
+    forkRejected,
     sessionId,
     firstStepCache,
     // Surface the checkpoint ticket whenever the stop marker appeared — a
@@ -1338,6 +1379,23 @@ export async function executeOpendCode(
       durationMs,
     },
   };
+}
+
+/**
+ * Run a fresh-context phase, falling back when the base-session fork is
+ * rejected (issue #133): a `--fork` this opencode does not understand, or a
+ * base session that no longer exists. The joined `prompt` is passed on the
+ * retry, so the phase runs exactly as ADR 0001 prescribes — the fork is an
+ * optimization, and losing it must never lose the phase.
+ *
+ * A rejected fork costs one failed opencode start, not a phase: the CLI
+ * refuses before any model work.
+ */
+export async function executeFreshPhase(prompt: string, options: ExecOptions): Promise<ExecResult> {
+  const result = await executeOpendCode(prompt, options);
+  if (!result.forkRejected) return result;
+  console.log(`[${nowClock()}] base session fork rejected (${result.errorMessage ?? "unknown"}) — re-running the phase fresh without the shared prefix`);
+  return executeOpendCode(prompt, { ...options, session: null, fork: false, task: null });
 }
 
 /** Whether a JSON event line is a TERMINAL tool-use event (a tool call that
@@ -1470,7 +1528,9 @@ function outputTokensOf(line: string): number | null {
 /** Issue #130: the first `step_finish` line's prompt-cache split, or null for
  * any other line / a finish without token counts. Mirrors `contextTokensOf`'s
  * token reading: `tokens.input` is the uncached sliver, so cold is input plus
- * cache writes and cached is cache reads. */
+ * cache writes and cached is cache reads. A finish with token counts but NO
+ * `cache` object means the provider reports no cache at all — unknown, not a
+ * zero-reuse miss (issue #133), so it is null too. */
 function firstStepCacheOf(line: string): FirstStepCache | null {
   if (!line.includes('"step_finish"') || !line.includes('"tokens"')) return null;
   let ev: Record<string, any>;
@@ -1482,8 +1542,9 @@ function firstStepCacheOf(line: string): FirstStepCache | null {
   if (ev.type !== "step_finish") return null;
   const tokens = ev.part?.tokens;
   if (typeof tokens?.input !== "number") return null;
-  const read = typeof tokens.cache?.read === "number" ? tokens.cache.read : 0;
-  const write = typeof tokens.cache?.write === "number" ? tokens.cache.write : 0;
+  if (typeof tokens.cache !== "object" || tokens.cache === null) return null;
+  const read = typeof tokens.cache.read === "number" ? tokens.cache.read : 0;
+  const write = typeof tokens.cache.write === "number" ? tokens.cache.write : 0;
   return { cold: tokens.input + write, cached: read };
 }
 

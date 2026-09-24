@@ -6,9 +6,9 @@
  * must live after it. `renderPreamble` is the canonical message 1: pure, byte-
  * stable for unchanged inputs, and seat-neutral (same inputs → same bytes,
  * whichever seat asks). `renderTask` assembles message 2 from the volatile
- * sections a phase contributes. `joinPhaseMessages` is the transitional
- * single-message wire form until the base-session/`--fork` protocol (#133)
- * sends the two parts as the separate messages this module names.
+ * sections a phase contributes. `joinPhaseMessages` is the fallback wire form
+ * — used when no base session is held (issue #133); with one, `executeFreshPhase`
+ * forks it and sends only `task`, message 1 living in the base conversation.
  */
 
 /** The two user messages of a phase. */
@@ -62,10 +62,11 @@ export function renderTask(sections: readonly (string | null | undefined)[]): st
   return sections.filter((s): s is string => typeof s === "string" && s.length > 0).join("\n\n");
 }
 
-/** The transitional single-message form of a phase prompt: preamble first,
- *  task after, exactly as the current `opencode run` wire sends them. The
- *  base-session/`--fork` protocol (#133) replaces this join with two real
- *  messages; until then every phase still sends one message. */
+/** The joined wire form of a phase prompt: preamble first, task after, one
+ *  message. This is the fail-open path (issue #133) — a run with no base
+ *  session, or one whose provider rejects `--fork`, still sends every phase a
+ *  complete prompt. With a base session the preamble rides the base and only
+ *  the task goes on the wire; see `executeFreshPhase`. */
 export function joinPhaseMessages(messages: PhaseMessages): string {
   return renderTask([messages.preamble, messages.task]);
 }

@@ -1,6 +1,6 @@
 import { buildReviewerPrompt, buildReviewerReadModePrompt } from "../context/prompt.ts";
 import { joinPhaseMessages, type PhaseMessages } from "../context/preamble.ts";
-import { describeExecFailure, executeOpendCode, isQuotaError } from "../execute/executor.ts";
+import { describeExecFailure, executeFreshPhase, isQuotaError } from "../execute/executor.ts";
 import { extractAssistantText } from "../core/ledger.ts";
 import type { ContractsIndex } from "../core/contracts.ts";
 import { readLearnings } from "../context/learnings.ts";
@@ -83,6 +83,10 @@ export interface ReviewArgs {
   diffFile?: string;
   /** Issue #46: the `git diff --stat` summary shown alongside `diffFile`. */
   diffStat?: string;
+  /** Issue #133: the run's base session id. When set and the prompt is the
+   * two-message shape, the review forks the base and sends only its task
+   * message — the shared prefix without a re-prefill. Null = joined prompt. */
+  baseSession?: string | null;
 }
 
 export interface ReviewAgentArgs {
@@ -114,6 +118,10 @@ export interface ReviewAgentArgs {
    * model that re-emits its verdict doesn't loop until the step budget eats
    * the verdict. Visual review passes it; goal/structural currently don't. */
   stopAfterVerdict?: boolean;
+  /** Issue #133: the run's base session to fork for this review (see
+   * `ReviewArgs.baseSession`). Only used when the prompt is a `PhaseMessages`
+   * pair; a plain string cannot be split, so it runs joined. */
+  baseSession?: string | null;
 }
 
 export type ReviewAgentOutcome =
@@ -140,12 +148,20 @@ export type ReviewAgentOutcome =
  *   run is never coerced into a pass.
  */
 export async function runReviewAgent(args: ReviewAgentArgs): Promise<ReviewAgentOutcome> {
-  const result = await executeOpendCode(typeof args.prompt === "string" ? args.prompt : joinPhaseMessages(args.prompt), {
+  const joined = typeof args.prompt === "string" ? args.prompt : joinPhaseMessages(args.prompt);
+  const task = typeof args.prompt === "string" ? null : args.prompt.task;
+  // Issue #133: a two-message prompt with a base session forks it and sends
+  // only the task; a plain string cannot be split, so it always runs joined.
+  const forking = task !== null && !!args.baseSession;
+  const result = await executeFreshPhase(joined, {
     cwd: args.cwd,
     ledgerDir: args.ledgerDir,
     phaseFile: args.phaseFile,
     model: args.model,
     agent: args.agent,
+    session: forking ? args.baseSession ?? null : null,
+    fork: forking,
+    task: forking ? task : null,
     live: args.live,
     verbose: args.verbose,
     heartbeat: args.heartbeat,
@@ -330,6 +346,7 @@ export async function review(options: ReviewArgs): Promise<ReviewOutcome> {
     phaseFile: options.phaseFile,
     model: options.model,
     agent: options.readMode || useDiffFile ? RAILHEAD_AGENT_NAMES.reviewReadmode : RAILHEAD_AGENT_NAMES.review,
+    baseSession: options.baseSession,
     live: options.live,
     verbose: options.verbose,
     heartbeat: options.heartbeat,

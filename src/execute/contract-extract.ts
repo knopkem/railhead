@@ -4,7 +4,8 @@ import type { ContractEntry } from "../core/contracts.ts";
 import { extractContractsBlock, loadContracts, mergeContracts, saveContracts, verifyContractEntries } from "../core/contracts.ts";
 import { buildContractExtractFilePrompt } from "../context/prompt.ts";
 import { joinPhaseMessages } from "../context/preamble.ts";
-import { describeExecFailure, executeOpendCode, startPersistentWorker, stopPersistentWorker } from "./executor.ts";
+import { describeExecFailure, executeFreshPhase, startPersistentWorker, stopPersistentWorker } from "./executor.ts";
+import { forkPhase } from "./base-session.ts";
 import { extractAssistantText } from "../core/ledger.ts";
 import { contextBudget } from "../config/config.ts";
 import { withFailureLadderOnThrow } from "./failure-ladder.ts";
@@ -222,11 +223,15 @@ async function extractUnhandledFiles(
     if (!content) continue;
     const phaseFile = `${ticket.number}-contracts-${file.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 40)}`;
     const prompt = buildContractExtractFilePrompt(file, content);
-    const result = await executeOpendCode(joinPhaseMessages(prompt), {
+    const fork = forkPhase(state, prompt.task);
+    const result = await executeFreshPhase(joinPhaseMessages(prompt), {
       cwd: state.cwd,
       ledgerDir: ledger,
       phaseFile,
       model: state._models?.implement ?? null,
+      session: fork.session,
+      fork: fork.fork,
+      task: fork.task,
       live: !state.quiet, verbose: state.verbose,
       livePrefix: `${ticket.number} contracts ${file}`,
       maxSteps: state.config.max_phase_steps,

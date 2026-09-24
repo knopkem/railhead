@@ -16,7 +16,8 @@ import { reportConflicts, scanOrderedConflicts } from "../plan/plan.ts";
 import { readPlanOrigin, checkPlanOrigin, readPlanRulings, readPlanWallMs } from "../plan/plan-identity.ts";
 import { replanFromCheckpoint } from "../gates/replan.ts";
 import type { BlockReport } from "../core/blocked.ts";
-import { describeExecFailure, executeOpendCode, killActiveChild, withPersistentWorker, startPersistentWorker, stopPersistentWorker } from "./executor.ts";
+import { describeExecFailure, executeOpendCode, executeFreshPhase, killActiveChild, withPersistentWorker, startPersistentWorker, stopPersistentWorker } from "./executor.ts";
+import { baseSessionId, ensureBaseSession, forkPhase } from "./base-session.ts";
 import { withFailureLadder, withFailureLadderOnThrow, PhaseFailure, evidenceFromResult, SPIRAL_COMPACTION_THRESHOLD, type FailureEvidence } from "./failure-ladder.ts";
 import { setDependencySourceDeny } from "./guard.ts";
 import { buildImplementerPrompt, buildTestPhasePrompt, type AttemptRound } from "../context/prompt.ts";
@@ -350,6 +351,13 @@ async function softStopHere(
   onUpdate?.();
 }
 
+/**
+ * Issue #133: the executor arguments a fresh phase uses under the run's base
+ * session (see `forkPhase`). Kept as a local alias so the call sites read as
+ * "give this phase the base fork".
+ */
+const baseFork = (state: RunState, messages: { task: string }) => forkPhase(state, messages.task);
+
 export async function runLoop(state: RunState, ledger: string, onUpdate?: () => void): Promise<RunState> {
   // Issue #39: keep one `opencode serve` worker alive for the whole run when
   // persistent_worker is on; each `executeOpendCode` phase attaches to it. The
@@ -403,6 +411,24 @@ async function runLoopInner(state: RunState, ledger: string, onUpdate?: () => vo
     for (const u of blockedByRepair.unresolved) {
       console.log(`[${nowClock()}] blocked_by repair: ${u.ticket} still names an unknown blocker "${u.entry}" — leaving it; the ticket will not become ready until it is fixed`);
     }
+  }
+  // Issue #133: establish the run's base session before the first phase, so
+  // every fresh phase forks the shared `[system][preamble]` prefix. Skipped
+  // when there is no work (a finished run pays no model call) and when a halt
+  // is already raised; creation failure is fail-open — ensureBaseSession
+  // returns null and phases run the joined-prompt path.
+  const hasPendingWork =
+    state.tickets.some((t) => t.status === "ready" || t.status === "in_progress") ||
+    (state.visual_pending ?? null) !== null ||
+    (state.pending_checkpoints?.goal.length ?? 0) > 0 ||
+    (state.pending_checkpoints?.structural.length ?? 0) > 0;
+  if (hasPendingWork && haltReason(state.cwd) === null) {
+    await ensureBaseSession({
+      state,
+      ledger,
+      model: state._models?.implement ?? null,
+      contextTokens: contextBudget(state),
+    });
   }
   const drainOutcome = await drainOwedGates(state, ledger, processTicket);
   if (drainOutcome === "fail" && !isFinished(state.status)) {
@@ -1522,6 +1548,7 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
             phaseFile: isPhase,
             model: interactModel,
             agent: RAILHEAD_AGENT_NAMES.observe,
+            baseSession: baseSessionId(state),
             live: !state.quiet,
             verbose: state.verbose,
             heartbeat: true,
@@ -1661,6 +1688,7 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
           diffFile: diffFilePath,
           diffStat: useDiffFile ? reviewStat : undefined,
           attempt,
+          baseSession: baseSessionId(state),
           designDoc: rvDesignDoc,
           architectureDoc: rvArchitectureDoc,
           surface,
@@ -1957,12 +1985,16 @@ async function runTestPhase(
     contextBudget: contextBudget(state),
   });
 
-  const result = await executeOpendCode(joinPhaseMessages(prompt), {
+  const fork = baseFork(state, prompt);
+  const result = await executeFreshPhase(joinPhaseMessages(prompt), {
     cwd: state.cwd,
     ledgerDir: ledger,
     phaseFile,
     model: state._models?.implement ?? null,
     agent: RAILHEAD_AGENT_NAMES.build,
+    session: fork.session,
+    fork: fork.fork,
+    task: fork.task,
     live: !state.quiet, verbose: state.verbose,
     heartbeat: true,
     livePrefix: `${ticket.number} test`,
@@ -2300,13 +2332,23 @@ async function runBuilderStep(
           contextBudget: contextBudget(state),
           visionCapability: await readVisionCapabilityFor(state.cwd, state._models?.implement ?? null),
         });
-    const result = await executeOpendCode(joinPhaseMessages(prompt), {
+    // Issue #133: a fresh seed (first run, or after a session-lost recovery
+    // dropped the handle) branches off the base session with the builder's
+    // first task — the durable session's history then starts from the shared
+    // `[system][preamble]` prefix. A resume keeps its stored session and
+    // appends as before.
+    const fork = opts.sessionIdForPrompt === null
+      ? baseFork(state, prompt)
+      : { session: opts.sessionIdForPrompt, fork: false, task: null };
+    const result = await executeFreshPhase(joinPhaseMessages(prompt), {
       cwd: state.cwd,
       ledgerDir: ledger,
       phaseFile,
       model: state._models?.implement ?? null,
       agent: RAILHEAD_AGENT_NAMES.build,
-      session: opts.sessionIdForPrompt,
+      session: fork.session,
+      fork: fork.fork,
+      task: fork.task,
       guardMode: "telemetry",
       live: !state.quiet, verbose: state.verbose,
       heartbeat: true,
@@ -2646,12 +2688,16 @@ async function runImplement(
     visionCapability: await readVisionCapabilityFor(state.cwd, state._models?.implement ?? null),
   });
 
-  const result = await executeOpendCode(joinPhaseMessages(prompt), {
+  const fork = baseFork(state, prompt);
+  const result = await executeFreshPhase(joinPhaseMessages(prompt), {
     cwd: state.cwd,
     ledgerDir: ledger,
     phaseFile,
     model: state._models?.implement ?? null,
     agent: RAILHEAD_AGENT_NAMES.build,
+    session: fork.session,
+    fork: fork.fork,
+    task: fork.task,
     live: !state.quiet, verbose: state.verbose,
     heartbeat: true,
     livePrefix: `${ticket.number} implement`,

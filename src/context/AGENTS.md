@@ -4,7 +4,7 @@ Everything that assembles the text a model sees, plus the small files that carry
 
 ## Seams
 
-- `preamble.ts` — the two-message phase shape (#132): `renderPreamble` (canonical, byte-stable message 1 from stable inputs only), `renderTask` (message 2, volatile), `joinPhaseMessages` (the transitional single-message wire form). Pure; imports nothing.
+- `preamble.ts` — the two-message phase shape (#132): `renderPreamble` (canonical, byte-stable message 1 from stable inputs only), `renderTask` (message 2, volatile), `joinPhaseMessages` (the fail-open joined wire form used when no base session is held; #133 forks the base and sends only the task). Pure; imports nothing.
 - `prompt.ts` — implementer / test-phase / reviewer / contract-extract prompts, shared blocks (`BROWSER_HYGIENE`, `HALT_CONTRACT`, `SCRATCH_FILE_DISCIPLINE`). Builders return `PhaseMessages`.
 - `builder.ts` — durable-session builder prompt rendering (`buildBuilderPrompt`, gate feedback, checkpoint directive). The builder *loop* lives in `src/execute/`.
 - `learnings.ts` — `.railhead/learnings.md` lifecycle: read/append/evict/consolidate, `LEARNED:`/`RETRACTED:` markers, failure-learning mining. Capped at `LEARNINGS_CHAR_LIMIT`.

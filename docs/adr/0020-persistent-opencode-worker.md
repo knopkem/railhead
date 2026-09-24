@@ -160,8 +160,10 @@ into ONE user message, the builder grew append-only.
    task message after it (#132).
 3. **A base session per run**, forked by every fresh-context phase
    (`opencode run --session <base> --fork`) and by the builder's first session;
-   the base excludes volatile content by construction and is rebuilt when its
-   inputs change or after a provider restart (#133).
+   the base excludes volatile content by construction and is rebuilt only when
+   its inputs change (docs hash). A provider restart does not invalidate an
+   opencode session — it costs one cold prefill on the existing base, surfaced
+   by the prompt-cache telemetry, never a rebuild (#133).
 4. **`persistent_worker` is not the cache lever.** It can stay off; #39's
    process-startup amortization remains its only justification.
 5. **Policy**: planning tries the fast 35B-A3B first, with the dense model as

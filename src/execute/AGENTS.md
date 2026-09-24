@@ -5,7 +5,8 @@ The engine: run orchestration, opencode subprocess lifecycle, verification, retr
 ## Seams
 
 - `run.ts` — `startRun`, `runLoop`, `processTicket`, `assembleBranch`, `protectedPaths`. The orchestration hub; it imports from every other module group by design.
-- `executor.ts` — the ONLY phase runner: `executeOpendCode`, streamed event parsing, persistent worker, stall/timeout kills, `describeExecFailure`. Fresh subprocess per phase keeps context O(ticket) (ADR 0001); the builder mode reuses a durable session across checkpoints (ADR 0022).
+- `executor.ts` — the ONLY phase runner: `executeOpendCode`, `executeFreshPhase`, streamed event parsing, persistent worker, stall/timeout kills, `describeExecFailure`. Fresh subprocess per phase keeps context O(ticket) (ADR 0001); the builder mode reuses a durable session across checkpoints (ADR 0022).
+- `base-session.ts` — `ensureBaseSession`/`forkPhase`: the per-run base conversation (`[system][canonical preamble]`) every fresh phase forks (`--session <base> --fork`) so only its task message is sent into a shared, cacheable prefix (#133, ADR 0020 amendment). Fail-open: no base → `joinPhaseMessages` as before; a rejected fork retries fresh once. Rebuilt only when the preamble inputs change or the session is gone.
 - `failure-ladder.ts` — `classifyFailure`, `withFailureLadder`: retry → worker restart → diagnosed failure, with the capacity shrink-scope path.
 - `stop.ts` — Ctrl-C semantics (ADR 0037): soft stop finishes the in-flight ticket's gate, `hardStopRequested` kills now. Signal handling lives here only.
 - `verify.ts` / `smoke.ts` — run the project's commands with timeouts; `output-compress.ts` compresses their output.

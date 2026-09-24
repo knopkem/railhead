@@ -419,8 +419,8 @@ describe("firstStepCacheFromEvents (#130)", () => {
     expect(firstStepCacheFromEvents(raw)).toEqual({ cold: 400, cached: 9000 });
   });
 
-  it("treats a missing cache field as a fully cold first step", () => {
-    expect(firstStepCacheFromEvents(`{"type":"step_finish","part":{"tokens":{"input":12000,"output":50}}}`)).toEqual({ cold: 12000, cached: 0 });
+  it("reports a provider that gives token counts but no cache object as unknown, not a miss (#133)", () => {
+    expect(firstStepCacheFromEvents(`{"type":"step_finish","part":{"tokens":{"input":12000,"output":50}}}`)).toBeNull();
   });
 
   it("includes cache writes in cold", () => {
