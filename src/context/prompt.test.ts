@@ -642,6 +642,19 @@ describe("buildImplementerPrompt", () => {
 });
 
 describe("buildReviewerPrompt", () => {
+  it("judges repo-wide criteria from the diff alone (the seat has no search or command tools)", async () => {
+    const p = await buildReviewerPrompt({
+      ticketFile: "01-a.md",
+      ticketBody: "work",
+      criteria: ["grep finds no hex color literals outside src/ui/theme.rs"],
+      diff: "d",
+    });
+    expect(p).toMatch(/repo-wide check you cannot run/);
+    expect(p).toMatch(/judged from the diff alone/);
+    expect(p).toMatch(/If the diff is consistent with the criterion, treat it as met/);
+    expect(p).toMatch(/no substitute tool family is available/);
+  });
+
   it("treats ACs that name a third-party artifact as unverified plan claims: judge capability, never double-down on the name", async () => {
     const p = await buildReviewerPrompt({
       ticketFile: "01-a.md",
@@ -1083,6 +1096,19 @@ describe("buildTestPhasePrompt", () => {
 });
 
 describe("buildReviewerReadModePrompt", () => {
+  it("judges repo-wide criteria from the listed files alone (no search or command tools in read-mode either)", async () => {
+    const p = await buildReviewerReadModePrompt({
+      ticketFile: "01-a.md",
+      ticketBody: "work",
+      criteria: ["grep finds no hex color literals outside src/ui/theme.rs"],
+      stat: "stat",
+      files: ["src/ui/theme.rs"],
+    });
+    expect(p).toMatch(/repo-wide check you cannot run/);
+    expect(p).toMatch(/judged from the files this prompt lists/);
+    expect(p).toMatch(/If those files are consistent with the criterion, treat it as met/);
+  });
+
   it("instructs the reviewer to read the touched files", async () => {
     const p = await buildReviewerReadModePrompt({
       ticketFile: "01-a.md",

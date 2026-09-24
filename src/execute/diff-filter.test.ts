@@ -191,14 +191,17 @@ describe("estimateTokens", () => {
 describe("REVIEWER_READMODE_AGENT", () => {
   it("allows read but denies all other tools", () => {
     const permission = REVIEWER_READMODE_AGENT.permission;
-    expect(permission.read).toBe("allow");
-    expect(permission.edit).toBe("deny");
-    expect(permission.write).toBe("deny");
-    expect(permission.bash).toBe("deny");
-    expect(permission.glob).toBe("deny");
-    expect(permission.grep).toBe("deny");
-    expect(permission.task).toBe("deny");
-    expect(permission.skill).toBe("deny");
+    // One catch-all deny covers every other tool family (built-in and MCP);
+    // read is re-allowed after it because opencode's last matching rule wins.
+    expect(permission["*"]).toBe("deny");
+    expect(permission.read).toEqual({ "*": "allow", "mcp:*": "deny" });
+    expect(permission.edit).toBeUndefined();
+    expect(permission.write).toBeUndefined();
+    expect(permission.bash).toBeUndefined();
+    expect(permission.glob).toBeUndefined();
+    expect(permission.grep).toBeUndefined();
+    expect(permission.task).toBeUndefined();
+    expect(permission.skill).toBeUndefined();
   });
 
   it("describes read-only file access (not zero-tool like diff mode)", () => {

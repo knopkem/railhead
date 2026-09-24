@@ -62,6 +62,7 @@ import {
   type SharpenQuestion,
 } from "../plan/sharpen.ts";
 import { ensureProjectGitignore, ensureProjectOpenCodePermissions, frameworkIgnoreForVerify, frameworkExternalDirsForVerify } from "../core/project-assets.ts";
+import { isRenderedSurface } from "../config/interface.ts";
 import { renderTranscript } from "./transcript.ts";
 import { loadTickets, toTicketState } from "../core/ticket.ts";
 import { getDefaultModel, queryReasoningCapability, modelParameterClass, queryFreeModels, assignFreeModels, fetchModelsVerbose, createInitProber, type InitProbe } from "../core/models.ts";
@@ -1111,7 +1112,7 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } 
   // so the builder's visual self-check reflects the model actually running
   // today. Unlike a gate this seat does not re-probe every run — it reuses a
   // current-version record and skips models a gate probe already covered.
-  if (config.projectInterface === "browser-ui" || config.projectInterface === "canvas") {
+  if (isRenderedSurface(config.projectInterface)) {
     const probed = new Set(visionGateRequests(visionModes, visionModels).map((r) => r.model).filter((m): m is string => m !== null));
     await ensureImplementerVision({ cwd, model: visionModels.implement, skip: probed, maxContextTokens: config.max_context_tokens });
   }
@@ -1231,7 +1232,7 @@ async function cmdResume(cwd: string, runIdArg?: string): Promise<void> {
     goal: (state.config.goal_review?.mode ?? "off") as GateMode,
   };
   resumeModes = await ensureVisionGates(cwd, resumeModes, state._models, state.config);
-  if (state.config.projectInterface === "browser-ui" || state.config.projectInterface === "canvas") {
+  if (isRenderedSurface(state.config.projectInterface)) {
     const probed = new Set(visionGateRequests(resumeModes, state._models).map((r) => r.model).filter((m): m is string => m !== null));
     await ensureImplementerVision({ cwd, model: state._models.implement, skip: probed, maxContextTokens: state.config.max_context_tokens });
   }

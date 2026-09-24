@@ -81,7 +81,7 @@ to audit, and the fix ticket is the plan.
 No prompt may assume a kind of app. The removed offenders were game nouns in
 the surface-recall regex (`paddle`, `ball`, `snake`, `hud`, `game-over`) and
 game/web examples in the planner and field-semantics text. The declared
-`$INTERFACE` token (`browser-ui` / `canvas` / `terminal` / `none`) is the only
+`$INTERFACE` token (`browser-ui` / `canvas` / `native` / `terminal` / `none`) is the only
 place interaction shape is allowed to influence prompts and gates.
 
 ## Non-goals

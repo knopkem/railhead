@@ -36,14 +36,20 @@ describe("guardedEnv", () => {
   it("injects the reviewer agents alongside the ledger guard", () => {
     const out = guardedEnv({} as NodeJS.ProcessEnv);
     const cfg = JSON.parse(out.OPENCODE_CONFIG_CONTENT!) as {
-      agent: Record<string, { mode: string; permission: Record<string, string>; prompt: string }>;
+      agent: Record<string, { mode: string; permission: Record<string, unknown>; prompt: string }>;
     };
 
     expect(Object.keys(cfg.agent).sort()).toEqual(["railhead-reviewer", "railhead-reviewer-readmode"]);
-    expect(cfg.agent["railhead-reviewer"].permission.bash).toBe("deny");
-    expect(cfg.agent["railhead-reviewer"].permission.read).toBe("deny");
-    expect(cfg.agent["railhead-reviewer-readmode"].permission.read).toBe("allow");
-    expect(cfg.agent["railhead-reviewer-readmode"].permission.edit).toBe("deny");
+    // The catch-all deny is the guard: opencode takes the LAST matching rule,
+    // so denying `*` hides MCP/custom tools an enumerated denylist cannot name
+    // (the chrome-devtools/blender escape the diff reviewer used to read files).
+    expect(cfg.agent["railhead-reviewer"].permission["*"]).toBe("deny");
+    expect(cfg.agent["railhead-reviewer"].permission.read).toBeUndefined();
+    expect(cfg.agent["railhead-reviewer-readmode"].permission["*"]).toBe("deny");
+    // read is re-allowed AFTER the catch-all, but only for the filesystem: the
+    // pattern map denies the `mcp:*` space opencode gates its MCP-resource
+    // tools under (the same `read` permission).
+    expect(cfg.agent["railhead-reviewer-readmode"].permission.read).toEqual({ "*": "allow", "mcp:*": "deny" });
   });
 
   it("overrides a pre-existing inline config with the guard + agents", () => {

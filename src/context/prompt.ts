@@ -658,6 +658,8 @@ Do NOT flag code the ticket explicitly asked for, even if it looks like it could
 
 Do NOT report compilation, build, or typecheck failures. The railhead runs verify (build + tests) for you and only invokes review after it passes — if verify is green, the code compiles by definition. A claim that "X will not compile" or "X fails to typecheck" cannot be true at review time and historically wastes retries on a non-existent failure. Report only correctness, logic, wiring, and completeness issues you can see in the diff itself.
 
+A criterion phrased as a repo-wide check you cannot run ("grep finds no X outside Y", "no other module contains Z") is judged from the diff alone: your tools are diff-only by design, and no substitute tool family is available. If the diff is consistent with the criterion, treat it as met; if the diff itself violates it, report it. Never attempt to gather repo-wide evidence by other means.
+
 Do a COMPLETE, sweeping review in this single pass — catch EVERY real must-fix now. Reread the whole diff and hunt for all correctness gaps and criteria failures. Do not stop at the first problem found; list them all at once. Running many small review rounds is expensive, so prefer surfacing them together.
 
 CRITICAL on prior findings: the PRIOR BLOCKING FINDINGS list above contains things from earlier reviews. Judge each one as either RESOLVED (the current diff addresses it) or STILL PRESENT. You must NOT list a RESOLVED prior finding as a must-fix again — only list genuinely still-present prior findings plus any brand-new ones you discover. This keeps the finding list from re-piling fixed items and lets the build progress.
@@ -875,6 +877,8 @@ Skip smells the project's documented standards endorse. See docs/code-review-sme
 Severity rule (issue #71): a smell NEVER blocks the ticket on its own. List a smell under $NITS (advisory — recorded, never forces a retry) unless the smell CAUSES or RISKS a correctness or completeness failure of an acceptance criterion; only then report it as a [MAJOR] must-fix in $BLOCKING and name what actually breaks.
 
 Do NOT report compilation, build, or typecheck failures. The railhead runs verify (build + tests) for you and only invokes review after it passes — if verify is green, the code compiles by definition.
+
+A criterion phrased as a repo-wide check you cannot run ("grep finds no X outside Y", "no other module contains Z") is judged from the files this prompt lists: you have no search or command tools, and no substitute tool family is available. If those files are consistent with the criterion, treat it as met; if one of them violates it, report it.
 
 Do a COMPLETE, sweeping review in this single pass — catch EVERY real must-fix now. Read every listed file and hunt for all correctness gaps and criteria failures. Do not stop at the first problem found; list them all at once.
 

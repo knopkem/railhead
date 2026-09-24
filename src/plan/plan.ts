@@ -44,9 +44,9 @@ export interface PlanStageInput {
   artDirection?: boolean;
 }
 
-const ART_DIRECTION_DESIGN_REQUEST = `The ART DIRECTION requirement: IF the $INTERFACE you declare is a rendered surface (browser-ui or canvas — not terminal or none), the LOOK is part of the deliverable. Add an \`## Art direction\` section to $DESIGN (after Goal coverage, before any Coherence contract) describing the intended look with CONCRETE direction — palette roles as hex values with a stated value separation, distinguishable value bands, actor detail (outline/shading/highlight), background depth, a lighting model with an attenuation rule, and what moves with an easing rule. This section is DIRECTION for the art agent that will create the look — it is not a checklist the build is scored against, and it must not be turned into per-pixel acceptance criteria. Pure model/library/CLI builds (interface terminal/none): omit the section entirely.`;
+const ART_DIRECTION_DESIGN_REQUEST = `The ART DIRECTION requirement: IF the $INTERFACE you declare is a rendered surface (browser-ui, canvas, or native — not terminal or none), the LOOK is part of the deliverable. Add an \`## Art direction\` section to $DESIGN (after Goal coverage, before any Coherence contract) describing the intended look with CONCRETE direction — palette roles as hex values with a stated value separation, distinguishable value bands, actor detail (outline/shading/highlight), background depth, a lighting model with an attenuation rule, and what moves with an easing rule. This section is DIRECTION for the art agent that will create the look — it is not a checklist the build is scored against, and it must not be turned into per-pixel acceptance criteria. Pure model/library/CLI builds (interface terminal/none): omit the section entirely.`;
 
-const ART_DIRECTION_TICKETS_REQUEST = `The ART DIRECTION requirement: IF the plan declares a rendered surface (browser-ui or canvas), the LOOK must be owned by exactly ONE OPEN-ENDED CRAFT TICKET — never decomposed:
+const ART_DIRECTION_TICKETS_REQUEST = `The ART DIRECTION requirement: IF the plan declares a rendered surface (browser-ui, canvas, or native), the LOOK must be owned by exactly ONE OPEN-ENDED CRAFT TICKET — never decomposed:
 - Emit exactly one ticket with "open_ended": true. Its "what" is a CREATION goal — "make the composed frame as crafted and atmospheric as the art direction describes" — NOT a verification task. It has NO structural acceptance criteria (leave "criteria" empty, or limit it to "the app builds and runs"); its quality is judged by looking at a screenshot, so do NOT turn the art direction into a checklist of pixel properties for it to pass.
 - This ONE ticket owns everything the user sees — background, terrain, character, lighting, parallax, and any detail the look needs. Do NOT split the visual work into per-element tickets (no separate background / character / lighting / terrain tickets): each slice would then satisfy only its own criterion, which caps the result at "measurably non-bland" — the failure this rule prevents.
 - Infrastructure tickets (scaffold, build/test, a canvas shell) MAY precede it; the art ticket is blocked by them.
@@ -83,12 +83,13 @@ function glossaryBlock(existingGlossary?: string): string {
 
 const VERIFY_INTERFACE_SMOKE_BLOCKS = `Emit a $VERIFY block first: the shell commands that prove a ticket works (the project's build and test commands). These run after every implementer attempt across the whole project, so list ONLY commands that should pass once ANY single ticket is correctly implemented — not project-final integration checks. Per-ticket criteria belong inside each ticket, not here. Use the single word NONE if there is genuinely no automated check (very rare; almost every project has at least a build/typecheck command).
 
-Then emit an $INTERFACE line: how a USER operates this deliverable — a property of the thing being built, never of the language it is written in. Emit the marker, then EXACTLY ONE token on its own line — one of <browser-ui | canvas | terminal | none>:
+Then emit an $INTERFACE line: how a USER operates this deliverable — a property of the thing being built, never of the language it is written in. Emit the marker, then EXACTLY ONE token on its own line — one of <browser-ui | canvas | native | terminal | none>:
 - browser-ui — a DOM app the user operates by pointing and typing (buttons, fields, menus)
-- canvas — a full-canvas app with no DOM controls to operate (games, pointer-lock)
+- canvas — a full-canvas app running in a browser page, with no DOM controls to operate (games, pointer-lock)
+- native — an app that opens its own OS window (no browser, no DOM)
 - terminal — a CLI/TUI the user operates via stdin/stdout
 - none — a library or pure backend with no user-facing surface
-A browser app that is ONLY a full-canvas game is canvas; a DOM app with chrome around a canvas is browser-ui. When in doubt, choose by what a real user points at / types into.
+A browser app that is ONLY a full-canvas game is canvas; a DOM app with chrome around a canvas is browser-ui; an app that opens its own desktop window is native. When in doubt, choose by what a real user points at / types into.
 
 Then emit a $SMOKE block: ONE shell command that launches the built binary. This runs after verify passes, before review — it catches startup panics that a successful build cannot (an app that compiles but panics on the first frame; a server that binds the wrong port). The binary launches exactly as written, with no headless env injected — do NOT write code that skips rendering or the main schedule when a headless env is present, because the smoke phase must exercise the SAME code path the user runs. If the project is a library with no runnable binary, emit the single word NONE here.`;
 
@@ -197,7 +198,7 @@ Rules:
 - Package shared conventions (coordinate system, scale, units, origins, tokens) into an EARLY ticket's public contracts and have later tickets reference them rather than re-deriving them inline. The first ticket establishes the shared frame: fix the origin, scale, and any coordinate scheme in its introduces.
 - Give EVERY ticket the same one-line "mission" — the goal of the whole build — so the ticket is self-contained.
 - The FIRST ticket must also stand up a buildable scaffold (the project manifest, build scripts, and entry-point tooling the verify list runs), so the very first commit passes the configured verify.
-- Express each ticket from the user's perspective (what it makes work), not a layer-by-layer implementation list, with acceptance criteria as concrete, checkable bullets. Criteria must be verifiable by the implementer's seat: a claim only a human eye can check ("looks good") is not a criterion — name the observable behaviour or the artifact instead.
+- Express each ticket from the user's perspective (what it makes work), not a layer-by-layer implementation list, with acceptance criteria as concrete, checkable bullets. Criteria must be verifiable by the implementer's seat: a claim only a human eye can check ("looks good") is not a criterion — name the observable behaviour or the artifact instead. Keep each criterion checkable against the ticket's own change: a repo-wide search or absence claim ("grep finds no X outside Y") cannot be confirmed from one ticket's diff — scope it to the files this ticket owns, or to a command the verify list already runs.
 - Order the tickets so each one's dependencies come before it (blockers first).
 
 ${QUALITY_PREFERENCES}${artDirectionTicketsBlock(input)}

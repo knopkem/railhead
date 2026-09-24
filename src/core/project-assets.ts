@@ -12,64 +12,56 @@ import { join } from "node:path";
 export interface ReviewerAgent {
   description: string;
   mode: "primary";
-  permission: Record<string, string>;
+  permission: Record<string, string | Record<string, string>>;
   prompt: string;
 }
 
 /**
- * The reviewer agent the Railhead uses for diff-mode review. It denies every
- * tool (including read) so the reviewer can only critique the diff already
+ * The reviewer agent the Railhead uses for diff-mode review. One catch-all
+ * deny hides every tool, so the reviewer can only critique the diff already
  * present in its prompt — it must not explore the repo or balloon its context
  * by reading files. This is the mechanism that keeps reviews cheap.
+ *
+ * The catch-all is load-bearing, not shorthand: opencode matches permission
+ * keys as globs against the tool NAME and takes the LAST matching rule, so
+ * `"*"` covers what no enumerated list can — MCP servers (`chrome-devtools_*`,
+ * `blender_*`) and custom tools, which appear and vanish with the user's
+ * opencode config. Enumerating built-ins is how a reviewer denied `bash` once
+ * held Blender's `execute_blender_code`, i.e. arbitrary Python.
  */
 export const REVIEWER_AGENT: ReviewerAgent = {
   description:
-    "Read-only critique of a ticket's diff for the Railhead. Never edits or reads project files — reviews only the diff in the prompt.",
+    "Read-only critique of a ticket's diff for the Railhead. Every tool is denied — reviews only the diff in the prompt.",
   mode: "primary",
   permission: {
-    edit: "deny",
-    write: "deny",
-    read: "deny",
-    glob: "deny",
-    grep: "deny",
-    list: "deny",
-    bash: "deny",
-    webfetch: "deny",
-    task: "deny",
-    websearch: "deny",
-    lsp: "deny",
-    skill: "deny",
+    "*": "deny",
   },
   prompt:
-    "You are the Reviewer for one ticket of an unattended build. You are read-only and do not explore the project: every file a review needs is already in the prompt below (the ticket body, its acceptance criteria, and the diff). Do not read, glob, grep, or run commands. Critically evaluate only the code in the diff against the criteria, and answer in the exact format the railhead prompt requests.",
+    "You are the Reviewer for one ticket of an unattended build. You are read-only and do not explore the project: every file a review needs is already in the prompt below (the ticket body, its acceptance criteria, and the diff). You have no read, search, or command tools. Critically evaluate only the code in the diff against the criteria, and answer in the exact format the railhead prompt requests.",
 };
 
 /**
- * A second reviewer agent variant for large diffs (#30). Identical to
- * REVIEWER_AGENT except `read` is allowed: the reviewer can read the touched
- * source files one at a time instead of having the entire diff injected into
- * its initial prompt. Compaction handles context growth between read calls —
- * the same mechanism that works for the Implementer. All other tools (edit,
- * write, bash, glob, grep, …) stay denied so the reviewer cannot explore, just
- * read the named files.
+ * A second reviewer agent variant for large diffs (#30): identical to
+ * REVIEWER_AGENT except `read` is allowed, so the reviewer can read the diff
+ * file or the touched source files one at a time instead of having the entire
+ * diff injected into its initial prompt. Compaction handles context growth
+ * between read calls — the same mechanism that works for the Implementer. The
+ * catch-all deny still hides every other tool, so the reviewer cannot explore,
+ * just read the named files.
+ *
+ * `read` must follow the catch-all (last match wins), and its patterns deny
+ * the `mcp:*` pattern space: opencode gates its MCP-resource tools under the
+ * `read` permission, so re-allowing `read` would otherwise hand the reviewer
+ * a channel into every configured MCP server. File reads use worktree-relative
+ * paths and never match `mcp:*`.
  */
 export const REVIEWER_READMODE_AGENT: ReviewerAgent = {
   description:
     "Read-mode critique for the Railhead. Reads the diff file or the touched source files the prompt names — never edits, runs commands, or explores the repo.",
   mode: "primary",
   permission: {
-    edit: "deny",
-    write: "deny",
-    read: "allow",
-    glob: "deny",
-    grep: "deny",
-    list: "deny",
-    bash: "deny",
-    webfetch: "deny",
-    task: "deny",
-    websearch: "deny",
-    lsp: "deny",
-    skill: "deny",
+    "*": "deny",
+    read: { "*": "allow", "mcp:*": "deny" },
   },
   prompt:
     "You are the Reviewer for one ticket of an unattended build. You review by reading the files or the diff file the prompt names — never edit, run commands, or explore the repo beyond what the prompt lists. Read each file the prompt instructs you to read (a diff file, the touched source files, or both), check it against the acceptance criteria, and answer in the exact format the railhead prompt requests.",

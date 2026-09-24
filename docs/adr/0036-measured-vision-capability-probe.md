@@ -72,7 +72,7 @@ project alike. The browser capture half stays where it belongs: the existing
   are static, nothing in them reads plan output — so the refusal precedes the
   plan's multi-hour spend on the interactive path too, not just the
   preset/override path.
-- **For the implement seat on a surfaced project** (`browser-ui`/`canvas`), the
+- **For the implement seat on a surfaced project** (`browser-ui`/`canvas`/`native`), the
   `run`/`resume` start checks only that a current-version record exists,
   probing once when it does not and skipping a model a gate probe already
   covered. The self-check this enables is optional, so it does not pay a
@@ -119,7 +119,7 @@ the colors — an attachment-only check would have passed the blind model.
   run and the model-behind-an-id can change, so re-probing per invocation is
   the honest policy; the record is for reporting and prompt injection only.
 - **The screenshot-capture probe in init.** Capture depends on the project's
-  interface (`browser-ui`/`canvas`), which is unknown until the planner
+  interface (`browser-ui`/`canvas`/`native`), which is unknown until the planner
   declares `$INTERFACE`; the read probe is the universal half and the capture
   chain stays a manual diagnostic.
 - **Implementer visual self-check as a hard requirement.** Probed and

@@ -3,6 +3,7 @@ import {
   parseProjectInterface,
   buildInteractionGuidance,
   requiresRealInputEvidence,
+  isRenderedSurface,
   PROJECT_INTERFACES,
 } from "./interface.ts";
 
@@ -22,19 +23,32 @@ describe("parseProjectInterface (#97)", () => {
   });
 
   it("throws on an unknown declared value (a deliberate new row, never a silent coercion)", () => {
-    expect(() => parseProjectInterface("native")).toThrow(/unknown value "native"/);
+    expect(() => parseProjectInterface("webgl")).toThrow(/unknown value "webgl"/);
     expect(() => parseProjectInterface(42)).toThrow(/non-string/);
   });
 });
 
 describe("requiresRealInputEvidence (#97)", () => {
-  it("enforces browser-ui; exempts canvas/none/terminal (deferred instance)/undeclared", () => {
+  it("enforces browser-ui; exempts canvas/native/none/terminal (deferred instance)/undeclared", () => {
     expect(requiresRealInputEvidence("browser-ui")).toBe(true);
     expect(requiresRealInputEvidence("terminal")).toBe(false);
     expect(requiresRealInputEvidence("canvas")).toBe(false);
+    expect(requiresRealInputEvidence("native")).toBe(false);
     expect(requiresRealInputEvidence("none")).toBe(false);
     expect(requiresRealInputEvidence(null)).toBe(false);
     expect(requiresRealInputEvidence(undefined)).toBe(false);
+  });
+});
+
+describe("isRenderedSurface", () => {
+  it("covers every user-facing rendered surface — native windows included — and nothing else", () => {
+    expect(isRenderedSurface("browser-ui")).toBe(true);
+    expect(isRenderedSurface("canvas")).toBe(true);
+    expect(isRenderedSurface("native")).toBe(true);
+    expect(isRenderedSurface("terminal")).toBe(false);
+    expect(isRenderedSurface("none")).toBe(false);
+    expect(isRenderedSurface(null)).toBe(false);
+    expect(isRenderedSurface(undefined)).toBe(false);
   });
 });
 
@@ -53,6 +67,16 @@ describe("buildInteractionGuidance (#97)", () => {
     expect(g).toContain("KeyboardEvent");
     expect(g).toContain("evaluate_script");
     expect(g).toContain("pointerLock");
+  });
+
+  it("routes a native window away from the browser tools (no DOM to drive)", () => {
+    const g = buildInteractionGuidance("native");
+    expect(g).toMatch(/native desktop-window app/i);
+    expect(g).toContain("chrome-devtools_*");
+    expect(g).toMatch(/tools do not apply/);
+    expect(g).toMatch(/do not open a browser/i);
+    expect(g).toMatch(/capture the WINDOW/);
+    expect(g).not.toContain("evaluate_script");
   });
 
   it("injects nothing for terminal/none (zero pollution for non-DOM seats)", () => {

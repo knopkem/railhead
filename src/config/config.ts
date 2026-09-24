@@ -82,8 +82,8 @@ export interface RailheadConfig {
   verify: string[];
   /**
    * Issue #97: the declared interaction interface of the DELIVERABLE —
-   * `browser-ui | canvas | terminal | none` — recorded at plan time from the
-   * planner's $INTERFACE block and seeded into railhead.json's top-level
+   * `browser-ui | canvas | native | terminal | none` — recorded at plan time
+   * from the planner's $INTERFACE block and seeded into railhead.json's top-level
    * `interface` field (seed-if-empty, exactly like verify/smoke). It
    * parameterizes the whole-app reviewer's interaction guidance AND the
    * evidence gate's "what counts as real user-level operation". `null`/absent
@@ -101,8 +101,8 @@ export interface RailheadConfig {
    * Default `true`; a build whose look is not the point can set `false` to skip
    * the plan-gate requirement (the planner prompt also stops asking). Only
    * applies when the plan declares a rendered `interface`
-   * (`browser-ui`/`canvas`) — a `terminal`/`none` build never gets one either
-   * way.
+   * (`browser-ui`/`canvas`/`native`) — a `terminal`/`none` build never gets
+   * one either way.
    */
   art_direction?: boolean;
   /**

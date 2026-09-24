@@ -724,6 +724,20 @@ describe("runPlan — interaction smoke seeding", () => {
     expect(cfg.interaction_smoke).toBe(true);
   });
 
+  it("leaves interaction_smoke off for a native interface (the smoke drives a browser)", async () => {
+    const cwd = await freshCwd();
+    mockExec.mockImplementation(async (_prompt, options) => {
+      await emitStaged(options, "$VERIFY\ncargo build\n$INTERFACE\nnative\n$SMOKE\ncargo run\n$TICKETS\n[{\"title\":\"Window\",\"mission\":\"m\",\"what\":\"window\",\"criteria\":[],\"blocked_by\":[]}]\n",
+      );
+      return okResult();
+    });
+    const { runPlan } = await import("./planner.ts");
+    await runPlan({ cwd, prompt: "a native app", model: null, artDirection: false });
+    const cfg = JSON.parse(await readFile(join(cwd, "railhead.json"), "utf8"));
+    expect(cfg.interface).toBe("native");
+    expect(cfg.interaction_smoke).toBeUndefined();
+  });
+
   it("leaves interaction_smoke off for a terminal interface", async () => {
     const cwd = await freshCwd();
     mockExec.mockImplementation(async (_prompt, options) => {

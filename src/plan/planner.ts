@@ -7,7 +7,7 @@ import { DEFAULT_CONTEXT_TOKENS, DEFAULT_INFRA_BACKOFF_SEC } from "../config/con
 import { withFailureLadderOnThrow } from "../execute/failure-ladder.ts";
 import { planDesignSystemPrompt, planTicketsSystemPrompt, planFixSystemPrompt, buildGoalCoveragePrompt, buildPlanRevisionPrompt, buildPlanUserFeedbackPrompt, buildPlanMarkdown, parseCoverageVerdict, parsePlanBlock, parsePlanJson, parseVerifyBlock, parseSmokeBlock, parseDesignBlock, parseArchitectureBlock, parseInterfaceBlock, splitCoherenceContract, scanPlanConflicts, tableFindings, outstandingFindings, parseRulings, buildPlanRepairPrompt, impliedBlockedByEdits, sameFileOrderingEdits, withImpliedBlockedBy, collapseRepeatedTickets, extractFilePaths, detectIntegrationPromise, findDroppedTickets, MAX_PLAN_REPAIR_ROUNDS, MAX_PLAN_COVERAGE_ROUNDS, type PlanMode, type Ruling, type ConflictFinding } from "./plan.ts";
 import { touchesVisualSurface } from "../context/surface.ts";
-import type { ProjectInterface } from "../config/interface.ts";
+import { isRenderedSurface, type ProjectInterface } from "../config/interface.ts";
 import { writeTickets, type Ticket } from "../core/ticket.ts";
 import { writePlanOrigin, writePlanRulings } from "./plan-identity.ts";
 import { extractAssistantText, extractPlanText, initLedger, resetPhase, readStderrLines, appendEvent } from "../core/ledger.ts";
@@ -327,9 +327,7 @@ async function finalizePlan(opts: {
     // Option (c): a plan that declares a rendered surface must carry the two
     // screenshot-driven art-direction tickets unless the project disabled it.
     // Undeclared (fix mode) or terminal/none never requires them.
-    const artDirectionRequired =
-      artDirection !== false &&
-      (projectInterface === "browser-ui" || projectInterface === "canvas");
+    const artDirectionRequired = artDirection !== false && isRenderedSurface(projectInterface);
     // Issue #34: extract the planner's design and architecture intent from
     // $DESIGN / $ARCHITECTURE marker blocks. In build mode the coverage audit
     // already required them; in fix mode they stay optional. When present, the
@@ -831,9 +829,11 @@ async function seedInterfaceIfEmpty(cwd: string, iface: string): Promise<boolean
 
 /**
  * Enable the per-ticket interaction smoke for a project whose declared
- * interface is user-operable (`browser-ui` / `canvas`). The interaction smoke
- * is the earliest gate that proves the app is OPERABLE, not merely startable —
- * the exact failure class a pure-logic verify and a diff-only review cannot
+ * interface is a browser page the seat can drive (`browser-ui` / `canvas` —
+ * not `native`: the smoke drives a browser, and a native window has none).
+ * The interaction smoke is the earliest gate that proves the app is OPERABLE,
+ * not merely startable — the exact failure class a pure-logic verify and a
+ * diff-only review cannot
  * see (the spriteforge run shipped a broken toolbar/playback layout and dead
  * eraser/onion controls behind a fully green verify). It defaults OFF in
  * DEFAULT_CONFIG because it costs one full agent run per ticket, so a declared

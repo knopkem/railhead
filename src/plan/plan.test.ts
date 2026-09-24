@@ -44,14 +44,16 @@ describe("planDesignSystemPrompt — stage 1 (the plan)", () => {
     expect(prompt).toMatch(/same code path the user runs/i);
   });
 
-  it("instructs the planner to emit an $INTERFACE line with the four taxonomy values (#97)", () => {
+  it("instructs the planner to emit an $INTERFACE line with the five taxonomy values (#97)", () => {
     const prompt = planDesignSystemPrompt({ contractsSummary: "(no known contracts)" });
-    expect(prompt).toContain("<browser-ui | canvas | terminal | none>");
+    expect(prompt).toContain("<browser-ui | canvas | native | terminal | none>");
     expect(prompt).toMatch(/browser-ui[^\n]*DOM app the user operates/i);
-    expect(prompt).toMatch(/canvas[^\n]*full-canvas app with no DOM controls/i);
+    expect(prompt).toMatch(/canvas[^\n]*full-canvas app running in a browser page/i);
+    expect(prompt).toMatch(/native[^\n]*opens its own OS window/i);
     expect(prompt).toMatch(/terminal[^\n]*operates via stdin\/stdout/i);
     expect(prompt).toMatch(/none[^\n]*library or pure backend/i);
     expect(prompt).toMatch(/property of the thing being built, never of the language/i);
+    expect(prompt).toMatch(/opens its own desktop window is native/i);
   });
 
   it("includes the existing CONTEXT.md glossary verbatim when given, and tells the planner to reuse its words", () => {
@@ -182,6 +184,13 @@ describe("planTicketsSystemPrompt — stage 3 (decomposition)", () => {
   it("requires criteria the implementer's seat can verify (no look-good ACs)", () => {
     const prompt = planTicketsSystemPrompt({ contractsSummary: "(none)" });
     expect(prompt).toMatch(/verifiable by the implementer's seat/i);
+  });
+
+  it("scopes criteria to the ticket's own change (no repo-wide searches the reviewer cannot run)", () => {
+    const prompt = planTicketsSystemPrompt({ contractsSummary: "(none)" });
+    expect(prompt).toMatch(/checkable against the ticket's own change/i);
+    expect(prompt).toMatch(/repo-wide search or absence claim/i);
+    expect(prompt).toMatch(/scope it to the files this ticket owns/i);
   });
 });
 

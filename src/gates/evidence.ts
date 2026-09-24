@@ -205,11 +205,12 @@ function isRealInputTool(c: ToolCall): boolean {
  * - `browser-ui` → at least one real-input tool call (chrome-devtools click /
  *   fill / type_text / press_key …). Synthetic `evaluate_script` alone never
  *   counts.
- * - `canvas` / `none` / `terminal` / undeclared (`null`) → exempt by
- *   construction: for canvas, synthetic dispatch IS the correct input class;
- *   `none` has no user-facing surface to operate; `terminal`'s driven-stdin
- *   instance is not ledger-visible yet (see `requiresRealInputEvidence` in
- *   interface.ts); undeclared keeps today's behavior.
+ * - `canvas` / `native` / `none` / `terminal` / undeclared (`null`) → exempt
+ *   by construction: for canvas, synthetic dispatch IS the correct input
+ *   class; `native`'s OS-level input and `terminal`'s driven stdin are not
+ *   ledger-visible yet (see `requiresRealInputEvidence` in interface.ts);
+ *   `none` has no user-facing surface to operate; undeclared keeps today's
+ *   behavior.
  *
  * Returns the verdict plus the reason a PASS would be downgraded, so the
  * caller can log why without re-deriving it.
