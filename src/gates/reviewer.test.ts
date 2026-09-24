@@ -897,3 +897,16 @@ node -e 'console.log(JSON.stringify({type:"text",part:{type:"text",text:${JSON.s
     }
   });
 });
+describe("stripCompileClaimsWhenGreen — failure-noun shapes (#135)", () => {
+  it("drops compile/build FAILURE phrasings that green verify refutes", () => {
+    const findings = [
+      '[BLOCKER] src/shell.rs:11 EventLoop::with_user_event() requires crate feature "tracing" to be enabled, causing compilation failure',
+      "[BLOCKER] compile failure in main.rs",
+      "[BLOCKER] the crate fails to build with this dependency set",
+      "[BLOCKER] the workspace failed to build",
+      "[BLOCKER] it won't build as written",
+    ];
+    expect(stripCompileClaimsWhenGreen(findings, true)).toEqual([]);
+    expect(stripCompileClaimsWhenGreen(findings, false)).toEqual(findings);
+  });
+});

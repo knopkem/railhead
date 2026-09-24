@@ -508,6 +508,14 @@ const COMPILE_FAILURE_PHRASES = [
   /\bdoes\s+not\s+compile\b/i,
   /\bcannot\s+compile\b/i,
   /\bbuild\s+fail/i,
+  // The snake E2E (#135): a false [BLOCKER] claiming a missing crate feature
+  // "causing compilation failure" survived the guard because only "error"
+  // variants were matched, and burned the ticket's retries over green verify.
+  /\bcompilation\s+failure\b/i,
+  /\bcompile\s+failure\b/i,
+  /\bfails?\s+to\s+build\b/i,
+  /\bfailed\s+to\s+build\b/i,
+  /\bwon[''']?t\s+build\b/i,
 ];
 
 function isCompileFailureClaim(finding: string): boolean {
