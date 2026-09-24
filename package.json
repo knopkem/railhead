@@ -1,6 +1,6 @@
 {
   "name": "railhead",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Unattended, dependency-ordered ticket execution via opencode — implement, verify, review, commit, one ticket at a time.",
   "license": "MIT",
   "author": "Michael Knopke",
