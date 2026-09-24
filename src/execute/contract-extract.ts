@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { ContractEntry } from "../core/contracts.ts";
 import { extractContractsBlock, loadContracts, mergeContracts, saveContracts, verifyContractEntries } from "../core/contracts.ts";
 import { buildContractExtractFilePrompt } from "../context/prompt.ts";
+import { joinPhaseMessages } from "../context/preamble.ts";
 import { describeExecFailure, executeOpendCode, startPersistentWorker, stopPersistentWorker } from "./executor.ts";
 import { extractAssistantText } from "../core/ledger.ts";
 import { contextBudget } from "../config/config.ts";
@@ -221,7 +222,7 @@ async function extractUnhandledFiles(
     if (!content) continue;
     const phaseFile = `${ticket.number}-contracts-${file.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 40)}`;
     const prompt = buildContractExtractFilePrompt(file, content);
-    const result = await executeOpendCode(prompt, {
+    const result = await executeOpendCode(joinPhaseMessages(prompt), {
       cwd: state.cwd,
       ledgerDir: ledger,
       phaseFile,

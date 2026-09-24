@@ -2,6 +2,7 @@ import { parseVerdict } from "./reviewer.ts";
 import type { ReviewVerdict } from "./reviewer.ts";
 import { buildInteractionGuidance, type ProjectInterface } from "../config/interface.ts";
 import { BROWSER_HYGIENE, HALT_CONTRACT, SCRATCH_FILE_DISCIPLINE } from "../context/prompt.ts";
+import type { PhaseMessages } from "../context/preamble.ts";
 
 /**
  * Parse an interaction-smoke verdict from a transcript — thin adapter over the
@@ -32,7 +33,7 @@ export function buildInteractionSmokePrompt(options: {
   verifyCommands: string[];
   interactionHints?: string | null;
   projectInterface?: ProjectInterface | null;
-}): string {
+}): PhaseMessages {
   const { runCommandHint, verifyCommands, interactionHints, projectInterface } = options;
 
   const verifyBlock = verifyCommands.length
@@ -45,7 +46,7 @@ export function buildInteractionSmokePrompt(options: {
       ? `\n## Interaction guidance (interface: ${projectInterface})\n${buildInteractionGuidance(projectInterface)}`
       : "";
 
-  return `You are the Interaction Smoke agent for one ticket in an unattended build. Your ONLY job is to prove the running app is OPERABLE — that a real user can perform the app's single most basic action and see its effect. You are not reviewing quality, style, or completeness; those are other seats' jobs.
+  const task = `You are the Interaction Smoke agent for one ticket in an unattended build. Your ONLY job is to prove the running app is OPERABLE — that a real user can perform the app's single most basic action and see its effect. You are not reviewing quality, style, or completeness; those are other seats' jobs.
 
 A build can compile and pass every test while being unplayable — the turn button might not exist, the "found" command might have no UI caller, a form's submit might be dead. Verify cannot see that (it only builds and runs tests). Your smoke is the first gate that actually RUNS the app and drives it.
 
@@ -80,4 +81,6 @@ $SMOKE_FAIL
 $END
 
 Do NOT emit both. If you could not launch the app at all, or the declared interface gives you no real-input path, that is a $SMOKE_FAIL naming the launch/input problem.`;
+
+  return { preamble: "", task };
 }

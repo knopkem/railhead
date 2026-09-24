@@ -1,5 +1,6 @@
 import { parseVerdict } from "./reviewer.ts";
 import { buildDigestInjection, DIGEST_MARKER } from "../context/digest.ts";
+import { renderPreamble, type PhaseMessages } from "../context/preamble.ts";
 
 export interface StructuralVerdict {
   verdict: "pass" | "fail" | "inconclusive";
@@ -26,7 +27,7 @@ export function buildStructuralReviewPrompt(options: {
   priorFindings: string[];
   learnings?: string | null;
   digest?: string | null;
-}): string {
+}): PhaseMessages {
   const {
     originalPrompt,
     architectureDoc,
@@ -40,7 +41,7 @@ export function buildStructuralReviewPrompt(options: {
   } = options;
 
   const archBlock = architectureDoc?.trim()
-    ? `\n\nARCHITECTURE INTENT (from docs/architecture.md — the structural plan this review judges against):\n${architectureDoc.trim()}\n`
+    ? `\n\nThe Architecture intent section above is the structural plan this review judges against.`
     : "";
   const contractsBlock = contractsSummary?.trim()
     ? `\n\nCONTRACTS INDEX (what the system exposes right now — the declared structure):\n${contractsSummary.trim()}\n`
@@ -59,7 +60,7 @@ export function buildStructuralReviewPrompt(options: {
     : "";
   const digestBlock = buildDigestInjection(digest);
 
-  return `You are the Structural Reviewer at a checkpoint in an unattended build (#49). You have file-read access to the whole project. Your job is to read the accumulated source as a corpus and flag architectural drift that no per-ticket reviewer can see.
+  const roleBlock = `You are the Structural Reviewer at a checkpoint in an unattended build (#49). You have file-read access to the whole project. Your job is to read the accumulated source as a corpus and flag architectural drift that no per-ticket reviewer can see.
 
 This oversight seat is the intended consumer of the strong-model tier (ADR 0015) — structural review, not the implementer, is where a stronger model catches cross-cutting drift a local model accumulates across tickets.
 
@@ -105,4 +106,9 @@ If you observed a key architectural change, structural milestone, or convention 
 ${DIGEST_MARKER} <one terse line: "Module X now uses pattern Y" or "Convention Z diverging from architecture.md in files A, B">
 
 Omit if nothing structurally significant changed.`;
+
+  return {
+    preamble: renderPreamble({ architecture: architectureDoc ?? null }),
+    task: roleBlock,
+  };
 }

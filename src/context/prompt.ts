@@ -5,6 +5,14 @@ import { visionCapabilityBlock, type VisionCapabilityFact } from "../execute/vis
 import { buildDigestInjection } from "./digest.ts";
 import { HANDOFF_START, HANDOFF_END } from "./handoff.ts";
 import { CHARTER_DOC } from "./coherence.ts";
+import { renderPreamble, renderTask, type PhaseMessages } from "./preamble.ts";
+
+/** Load a project doc for the canonical preamble. A missing file renders an
+ *  explicit placeholder so the model can tell "checked and absent" from "not
+ *  part of this phase's stable inputs". */
+async function readPreambleDoc(cwd: string, name: string): Promise<string> {
+  return (await readProjectDoc(cwd, name)) ?? "_(not present in this repo)_";
+}
 
 /** One-line design pointer a NON-surface ticket carries instead of the full
  *  visual narrative (ADR 0028): the narrative is surface-scoped pollution for
@@ -12,13 +20,33 @@ import { CHARTER_DOC } from "./coherence.ts";
  *  render UI is not blind. */
 const DESIGN_POINTER_BLOCK = `\nThis build has a visual design narrative (docs/design.md) and possibly a coherence charter (${CHARTER_DOC}); this ticket is not classified as surface-scoped, so they are not injected. Read them only if your work turns out to touch the rendered surface.`;
 
-/** The charter's normative content wrapped in seat-specific instructions.
- *  `frame` distinguishes the implementer's honor-frame from the reviewer's
- *  judge-frame — one block builder so the two seats cannot drift. */
-function coherenceBlock(content: string, frame: "honor" | "judge"): string {
+/** The seat-specific instruction for the canonical preamble's Coherence
+ *  contract section. The charter CONTENT lives in message 1 (see
+ *  `renderPreamble`); the implementer's honor-frame and the reviewer's
+ *  judge-frame stay here in message 2 — one builder so the two seats cannot
+ *  drift. */
+function coherenceRequestBlock(frame: "honor" | "judge"): string {
   return frame === "honor"
-    ? `\n## Coherence contract (visual design contract — HONOR IT EXACTLY)\nThe planner authored this terse, normative visual contract at plan time. This ticket touches the rendered surface, so honor its Visual tokens, Layout model, and Chrome rules EXACTLY: import the shared constants module it names rather than redefining palette/spacing/type/radius values, and do not introduce a competing style or panel/button recipe. Read ${CHARTER_DOC} from the repo if you need more than the sections shown:\n${content}`
-    : `\n## Coherence contract (visual design contract — VERIFY CONFORMANCE)\nThe planner authored this terse, normative visual contract at plan time. This ticket touches the rendered surface, so verify the diff HONORS the shared constants module the charter names and the Chrome rules: a redefined token, a competing style, or a chrome-rule violation in the diff is a review finding. Chrome conformance is visible in a diff — this is the earliest, cheapest detection point, before any goal review fires:\n${content}`;
+    ? `## Coherence contract (visual design contract — HONOR IT EXACTLY)\nThe Coherence contract section above is the planner's terse, normative visual contract, authored at plan time. This ticket touches the rendered surface, so honor its Visual tokens, Layout model, and Chrome rules EXACTLY: import the shared constants module it names rather than redefining palette/spacing/type/radius values, and do not introduce a competing style or panel/button recipe. Read ${CHARTER_DOC} from the repo if you need more than the sections shown.`
+    : `## Coherence contract (visual design contract — VERIFY CONFORMANCE)\nThe Coherence contract section above is the planner's terse, normative visual contract, authored at plan time. This ticket touches the rendered surface, so verify the diff HONORS the shared constants module the charter names and the Chrome rules: a redefined token, a competing style, or a chrome-rule violation in the diff is a review finding. Chrome conformance is visible in a diff — this is the earliest, cheapest detection point, before any goal review fires.`;
+}
+
+/** The seat-specific instruction for the canonical preamble's Design intent
+ *  section. The narrative itself is message 1; the implementer's "build
+ *  toward it" and the reviewer's "judge the diff against it" framing live
+ *  here. */
+function designRequestBlock(frame: "implement" | "review"): string {
+  return frame === "implement"
+    ? `## Design intent (planner's vision for this build)\nThe Design intent section above is the planner's captured vision — read it so your implementation matches the envisioned aesthetic, narrative, and quality bar, not just the ticket's acceptance criteria.`
+    : `## Design intent (planner's vision)\nThe Design intent section above is the planner's captured vision. Judge whether the diff matches the envisioned aesthetic, narrative, and quality bar — not just whether the ticket ACs are met.`;
+}
+
+/** The seat-specific instruction for the canonical preamble's Architecture
+ *  intent section. */
+function architectureRequestBlock(frame: "implement" | "review"): string {
+  return frame === "implement"
+    ? `## Architecture intent (planner's structural plan)\nThe Architecture intent section above is the planner's captured module map and cross-cutting concerns — read it so your implementation follows the planned structure.`
+    : `## Architecture intent (planner's structural plan)\nThe Architecture intent section above is the planner's structural plan. Judge whether the diff follows the planned module map and cross-cutting concerns.`;
 }
 
 /** Issue #72: browser-tab hygiene for phases that may drive a browser. The
@@ -55,18 +83,6 @@ Do NOT use this as an escape from a hard ticket, a failing gate, or retry pressu
 
 export interface Runnable {
   generate: () => Promise<string>;
-}
-
-/** Build the Implementer and Reviewer prompts — context discipline lives here. */
-export function buildContext(cwd: string) {
-  return {
-    include: async (name: string, label: string): Promise<string> => {
-      const content = await readProjectDoc(cwd, name);
-      return content
-        ? `\n\n## ${label}\n\n${content}`
-        : `\n\n## ${label}\n\n_(not present in this repo)_`;
-    },
-  };
 }
 
 /** Issue #45: the RED/GREEN evidence check item injected into both reviewer
@@ -175,10 +191,9 @@ export async function buildImplementerPrompt(
      * pixels, and a blind one does not claim visual verification. */
     visionCapability?: VisionCapabilityFact | null;
   },
-): Promise<string> {
+): Promise<PhaseMessages> {
   const { cwd, ticketFile, mission, ticketBody, criteria, verify, prevFeedback, priorDiff, prevHandoff, attemptHistory, contracts, contextBudget, learnings, fixMode, designDoc, architectureDoc, surface, coherenceDoc, testable, digest, visionCapability } =
     options;
-  const ctx = buildContext(cwd);
 
   const criteriaBlock = criteria.length
     ? criteria.map((c) => `- [ ] ${c}`).join("\n")
@@ -220,30 +235,22 @@ These are the interfaces already in the repo that this ticket should build on. H
 ${renderContracts(contracts)}`
     : "";
 
-  const missionBlock = mission
-    ? `\nMISSION (the whole build's one-line goal): ${mission}`
-    : "";
-
-  // Issue #34: inject the planner's design and architecture intent so the
-  // fresh-context implementer reconstructs the vision from a written
-  // description instead of reverse-engineering it from committed code. Absent
-  // when the planner did not emit $DESIGN/$ARCHITECTURE blocks — these are
-  // optional and a run without them is valid.
-  //
-  // Issue #99: the design NARRATIVE is surface-gated — a pure-model ticket
-  // gets at most a one-line pointer (the narrative is the pollution smell
-  // #97/#98 named). The architecture doc stays for ALL tickets: the module
-  // map is precisely the model ticket's audience.
+  // Issue #34: the planner's design and architecture intent are STABLE inputs:
+  // they live in the canonical preamble (message 1) so they sit before every
+  // volatile byte. Issue #99 (ADR 0028) still gates the design NARRATIVE —
+  // a non-surface ticket gets the preamble without it and a one-line pointer
+  // in the task instead; the architecture doc stays for ALL tickets (the
+  // module map is precisely the model ticket's audience).
   const designDocBlock = surface !== false && designDoc
-    ? `\n## Design intent (planner's vision for this build)\nThe planner captured this intent during planning — read it so your implementation matches the envisioned aesthetic, narrative, and quality bar, not just the ticket's acceptance criteria:\n${designDoc}`
+    ? designRequestBlock("implement")
     : surface === false && designDoc
       ? DESIGN_POINTER_BLOCK
       : "";
   const coherenceBlockText = surface !== false && coherenceDoc
-    ? coherenceBlock(coherenceDoc, "honor")
+    ? coherenceRequestBlock("honor")
     : "";
   const architectureDocBlock = architectureDoc
-    ? `\n## Architecture intent (planner's structural plan)\nThe planner captured this structural intent during planning — read it so your implementation follows the planned module map and cross-cutting concerns:\n${architectureDoc}`
+    ? architectureRequestBlock("implement")
     : "";
 
   const learningsBlock = learnings
@@ -290,9 +297,18 @@ Before declaring DONE: (1) re-run the original reproducer — it must no longer 
     : "";
 
   const [agents, context] = await Promise.all([
-    ctx.include("AGENTS.md", "Project agent guidance (AGENTS.md)"),
-    ctx.include("CONTEXT.md", "Domain glossary (CONTEXT.md)"),
+    readPreambleDoc(cwd, "AGENTS.md"),
+    readPreambleDoc(cwd, "CONTEXT.md"),
   ]);
+
+  const preamble = renderPreamble({
+    mission,
+    agents,
+    context,
+    design: surface !== false ? designDoc : null,
+    architecture: architectureDoc,
+    coherence: surface !== false ? coherenceDoc : null,
+  });
 
   // Issue #45: a small-context implementer may claim DONE on code it never
   // ran the suite against — verify catches that, but the reviewer can only
@@ -322,7 +338,7 @@ Rules:
 `
     : "";
 
-  return `You are the Implementer for one ticket of an unattended build. Work only within this ticket's scope; the acceptance criteria are the contract.
+  const roleBlock = `You are the Implementer for one ticket of an unattended build. Work only within this ticket's scope; the acceptance criteria are the contract.
 
 The contracts you list under "expected new contracts" (introduces) are load-bearing: later tickets in this build will consume them by name. Design their interfaces accordingly, since re-deriving or renaming them later is expensive.
 
@@ -397,19 +413,31 @@ ${HALT_CONTRACT}
 ## Terse output
 You run unattended — no human reads your narration, and every prose token you emit stays in your context for the next step. Do not explain what you did. Skip preamble, summaries, and "I will" plans. Do the work, then end with exactly the required marker:
 
-DONE <files touched, comma or newline separated>` +
-    agents +
-    context +
-    `${learningsBlock}${digestBlock}${implementVisionBlock}${designDocBlock}${coherenceBlockText}${architectureDocBlock}${contractBlock}
-${missionBlock}
-TICKET FILE: ${ticketFile}
+DONE <files touched, comma or newline separated>`;
+
+  const ticketBlock = `TICKET FILE: ${ticketFile}
 
 TICKET:
 ${ticketBody}
 
 ACCEPTANCE CRITERIA:
-${criteriaBlock}
-${feedbackBlock}${handoffBlock}${historyBlock}${fixModeBlock}`;
+${criteriaBlock}`;
+
+  return {
+    preamble,
+    task: renderTask([
+      roleBlock,
+      learningsBlock,
+      digestBlock,
+      implementVisionBlock,
+      designDocBlock,
+      coherenceBlockText,
+      architectureDocBlock,
+      contractBlock,
+      ticketBlock,
+      `${feedbackBlock}${handoffBlock}${historyBlock}${fixModeBlock}`,
+    ]),
+  };
 }
 
 /**
@@ -443,9 +471,8 @@ export async function buildTestPhasePrompt(options: {
    * within budget. Same signal the implementer gets — without it the test
    * phase cat'd 8 whole files in a real run and compacted 9 times. */
   contextBudget?: number;
-}): Promise<string> {
+}): Promise<PhaseMessages> {
   const { cwd, ticketFile, ticketBody, criteria, verify, seams, learnings, contextBudget } = options;
-  const ctx = buildContext(cwd);
 
   const criteriaBlock = criteria.length
     ? criteria.map((c) => `- [ ] ${c}`).join("\n")
@@ -464,11 +491,11 @@ export async function buildTestPhasePrompt(options: {
     : "";
 
   const [agents, context] = await Promise.all([
-    ctx.include("AGENTS.md", "Project agent guidance (AGENTS.md)"),
-    ctx.include("CONTEXT.md", "Domain glossary (CONTEXT.md)"),
+    readPreambleDoc(cwd, "AGENTS.md"),
+    readPreambleDoc(cwd, "CONTEXT.md"),
   ]);
 
-  return `You are the Test Author for one ticket of an unattended build. Your job: write failing tests at the seams this ticket names, run them, confirm they fail for the right reasons, then end with the $HANDOFF marker describing what the tests assert and where the implementer should look.
+  const roleBlock = `You are the Test Author for one ticket of an unattended build. Your job: write failing tests at the seams this ticket names, run them, confirm they fail for the right reasons, then end with the $HANDOFF marker describing what the tests assert and where the implementer should look.
 
 This is a small-context run. Keep your reads minimal and targeted. Do not read entire large files (no \`cat src/foo.ts\`); use targeted reads (read a line range, grep for a symbol) to confirm the seam's signature — you only need the type/function shape to write an importing test, not the file's body.${contextBudget ? `\nYour context window is budgeted to roughly ${Math.floor(contextBudget / 1000)}k tokens — keep reads small so you do not run out.` : ""}
 
@@ -504,9 +531,12 @@ ${HANDOFF_START}
 <for each test: file path, what it asserts, why it is failing right now, where the implementer should look>
 ${HANDOFF_END}
 
-DONE <test files touched, comma or newline separated>` +
-    agents +
-    context;
+DONE <test files touched, comma or newline separated>`;
+
+  return {
+    preamble: renderPreamble({ agents, context }),
+    task: roleBlock,
+  };
 }
 
 export async function buildReviewerPrompt(options: {
@@ -562,7 +592,7 @@ export async function buildReviewerPrompt(options: {
   diffStat?: string;
   /** Issue #50: rolling project digest. See ADR 0018. */
   digest?: string | null;
-}): Promise<string> {
+}): Promise<PhaseMessages> {
   const { ticketFile, ticketBody, criteria, diff, priorFindings, contracts, learnings, fixMode, attempt, designDoc, architectureDoc, surface, coherenceDoc, lintOutput, testable, diffFile, diffStat, digest } = options;
   const criteriaBlock = criteria.length
     ? criteria.map((c) => `- [ ] ${c}`).join("\n")
@@ -582,16 +612,20 @@ export async function buildReviewerPrompt(options: {
 
   const digestBlock = buildDigestInjection(digest);
 
+  // Issue #34/#99: the design narrative, architecture map, and coherence
+  // charter are STABLE inputs and live in the canonical preamble (message 1).
+  // The task keeps only the judge-frame instructions that tell the reviewer
+  // how to use each section above.
   const designDocBlock = surface !== false && designDoc
-    ? `\n## Design intent (planner's vision)\nThe planner captured this intent during planning. Judge whether the diff matches the envisioned aesthetic, narrative, and quality bar — not just whether the ticket ACs are met:\n${designDoc}\n`
+    ? `\n${designRequestBlock("review")}`
     : surface === false && designDoc
       ? DESIGN_POINTER_BLOCK
       : "";
   const coherenceBlockText = surface !== false && coherenceDoc
-    ? coherenceBlock(coherenceDoc, "judge")
+    ? `\n${coherenceRequestBlock("judge")}`
     : "";
   const architectureDocBlock = architectureDoc
-    ? `\n## Architecture intent (planner's structural plan)\nThe planner captured this structural intent during planning. Judge whether the diff follows the planned module map and cross-cutting concerns:\n${architectureDoc}\n`
+    ? `\n${architectureRequestBlock("review")}`
     : "";
 
   const lintBlock = lintOutput && lintOutput.trim()
@@ -614,7 +648,7 @@ An acceptance criterion that names a concrete third-party package/artifact (or a
 - Do NOT block for the named artifact's absence when the diff meets the capability the criterion actually describes.
 - If the diff substitutes or drops a plan-named artifact and the project's decision record (DECISIONS.md) does not yet document that choice, raise [MAJOR]: the plan record still asserts the phantom name; it must record the substitution so later tickets and reviews stop fighting it. Name both the plan's claim and what the code actually uses.`;
 
-  return `You are the Reviewer for one ticket of an unattended build. You are read-only: critique the diff, never edit files. You have no read, search, or command tools — every file a review needs is already in this prompt (the ticket body, its acceptance criteria, and the diff), so do not try to explore the repository; answer in the exact format requested below.
+  const roleBlock = `You are the Reviewer for one ticket of an unattended build. You are read-only: critique the diff, never edit files. You have no read, search, or command tools — every file a review needs is already in this prompt (the ticket body, its acceptance criteria, and the diff), so do not try to explore the repository; answer in the exact format requested below.
 The purpose of review is to confirm the acceptance criteria are COMPLETELY met and the change basically works — not to police code style or polish. Ignore minor quality nits; only surface issues that genuinely matter.
 
 TICKET FILE: ${ticketFile}
@@ -704,6 +738,15 @@ If a prior learning injected into your prompt above is WRONG — you personally 
 ${RETRACTED_MARKER} <the prior learning text, or enough of it to uniquely identify the line>
 
 The railhead removes the matched line from future prompts. Use this only for facts you personally falsified, not for facts you did not need this review.`;
+
+  return {
+    preamble: renderPreamble({
+      design: surface !== false ? designDoc : null,
+      architecture: architectureDoc,
+      coherence: surface !== false ? coherenceDoc : null,
+    }),
+    task: roleBlock,
+  };
 }
 
 /**
@@ -714,9 +757,9 @@ The railhead removes the matched line from future prompts. Use this only for fac
 export function buildContractExtractPrompt(options: {
   diff: string;
   touchedFiles: string;
-}): string {
+}): PhaseMessages {
   const { diff, touchedFiles } = options;
-  return `You are extracting the public interface (the "contract") of a codebase change so it can be indexed for later tickets.
+  const task = `You are extracting the public interface (the "contract") of a codebase change so it can be indexed for later tickets.
 
 Below is the diff (or touched files) from ONE ticket. List the PUBLIC contracts that now exist or changed as a result. A contract is anything another ticket might call or import: exported functions, classes, constants, methods, CLI commands, endpoints, config keys.
 
@@ -736,6 +779,7 @@ Touched files: ${touchedFiles}
 
 DIFF:
 ${diff}`;
+  return { preamble: "", task };
 }
 
 /** Per-file model fallback for contract extraction (#28). When regex extraction
@@ -743,8 +787,8 @@ ${diff}`;
  * exports), the model reads just that one file's content — not the full
  * ticket diff. This bounds each model call to O(file) not O(ticket), so a
  * 30k-token shader file can't overflow the context on a 64k model. */
-export function buildContractExtractFilePrompt(file: string, content: string): string {
-  return `You are extracting the public interface (the "contract") of a source file so it can be indexed for later tickets.
+export function buildContractExtractFilePrompt(file: string, content: string): PhaseMessages {
+  const task = `You are extracting the public interface (the "contract") of a source file so it can be indexed for later tickets.
 
 File: ${file}
 
@@ -764,6 +808,7 @@ $END
 
 SOURCE:
 ${content}`;
+  return { preamble: "", task };
 }
 
 export async function buildReviewerReadModePrompt(options: {
@@ -797,7 +842,7 @@ export async function buildReviewerReadModePrompt(options: {
   testable?: boolean;
   /** Issue #50: rolling project digest. See ADR 0018. */
   digest?: string | null;
-}): Promise<string> {
+}): Promise<PhaseMessages> {
   const { ticketFile, ticketBody, criteria, stat, files, priorFindings, contracts, learnings, fixMode, attempt, designDoc, architectureDoc, surface, coherenceDoc, lintOutput, testable, digest } = options;
   const criteriaBlock = criteria.length
     ? criteria.map((c) => `- [ ] ${c}`).join("\n")
@@ -818,15 +863,15 @@ export async function buildReviewerReadModePrompt(options: {
   const digestBlock = buildDigestInjection(digest);
 
   const designDocBlock = surface !== false && designDoc
-    ? `\n## Design intent (planner's vision)\n${designDoc}\n`
+    ? `\n${designRequestBlock("review")}`
     : surface === false && designDoc
       ? DESIGN_POINTER_BLOCK
       : "";
   const coherenceBlockText = surface !== false && coherenceDoc
-    ? coherenceBlock(coherenceDoc, "judge")
+    ? `\n${coherenceRequestBlock("judge")}`
     : "";
   const architectureDocBlock = architectureDoc
-    ? `\n## Architecture intent (planner's structural plan)\n${architectureDoc}\n`
+    ? `\n${architectureRequestBlock("review")}`
     : "";
 
   const lintBlock = lintOutput && lintOutput.trim()
@@ -835,7 +880,7 @@ export async function buildReviewerReadModePrompt(options: {
 
   const fileList = files.map((f) => `- ${f}`).join("\n");
 
-  return `You are the Reviewer for one ticket of an unattended build. You have read access to the touched source files — use the read tool to examine each one. Do NOT edit, run commands, or explore the repo beyond the files listed below.
+  const roleBlock = `You are the Reviewer for one ticket of an unattended build. You have read access to the touched source files — use the read tool to examine each one. Do NOT edit, run commands, or explore the repo beyond the files listed below.
 The purpose of review is to confirm the acceptance criteria are COMPLETELY met and the change basically works — not to police code style or polish. Ignore minor quality nits; only surface issues that genuinely matter.
 
 TICKET FILE: ${ticketFile}
@@ -924,4 +969,13 @@ If a prior learning injected into your prompt above is WRONG — you personally 
 ${RETRACTED_MARKER} <the prior learning text, or enough of it to uniquely identify the line>
 
 The railhead removes the matched line from future prompts. Use this only for facts you personally falsified, not for facts you did not need this review.`;
+
+  return {
+    preamble: renderPreamble({
+      design: surface !== false ? designDoc : null,
+      architecture: architectureDoc,
+      coherence: surface !== false ? coherenceDoc : null,
+    }),
+    task: roleBlock,
+  };
 }

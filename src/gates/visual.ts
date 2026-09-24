@@ -4,6 +4,7 @@ import { LEARNED_MARKER, RETRACTED_MARKER } from "../context/learnings.ts";
 import { BROWSER_HYGIENE, HALT_CONTRACT, SCRATCH_FILE_DISCIPLINE } from "../context/prompt.ts";
 import { buildInteractionGuidance, type ProjectInterface } from "../config/interface.ts";
 import { visionCapabilityBlock, type VisionCapabilityFact } from "../execute/vision-probe.ts";
+import { renderPreamble, type PhaseMessages } from "../context/preamble.ts";
 // The surface gate is defined in the light module surface.ts (executor.ts's
 // overview import chain must not drag in reviewer.ts); visual.ts re-exports it
 // as the seat the docs name — the ONE predicate per-ticket visual review
@@ -106,7 +107,7 @@ export function buildVisualReviewPrompt(options: {
    * Injected so a model cannot silently decide it "doesn't want" to read
    * screenshots — the measurement overrides any self-assessment. */
   visionCapability?: VisionCapabilityFact | null;
-}): string {
+}): PhaseMessages {
   const { mission, criteria, verifyCommands, runCommandHint, round, priorFindings, learnings, interactionHints, projectInterface, perTicket, coherenceDoc, recoveryNote, visionCapability } = options;
   const criteriaBlock = criteria.length
     ? criteria.map((c) => `- ${c}`).join("\n")
@@ -141,7 +142,7 @@ IMPORTANT — SCOPE: Features built by OTHER tickets (past or future) are OUT OF
 BUILD MISSION: ${mission}`;
 
   const charterBlock = coherenceDoc
-    ? `\n## Coherence charter (in-scope check)\nThe build is governed by a plan-time coherence charter (docs/coherence.md) — the terse, normative visual design contract surface tickets must honor. THIS ticket touches the rendered surface, so charter conformance is THIS ticket's responsibility, like any other criterion: does the rendered surface below honor the Visual tokens and Chrome rules? The shared constants module the charter names is authoritative — redefining a token or introducing a competing style/panel recipe here is a finding.\n${coherenceDoc}`
+    ? `\n## Coherence charter (in-scope check)\nThe Coherence contract section above is the plan-time charter (docs/coherence.md) — the terse, normative visual design contract surface tickets must honor. THIS ticket touches the rendered surface, so charter conformance is THIS ticket's responsibility, like any other criterion: does the rendered surface below honor the Visual tokens and Chrome rules? The shared constants module the charter names is authoritative — redefining a token or introducing a competing style/panel recipe here is a finding.`
     : "";
 
   // Issue #96: a degraded-target recovery note rides on the retried round's
@@ -153,7 +154,7 @@ BUILD MISSION: ${mission}`;
 
   const visionBlock = visionCapabilityBlock(visionCapability ?? null, "visual");
 
-  return `${perTicketHeader}
+  const roleBlock = `${perTicketHeader}
 
 ACCEPTANCE / VISUAL CRITERIA (judge every one):
 ${criteriaBlock}
@@ -208,6 +209,11 @@ If a prior learning injected above is WRONG — you verified it does not hold (e
 ${RETRACTED_MARKER} <the prior learning text, or enough of it to uniquely identify the line>
 
 The railhead removes the matched line from future prompts. Use this only for facts you personally falsified; do not retract a learning merely because you did not need it this phase.`;
+
+  return {
+    preamble: renderPreamble({ coherence: coherenceDoc ?? null }),
+    task: roleBlock,
+  };
 }
 
 /** Whether per-ticket visual review fires for a ticket — the surface gate

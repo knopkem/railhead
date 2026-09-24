@@ -3,6 +3,7 @@ import type { CheckpointGranularity } from "../config/config.ts";
 import { CHARTER_DOC } from "./coherence.ts";
 import { LEARNED_MARKER, RETRACTED_MARKER } from "./learnings.ts";
 import { visionCapabilityBlock, type VisionCapabilityFact } from "../execute/vision-probe.ts";
+import { renderPreamble, renderTask, type PhaseMessages } from "./preamble.ts";
 
 /**
  * The durable-session builder (ADR 0022, issue #84). This module is the
@@ -196,16 +197,15 @@ The railhead gates whatever you checkpoint, so only the green survives. Run thes
 ${commands}`;
 }
 
-/** The builder's charter block (ADR 0028): charter content + the
- * re-read-after-compaction line that OVERRIDES OUTPUT_DISCIPLINE's "do not
- * re-read files you already hold" rule. Shared by the implement prompt
- * (contextBlocks) and the findings resume so a gate verdict citing chrome
- * rules never references a contract the session cannot see. */
-function charterBlock(content: string): string {
+/** The builder's charter INSTRUCTION block (ADR 0028): the re-read-after-
+ * compaction line that OVERRIDES OUTPUT_DISCIPLINE's "do not re-read files you
+ * already hold" rule, plus the honor frame. The charter CONTENT lives in the
+ * canonical preamble (message 1); this block tells the session how to use it.
+ * Shared by the implement prompt and the findings resume so a gate verdict
+ * citing chrome rules never references a contract the session cannot see. */
+function charterRequestBlock(): string {
   return `## Coherence contract (visual design contract — HONOR IT EXACTLY)
-The planner authored this terse, normative visual contract at plan time. This work includes surface tickets, so honor the Visual tokens, Layout model, and Chrome rules EXACTLY — import the shared constants module named below rather than redefining values; do not introduce a competing style.
-
-${content}
+The Coherence contract section above is the planner's terse, normative visual contract, authored at plan time. This work includes surface tickets, so honor the Visual tokens, Layout model, and Chrome rules EXACTLY — import the shared constants module named there rather than redefining values; do not introduce a competing style.
 
 If you touch surface code AFTER a compaction, re-read ${CHARTER_DOC} first — after a compaction you no longer hold the contract, and this re-read overrides the "do not re-read files you already hold" output rule.`;
 }
@@ -217,36 +217,32 @@ If you touch surface code AFTER a compaction, re-read ${CHARTER_DOC} first — a
  * from the seat that writes the surface (the platformer run built structurally
  * conforming blob art because the builder was never handed the "make it look
  * like this" document). The charter (`docs/coherence.md`) is the terse
- * normative subset; design.md is the vision the charter constrains. */
+ * normative subset; design.md is the vision the charter constrains. The
+ * documents themselves now ride the canonical preamble; these are the
+ * seat-specific instructions that point at them. */
 export const DESIGN_DOC = "docs/design.md";
 export const ARCHITECTURE_DOC = "docs/architecture.md";
 
-function designIntentBlock(content: string): string {
+function designRequestBlock(): string {
   return `## Design intent (the planner's vision for this build)
-The planner captured this intent during planning. It is the aesthetic, narrative, and quality bar this build is judged against — not only the current ticket's acceptance criteria. Implement toward THIS vision; a result that passes the criteria while ignoring it is not done.
-
-${content}
+The Design intent section above is the planner's captured vision — the aesthetic, narrative, and quality bar this build is judged against, not only the current ticket's acceptance criteria. Implement toward it; a result that passes the criteria while ignoring it is not done.
 
 If you touch surface code AFTER a compaction, re-read ${DESIGN_DOC} first — after a compaction you no longer hold the vision, and this re-read overrides the "do not re-read files you already hold" output rule.`;
 }
 
-function architectureIntentBlock(content: string): string {
+function architectureRequestBlock(): string {
   return `## Architecture intent (the planner's structural plan)
-${content}`;
+The Architecture intent section above is the planner's captured module map and cross-cutting concerns — follow it.`;
 }
 
 function contextBlocks(opts: {
   contracts?: string | null;
   learnings?: string | null;
   digest?: string | null;
-  /** The planner's design narrative (issue #34) — the aesthetic/quality vision
-   * the charter constrains. Surface-gated by the caller. */
-  designDoc?: string | null;
-  /** The planner's structural plan (issue #34). Injected for every ticket. */
-  architectureDoc?: string | null;
-  /** The coherence charter (ADR 0028) for an invocation that includes a
-   * surface ticket. */
-  charter?: string | null;
+  /** Whether this invocation carries the coherence charter (i.e. includes a
+   * surface ticket). Gates the vision self-check: it only makes sense for
+   * surface work. */
+  surface?: boolean;
   /** ADR 0036: the railhead-measured vision capability (implement seat). Only
    * injected alongside the charter: the self-check it enables is for surface
    * work. */
@@ -272,20 +268,11 @@ ${opts.learnings.split("\n").map((l) => `- ${l}`).join("\n")}`);
 This digest is an unverified model-claim written by prior review checkpoints, not a tested fact. If it contradicts what you observe in the source, trust the source.
 ${opts.digest.split("\n").map((l) => `- ${l}`).join("\n")}`);
   }
-  if (opts.designDoc) {
-    parts.push(designIntentBlock(opts.designDoc));
-  }
-  if (opts.architectureDoc) {
-    parts.push(architectureIntentBlock(opts.architectureDoc));
-  }
-  if (opts.charter) {
-    parts.push(charterBlock(opts.charter));
-  }
-  if (opts.visionCapability && opts.charter) {
+  if (opts.visionCapability && opts.surface) {
     const block = visionCapabilityBlock(opts.visionCapability, "implement");
     if (block) parts.push(block.trimStart());
   }
-  return parts.length ? "\n" + parts.join("\n\n") : "";
+  return renderTask(parts);
 }
 
 /** The standing file pointers a warm advance carries INSTEAD of re-injecting
@@ -376,7 +363,7 @@ export function buildBuilderPrompt(opts: {
    * injected with the charter so a capable implementer self-checks surface
    * work with pixels. */
   visionCapability?: VisionCapabilityFact | null;
-}): string {
+}): PhaseMessages {
   const { session, granularity, tickets, verify } = opts;
   const budget = opts.contextBudget
     ? `\nYour session's request ceiling is budgeted to roughly ${Math.floor(opts.contextBudget / 1000)}k tokens — keep reads small; the railhead treats crossings as telemetry, compaction manages the rest.`
@@ -393,22 +380,43 @@ export function buildBuilderPrompt(opts: {
       ? `The ticket above is the CURRENT ticket the railhead has surfaced. Later tickets exist and the railhead hands them over only after this ticket's green checkpoint — never start work the railhead has not surfaced.`
       : `The list above is the forward plan this session implements${session.committedThrough ? " from where the build stands" : ""}. Contracts and guidance follow.`;
   const stateBlock = opts.contextPointers
-    ? `${standingContextPointers(opts.contextPointers)}${opts.charter ? charterBlock(opts.charter) : ""}`
-    : contextBlocks(opts);
-  return [
-    BUILDER_ROLE,
-    continuityBlock(session),
-    `## Work to do
+    ? standingContextPointers(opts.contextPointers)
+    : contextBlocks({
+        contracts: opts.contracts,
+        learnings: opts.learnings,
+        digest: opts.digest,
+        surface: !!opts.charter,
+        visionCapability: opts.visionCapability,
+      });
+  // The stable docs (design/architecture/charter) ride the canonical preamble;
+  // the task carries only the seat instructions that point at them.
+  const requestBlocks = renderTask([
+    opts.designDoc ? designRequestBlock() : "",
+    opts.architectureDoc ? architectureRequestBlock() : "",
+    opts.charter ? charterRequestBlock() : "",
+  ]);
+  return {
+    preamble: renderPreamble({
+      design: opts.designDoc ?? null,
+      architecture: opts.architectureDoc ?? null,
+      coherence: opts.charter ?? null,
+    }),
+    task: renderTask([
+      BUILDER_ROLE,
+      continuityBlock(session),
+      `## Work to do
 ${ticketBlocks}`,
-    verifyBlock(verify),
-    forwardLine,
-    // Full-context sends only: a warm pointer resume already holds the block
-    // from its seed (the #106 dedup cadence the content blocks follow).
-    opts.contextPointers ? "" : CONTEXT_ECONOMY,
-    stateBlock,
-    checkpointDirective(granularity, tickets),
-    outputDisciplineFor(tickets) + budget,
-  ].join("\n\n");
+      verifyBlock(verify),
+      forwardLine,
+      // Full-context sends only: a warm pointer resume already holds the block
+      // from its seed (the #106 dedup cadence the content blocks follow).
+      opts.contextPointers ? "" : CONTEXT_ECONOMY,
+      stateBlock,
+      requestBlocks,
+      checkpointDirective(granularity, tickets),
+      outputDisciplineFor(tickets) + budget,
+    ]),
+  };
 }
 
 /**
@@ -433,25 +441,29 @@ export function buildBuilderFindingsPrompt(opts: {
   /** The coherence charter (ADR 0028), carried when the corrected ticket is
    * surface. This seat otherwise carries NO contextBlocks — a gate verdict
    * citing chrome rules must never reference a contract the session cannot
-   * see, so the charter (content + re-read line) rides here explicitly. */
+   * see, so the charter rides the canonical preamble and its re-read line
+   * rides this task explicitly. */
   coherence?: string | null;
-}): string {
+}): PhaseMessages {
   const { session, granularity, tickets, verify, feedback, design, coherence } = opts;
   const findingsBlock = feedback.findings.length
     ? feedback.findings.map((f, i) => `${i + 1}. ${f}`).join("\n")
     : "(no findings listed)";
-  return [
-    BUILDER_ROLE,
-    continuityBlock(session),
-    `## The ${feedback.source} gate found problems in your last checkpoint
+  return {
+    preamble: renderPreamble({ design: design ?? null, coherence: coherence ?? null }),
+    task: renderTask([
+      BUILDER_ROLE,
+      continuityBlock(session),
+      `## The ${feedback.source} gate found problems in your last checkpoint
 A fresh ${feedback.source} gate ran against the diff you just produced and it did not pass. The session that wrote the code receives the verdict directly — fix every item below IN the current ticket's work, then re-run the build/test commands, then checkpoint again. Do NOT proceed to a later ticket while a must-fix stands, and do not argue in prose — the fix is the argument.`,
-    `### Must-fix findings
+      `### Must-fix findings
 ${findingsBlock}`,
-    tickets.map(renderBuilderTicket).join("\n\n"),
-    verifyBlock(verify),
-    design ? designIntentBlock(design) : "",
-    coherence ? charterBlock(coherence) : "",
-    checkpointDirective(granularity, tickets),
-    outputDisciplineFor(tickets),
-  ].join("\n\n");
+      tickets.map(renderBuilderTicket).join("\n\n"),
+      verifyBlock(verify),
+      design ? designRequestBlock() : "",
+      coherence ? charterRequestBlock() : "",
+      checkpointDirective(granularity, tickets),
+      outputDisciplineFor(tickets),
+    ]),
+  };
 }

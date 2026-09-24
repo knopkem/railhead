@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { joinPhaseMessages, type PhaseMessages } from "../context/preamble.ts";
+const promptText = (m: PhaseMessages): string => joinPhaseMessages(m);
+const smokePrompt = (o: Parameters<typeof buildInteractionSmokePrompt>[0]): string => promptText(buildInteractionSmokePrompt(o));
 import { buildInteractionSmokePrompt, parseInteractionSmokeVerdict } from "./interaction-smoke.ts";
 
 describe("parseInteractionSmokeVerdict", () => {
@@ -19,7 +22,7 @@ describe("parseInteractionSmokeVerdict", () => {
 
 describe("buildInteractionSmokePrompt", () => {
   it("tells the agent to drive one real interaction and assert state", () => {
-    const p = buildInteractionSmokePrompt({ runCommandHint: "npm run dev", verifyCommands: ["npm test"] });
+    const p = smokePrompt({ runCommandHint: "npm run dev", verifyCommands: ["npm test"] });
     expect(p).toContain("$SMOKE_PASS");
     expect(p).toContain("$SMOKE_FAIL");
     expect(p).toContain("OPERABLE");
@@ -27,7 +30,7 @@ describe("buildInteractionSmokePrompt", () => {
   });
 
   it("injects project interaction hints over interface guidance", () => {
-    const p = buildInteractionSmokePrompt({
+    const p = smokePrompt({
       runCommandHint: "x",
       verifyCommands: [],
       interactionHints: "use PointerEvent dispatch on the canvas",
@@ -37,7 +40,7 @@ describe("buildInteractionSmokePrompt", () => {
   });
 
   it("falls back to the declared-interface guidance when no hints are given", () => {
-    const p = buildInteractionSmokePrompt({ runCommandHint: "x", verifyCommands: [], projectInterface: "browser-ui" });
+    const p = smokePrompt({ runCommandHint: "x", verifyCommands: [], projectInterface: "browser-ui" });
     expect(p).toContain("chrome-devtools_click");
   });
 });

@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { joinPhaseMessages, type PhaseMessages } from "../context/preamble.ts";
+const promptText = (m: PhaseMessages): string => joinPhaseMessages(m);
+const visualPrompt = (o: Parameters<typeof buildVisualReviewPrompt>[0]): string => promptText(buildVisualReviewPrompt(o));
 import { parseVisualVerdict, buildVisualReviewPrompt, runCommandFromVerify, shouldRunVisualReview, touchesVisualSurface, DEGRADED_TARGET_RECOVERY_NOTE } from "./visual.ts";
 import type { Ticket } from "../core/ticket.ts";
 
@@ -83,7 +86,7 @@ $END`;
 
 describe("buildVisualReviewPrompt", () => {
   it("includes mission, criteria, verify commands, and the verdict markers", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "a playable snake game",
       criteria: ["snake renders without ghosting", "arrows steer the snake"],
       verifyCommands: ["cargo build", "cargo test"],
@@ -101,7 +104,7 @@ describe("buildVisualReviewPrompt", () => {
   });
 
   it("lists prior findings so the agent can confirm resolution", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "m",
       criteria: [],
       verifyCommands: [],
@@ -115,7 +118,7 @@ describe("buildVisualReviewPrompt", () => {
   });
 
   it("requires the agent to INTERACT with the app (send inputs, then screenshot) — not just capture static startup frames", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "a pong game where paddles move",
       criteria: ["paddles respond to keyboard input"],
       verifyCommands: ["cargo build"],
@@ -129,7 +132,7 @@ describe("buildVisualReviewPrompt", () => {
   });
 
   it("includes project learnings when provided", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "a pong game",
       criteria: ["paddles move"],
       verifyCommands: ["cargo build"],
@@ -144,7 +147,7 @@ describe("buildVisualReviewPrompt", () => {
   });
 
   it("omits the learnings block when learnings are null or absent", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "m",
       criteria: [],
       verifyCommands: [],
@@ -156,7 +159,7 @@ describe("buildVisualReviewPrompt", () => {
   });
 
   it("instructs the agent to read each saved screenshot file so a vision-capable model actually sees the pixels (not just the file path the capture tool returns)", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "m",
       criteria: ["renders without artifacts"],
       verifyCommands: [],
@@ -170,7 +173,7 @@ describe("buildVisualReviewPrompt", () => {
 
   it("injects project-provided interaction hints verbatim (#20)", () => {
     const hints = "The game uses requestPointerLock + KeyboardEvent on window. To simulate movement: override document.pointerLockElement, dispatch pointerlockchange, then dispatch KeyboardEvent for WASD.";
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "a 3D horror game",
       criteria: ["player can move with WASD"],
       verifyCommands: ["npm run build"],
@@ -184,7 +187,7 @@ describe("buildVisualReviewPrompt", () => {
   });
 
   it("omits the interaction hints block when not provided (#20)", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "m",
       criteria: [],
       verifyCommands: [],
@@ -196,7 +199,7 @@ describe("buildVisualReviewPrompt", () => {
   });
 
   it("injects canvas guidance when the projectInterface is canvas (#20/#97)", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "a 3D game",
       criteria: ["player moves with WASD"],
       verifyCommands: [],
@@ -212,7 +215,7 @@ describe("buildVisualReviewPrompt", () => {
   });
 
   it("does not inject canvas/game hints when the interface is undeclared/absent (#20/#97)", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "a web app",
       criteria: ["form submits"],
       verifyCommands: [],
@@ -225,7 +228,7 @@ describe("buildVisualReviewPrompt", () => {
   });
 
   it("injects the browser-ui real-input discipline when the interface is browser-ui (#97)", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "a DOM app",
       criteria: ["the toolbar buttons work"],
       verifyCommands: [],
@@ -242,7 +245,7 @@ describe("buildVisualReviewPrompt", () => {
 
   it("injects nothing for terminal/none interfaces (zero pollution for non-browser seats, #97)", () => {
     for (const iface of ["terminal", "none"] as const) {
-      const p = buildVisualReviewPrompt({
+      const p = visualPrompt({
         mission: "m",
         criteria: [],
         verifyCommands: [],
@@ -259,7 +262,7 @@ describe("buildVisualReviewPrompt", () => {
 
   it("project-provided hints take precedence over declared-interface guidance (#20/#97)", () => {
     const hints = "Custom interaction model: use window.__gameAPI.move('forward').";
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "a game",
       criteria: ["player moves"],
       verifyCommands: [],
@@ -401,7 +404,7 @@ describe("shouldRunVisualReview", () => {
 
 describe("buildVisualReviewPrompt (per-ticket mode)", () => {
   it("scopes the prompt to this ticket only and tells the reviewer not to flag features built by other tickets", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "a retro-neon browser snake with gliding movement, score/level HUD, and game-over screen",
       criteria: ["Arrows and WASD steer the snake on the canvas", "the snake visibly glides between cells"],
       verifyCommands: ["npm run build"],
@@ -419,7 +422,7 @@ describe("buildVisualReviewPrompt (per-ticket mode)", () => {
   });
 
   it("does not include the per-ticket scoping language in end-of-run mode (backward compat)", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "a snake game",
       criteria: ["snake renders"],
       verifyCommands: ["npm run build"],
@@ -432,7 +435,7 @@ describe("buildVisualReviewPrompt (per-ticket mode)", () => {
   });
 
   it("includes the ticket's 'what' as context for what was built", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "a pong game",
       criteria: ["paddles respond to keyboard input"],
       verifyCommands: ["npm run build"],
@@ -448,7 +451,7 @@ describe("buildVisualReviewPrompt (per-ticket mode)", () => {
   });
 
   it("still includes the mission as background context in per-ticket mode (so the reviewer understands the app's purpose)", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "a retro-neon browser snake with gliding movement",
       criteria: ["the snake visibly glides between cells"],
       verifyCommands: ["npm run build"],
@@ -495,7 +498,7 @@ describe("runCommandFromVerify", () => {
 
 describe("browser hygiene in visual review prompts (#72)", () => {
   it("tells the visual reviewer to close stale pages from earlier phases", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "a game",
       criteria: ["game renders"],
       verifyCommands: ["true"],
@@ -508,7 +511,7 @@ describe("browser hygiene in visual review prompts (#72)", () => {
   });
 
   it("tells the visual reviewer to keep scratch files in .railhead/ not /tmp", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "a game",
       criteria: ["game renders"],
       verifyCommands: ["true"],
@@ -560,14 +563,14 @@ describe("buildVisualReviewPrompt — coherence charter pointer (issue #99)", ()
   };
 
   it("injects the charter as an in-scope conformance check when supplied", () => {
-    const p = buildVisualReviewPrompt({ ...base, coherenceDoc: charter });
+    const p = visualPrompt({ ...base, coherenceDoc: charter });
     expect(p).toContain("Coherence charter (in-scope check)");
     expect(p).toContain("do not introduce a competing style");
     expect(p).toContain("docs/coherence.md");
   });
 
   it("omits the charter block when no charter was authored", () => {
-    const p = buildVisualReviewPrompt(base);
+    const p = visualPrompt(base);
     expect(p).not.toContain("Coherence charter (in-scope check)");
   });
 });
@@ -583,19 +586,19 @@ describe("buildVisualReviewPrompt — degraded-target recovery note (#96)", () =
   };
 
   it("injects the recovery note only when the retried round carries it", () => {
-    const p = buildVisualReviewPrompt({ ...base, recoveryNote: DEGRADED_TARGET_RECOVERY_NOTE });
+    const p = visualPrompt({ ...base, recoveryNote: DEGRADED_TARGET_RECOVERY_NOTE });
     expect(p).toContain("Interaction-target recovery note");
     expect(p).toMatch(/restart the app cleanly/i);
     expect(p).toMatch(/FRESH page\/tab/i);
   });
 
   it("omits the recovery note on a normal round", () => {
-    const p = buildVisualReviewPrompt(base);
+    const p = visualPrompt(base);
     expect(p).not.toContain("Interaction-target recovery note");
   });
 
   it("warns against unbounded in-page pixel-readback poll loops (the self-inflicted wedge)", () => {
-    const p = buildVisualReviewPrompt({ ...base, recoveryNote: DEGRADED_TARGET_RECOVERY_NOTE });
+    const p = visualPrompt({ ...base, recoveryNote: DEGRADED_TARGET_RECOVERY_NOTE });
     expect(p).toMatch(/pixels\/canvas|canvas/i);
     expect(p).toMatch(/BOUNDED/i);
     expect(p).toMatch(/evaluate_script/i);
@@ -604,7 +607,7 @@ describe("buildVisualReviewPrompt — degraded-target recovery note (#96)", () =
 
 describe("vision capability injection (ADR 0036)", () => {
   it("names the verified capability so the seat cannot opt out of reading screenshots", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "m",
       criteria: [],
       verifyCommands: [],
@@ -618,7 +621,7 @@ describe("vision capability injection (ADR 0036)", () => {
   });
 
   it("adds no capability block when the railhead has no measurement", () => {
-    const p = buildVisualReviewPrompt({
+    const p = visualPrompt({
       mission: "m",
       criteria: [],
       verifyCommands: [],

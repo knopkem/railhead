@@ -7,6 +7,7 @@ import { CHARTER_MARKER } from "../context/coherence.ts";
 import { buildInteractionGuidance, type ProjectInterface } from "../config/interface.ts";
 import { visionCapabilityBlock, type VisionCapabilityFact } from "../execute/vision-probe.ts";
 import { buildPlaythroughSection } from "../context/playthrough.ts";
+import { renderPreamble, type PhaseMessages } from "../context/preamble.ts";
 import { scanJsonObjects } from "../core/json.ts";
 import { indexOfOutsideFences } from "../core/fences.ts";
 import { isBlocker } from "./reviewer.ts";
@@ -248,7 +249,7 @@ export function buildGoalReviewPrompt(options: {
    * Injected so a model cannot silently decide it "doesn't want" to read
    * screenshots — the measurement overrides any self-assessment. */
   visionCapability?: VisionCapabilityFact | null;
-}): string {
+}): PhaseMessages {
   const {
     originalPrompt,
     designDoc,
@@ -275,15 +276,15 @@ export function buildGoalReviewPrompt(options: {
   } = options;
 
   const designBlock = designDoc
-    ? `\n## Design intent (the planner's vision — judge against THIS, not just the prompt)\nThe planner interpreted the goal and captured this intent during planning. This is the concrete quality bar the goal reviewer evaluates against:\n${designDoc}`
+    ? `\n## Design intent (the planner's vision — judge against THIS, not just the prompt)\nThe Design intent section above is the planner's captured vision for this build — the concrete quality bar the goal reviewer evaluates against.`
     : "";
 
   const coherenceBlock = coherenceDoc
-    ? `\n## Coherence contract (the visual design contract the build must conform to)\nThe planner authored this terse, normative visual contract at plan time (docs/coherence.md). Judge the build's CONFORMANCE to it, not vibes: are the charter's shared tokens imported rather than redefined, does the layout honor the model, does the chrome reuse the one recipe? A divergence the surface tickets could have avoided is a quality gap; a divergence that reveals the contract itself is wrong is a reason to revise the charter via a ${CHARTER_MARKER} line (below), not a finding against the code:\n${coherenceDoc}`
+    ? `\n## Coherence contract (the visual design contract the build must conform to)\nThe Coherence contract section above is the planner's terse, normative visual contract (docs/coherence.md). Judge the build's CONFORMANCE to it, not vibes: are the charter's shared tokens imported rather than redefined, does the layout honor the model, does the chrome reuse the one recipe? A divergence the surface tickets could have avoided is a quality gap; a divergence that reveals the contract itself is wrong is a reason to revise the charter via a ${CHARTER_MARKER} line (below), not a finding against the code.`
     : "";
 
   const archBlock = architectureDoc
-    ? `\n## Architecture intent (the planner's structural plan)\n${architectureDoc}`
+    ? `\n## Architecture intent (the planner's structural plan)\nThe Architecture intent section above is the planner's structural plan for this build.`
     : "";
 
   const contractsBlock = contractsSummary
@@ -371,7 +372,7 @@ Rules:
 
   const playthroughBlock = buildPlaythroughSection(originalPrompt, designDoc, { coreLoopReady: coreLoopReady ?? true });
 
-  return `You are the Goal Reviewer at a group checkpoint in an unattended build (#19). You have bash access and may be vision-capable. Your job is NOT to check whether a single ticket's acceptance criteria are met — that is the ticket reviewer's job. Your job is to evaluate the CURRENT BUILD holistically against the ORIGINAL GOAL and the planner's design intent. Ask: "is this progressing toward the goal the user actually stated, or just toward the plan?"
+  const roleBlock = `You are the Goal Reviewer at a group checkpoint in an unattended build (#19). You have bash access and may be vision-capable. Your job is NOT to check whether a single ticket's acceptance criteria are met — that is the ticket reviewer's job. Your job is to evaluate the CURRENT BUILD holistically against the ORIGINAL GOAL and the planner's design intent. Ask: "is this progressing toward the goal the user actually stated, or just toward the plan?"
 
 This oversight seat is the intended consumer of the strong-model tier (ADR 0015) — goal review, not the implementer, is where a stronger model catches architectural drift the local model accumulates across tickets.
 
@@ -491,6 +492,15 @@ Rules:
 - Each object has title, what, files[], references[], introduces[], and testable.
 - Emit this ONLY when it improves on the mechanical split. If you have no decomposition to offer, omit the block entirely.
 - Do NOT emit both $REPLAN and $CORRECTIVE — if you emit $REPLAN, the corrective block is ignored.`}`;
+
+  return {
+    preamble: renderPreamble({
+      design: designDoc ?? null,
+      architecture: architectureDoc ?? null,
+      coherence: coherenceDoc ?? null,
+    }),
+    task: roleBlock,
+  };
 }
 
 /**

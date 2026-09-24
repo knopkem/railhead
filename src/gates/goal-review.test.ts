@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { joinPhaseMessages, type PhaseMessages } from "../context/preamble.ts";
+const promptText = (m: PhaseMessages): string => joinPhaseMessages(m);
+const goalPrompt = (o: Parameters<typeof buildGoalReviewPrompt>[0]): string => promptText(buildGoalReviewPrompt(o));
 import { parseGoalVerdict, buildGoalReviewPrompt, parseReplanRequested, extractFindingFiles, extractFindingReferences, extractScreenshotPaths, splitAnchoredBlockers, parseCorrectiveTickets, normalizeFinding, findingsEchoLastRound, remainingPlanGroups } from "./goal-review.ts";
 
 describe("parseGoalVerdict", () => {
@@ -198,7 +201,7 @@ describe("splitAnchoredBlockers (ADR 0043)", () => {
 
 describe("buildGoalReviewPrompt", () => {
   it("includes the original prompt", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "A GOTY-quality roguelike",
       verifyCommands: [],
       runCommandHint: "cargo run",
@@ -210,7 +213,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("includes the design doc when provided (#34)", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a roguelike",
       designDoc: "A roguelike with oppressive atmosphere. Visual identity: desaturated palette.",
       verifyCommands: [],
@@ -224,7 +227,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("omits the design doc block when null", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a roguelike",
       designDoc: null,
       verifyCommands: [],
@@ -237,7 +240,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("ADR 0040: renders unverified criteria as explicit must-check items", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a level",
       verifyCommands: [],
       runCommandHint: "npm run dev",
@@ -253,7 +256,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("ADR 0043: scopes the required playthrough to the group when the core loop is not ready", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a platformer",
       verifyCommands: [],
       runCommandHint: "npm run dev",
@@ -268,7 +271,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("ADR 0043: demands the full core-loop playthrough when it is ready", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a platformer",
       verifyCommands: [],
       runCommandHint: "npm run dev",
@@ -282,7 +285,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("ADR 0043: states the enforced blocker evidence rule", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a platformer",
       verifyCommands: [],
       runCommandHint: "npm run dev",
@@ -296,7 +299,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("ADR 0040: omits the unverified block when there are no unverified criteria", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a level",
       verifyCommands: [],
       runCommandHint: "npm run dev",
@@ -308,7 +311,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("includes the architecture doc when provided (#34)", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a roguelike",
       architectureDoc: "Modules: engine, renderer, juice.",
       verifyCommands: [],
@@ -322,7 +325,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("includes the contracts summary when provided", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a roguelike",
       contractsSummary: "GameLoop (class) @ src/engine.ts :: class GameLoop",
       verifyCommands: [],
@@ -336,7 +339,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("includes the group name and completed groups", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a roguelike",
       verifyCommands: [],
       runCommandHint: "cargo run",
@@ -349,7 +352,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("includes prior findings when present", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a roguelike",
       verifyCommands: [],
       runCommandHint: "cargo run",
@@ -362,7 +365,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("includes the $GOAL_PASS/$GOAL_FAIL marker contract", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a roguelike",
       verifyCommands: [],
       runCommandHint: "cargo run",
@@ -376,7 +379,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("instructs the reviewer to emit $REPLAN when the PLAN was structurally wrong (#65)", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a roguelike",
       verifyCommands: [],
       runCommandHint: "cargo run",
@@ -390,7 +393,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("instructs the reviewer how to emit $CORRECTIVE decomposition hints (#67)", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a roguelike",
       verifyCommands: [],
       runCommandHint: "cargo run",
@@ -404,7 +407,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("includes learnings when provided", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a roguelike",
       learnings: "the dev server panics without a TTY",
       verifyCommands: [],
@@ -418,7 +421,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("includes interaction hints when provided", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a roguelike",
       interactionHints: "Override document.pointerLockElement, then dispatch KeyboardEvent.",
       verifyCommands: [],
@@ -440,12 +443,12 @@ describe("buildGoalReviewPrompt", () => {
       completedGroups: [],
       priorFindings: [],
     };
-    const canvas = buildGoalReviewPrompt({ ...base, projectInterface: "canvas" });
+    const canvas = goalPrompt({ ...base, projectInterface: "canvas" });
     expect(canvas).toContain("Interaction guidance");
     expect(canvas).toContain("evaluate_script");
     expect(canvas).toContain("pointerLock");
 
-    const browser = buildGoalReviewPrompt({ ...base, projectInterface: "browser-ui" });
+    const browser = goalPrompt({ ...base, projectInterface: "browser-ui" });
     expect(browser).toContain("chrome-devtools_click");
     expect(browser).toMatch(/real input/i);
   });
@@ -459,13 +462,13 @@ describe("buildGoalReviewPrompt", () => {
       completedGroups: [],
       priorFindings: [],
     };
-    expect(buildGoalReviewPrompt(base)).not.toContain("Interaction guidance");
-    expect(buildGoalReviewPrompt({ ...base, projectInterface: "terminal" })).not.toContain("Interaction guidance");
-    expect(buildGoalReviewPrompt({ ...base, projectInterface: "none" })).not.toContain("Interaction guidance");
+    expect(goalPrompt(base)).not.toContain("Interaction guidance");
+    expect(goalPrompt({ ...base, projectInterface: "terminal" })).not.toContain("Interaction guidance");
+    expect(goalPrompt({ ...base, projectInterface: "none" })).not.toContain("Interaction guidance");
   });
 
   it("instructs the evaluator to judge against the goal, not ticket ACs", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a roguelike",
       verifyCommands: [],
       runCommandHint: "cargo run",
@@ -478,7 +481,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("instructs the evaluator to flag quality gaps, not correctness", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a roguelike",
       verifyCommands: [],
       runCommandHint: "cargo run",
@@ -492,7 +495,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("injects this group's deliverables so the reviewer knows what was in scope at this checkpoint", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a retro-neon browser snake with gliding movement",
       verifyCommands: ["npm run build"],
       runCommandHint: "npm run preview",
@@ -509,7 +512,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("tells the reviewer that features not in this group's deliverables are out of scope (not yet built)", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a retro-neon browser snake",
       verifyCommands: [],
       runCommandHint: "npm run preview",
@@ -524,7 +527,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("omits the deliverables block when not provided (backward compat)", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a roguelike",
       verifyCommands: [],
       runCommandHint: "cargo run",
@@ -536,7 +539,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("injects pending deliverables at synthetic checkpoints so reviewer knows what's out of scope", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a platformer with particle trail and screen shake",
       verifyCommands: ["npm run build"],
       runCommandHint: "npm run preview",
@@ -553,7 +556,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("omits pending block when not provided (backward compat)", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a roguelike",
       verifyCommands: [],
       runCommandHint: "cargo run",
@@ -565,7 +568,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("injects the remaining groups ahead with their ticket titles (#117)", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a full interactive drawing studio",
       verifyCommands: ["npm run build"],
       runCommandHint: "npm run dev",
@@ -583,7 +586,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("tells the reviewer that a deferral to a group not listed is a gap (#117)", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a full interactive drawing studio",
       verifyCommands: ["npm run build"],
       runCommandHint: "npm run dev",
@@ -599,7 +602,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("omits the remaining-groups block when not provided (backward compat)", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a roguelike",
       verifyCommands: [],
       runCommandHint: "cargo run",
@@ -611,7 +614,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("frames the final group as a full-goal review, not a per-group deferral (#117)", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a full interactive drawing studio with tools, palette, layers, filmstrip, playback",
       verifyCommands: ["npm run build"],
       runCommandHint: "npm run dev",
@@ -632,7 +635,7 @@ describe("buildGoalReviewPrompt", () => {
   });
 
   it("omits the final-group block when not final (backward compat)", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a roguelike",
       verifyCommands: [],
       runCommandHint: "cargo run",
@@ -756,7 +759,7 @@ describe("goal-loop convergence guard (run-20260907-1340)", () => {
 
 describe("browser hygiene in goal review prompts (#72)", () => {
   it("tells the goal reviewer to close stale pages before evaluating the build", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "build a game",
       verifyCommands: ["true"],
       runCommandHint: "npm run dev",
@@ -769,7 +772,7 @@ describe("browser hygiene in goal review prompts (#72)", () => {
   });
 
   it("tells the goal reviewer to keep scratch files in .railhead/ not /tmp", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "build a game",
       verifyCommands: ["true"],
       runCommandHint: "npm run dev",
@@ -794,7 +797,7 @@ describe("buildGoalReviewPrompt — advisory variant (ADR 0029, #102)", () => {
   };
 
   it("frames the checkpoint as advisory see-early/steer-early, zero corrective tickets", () => {
-    const p = buildGoalReviewPrompt({ ...base, advisory: true });
+    const p = goalPrompt({ ...base, advisory: true });
     expect(p).toContain("ADVISORY checkpoint");
     expect(p).toMatch(/no corrective tickets/i);
     expect(p).toMatch(/run end|run-end batch/i);
@@ -802,7 +805,7 @@ describe("buildGoalReviewPrompt — advisory variant (ADR 0029, #102)", () => {
   });
 
   it("does not promise inline corrective tickets or teach $REPLAN/$CORRECTIVE at an advisory checkpoint", () => {
-    const p = buildGoalReviewPrompt({ ...base, advisory: true });
+    const p = goalPrompt({ ...base, advisory: true });
     expect(p).not.toContain("Corrective tickets will be generated for these");
     expect(p).not.toContain("## Replan signal");
     expect(p).not.toContain("$REPLAN");
@@ -814,13 +817,13 @@ describe("buildGoalReviewPrompt — advisory variant (ADR 0029, #102)", () => {
   });
 
   it("tells the advisory judge not to soften real blockers despite nothing being fixed now", () => {
-    const p = buildGoalReviewPrompt({ ...base, advisory: true });
+    const p = goalPrompt({ ...base, advisory: true });
     expect(p).toMatch(/do not soften a real blocker/i);
     expect(p).toMatch(/see it early/i);
   });
 
   it("default (non-advisory) keeps the corrective framing untouched", () => {
-    const p = buildGoalReviewPrompt(base);
+    const p = goalPrompt(base);
     expect(p).toContain("Corrective tickets will be generated for these");
     expect(p).toContain("## Replan signal");
     expect(p).toContain("$CORRECTIVE");
@@ -839,28 +842,28 @@ describe("buildGoalReviewPrompt — coherence charter (issue #99)", () => {
   };
 
   it("injects the coherence charter so the whole-app judge checks contract conformance", () => {
-    const p = buildGoalReviewPrompt({ ...base, coherenceDoc: charter });
+    const p = goalPrompt({ ...base, coherenceDoc: charter });
     expect(p).toContain("Coherence contract (the visual design contract the build must conform to)");
     expect(p).toContain("do not introduce a competing style");
     expect(p).toContain("docs/coherence.md");
   });
 
   it("instructs the reviewer to revise the charter via CHARTER: markers (with sequencing/precedence)", () => {
-    const p = buildGoalReviewPrompt({ ...base, coherenceDoc: charter });
+    const p = goalPrompt({ ...base, coherenceDoc: charter });
     expect(p).toContain("CHARTER:");
     expect(p).toContain("applies before corrective tickets are generated");
     expect(p).toContain("revision WINS");
   });
 
   it("omits both when the charter doc is absent", () => {
-    const p = buildGoalReviewPrompt(base);
+    const p = goalPrompt(base);
     expect(p).not.toContain("Coherence contract (the visual design contract");
   });
 });
 
 describe("goal vision capability injection (ADR 0036)", () => {
   it("names the verified capability so the seat cannot opt out of reading screenshots", () => {
-    const p = buildGoalReviewPrompt({
+    const p = goalPrompt({
       originalPrompt: "a game",
       verifyCommands: [],
       runCommandHint: "cargo run",

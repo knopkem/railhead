@@ -7,6 +7,15 @@ import {
 } from "./builder.ts";
 import { CHECKPOINT_START } from "../core/checkpoint.ts";
 import { LEARNED_MARKER, RETRACTED_MARKER } from "./learnings.ts";
+import { joinPhaseMessages, type PhaseMessages } from "./preamble.ts";
+
+/** The existing assertions cover the effective single-message prompt. The
+ * builder builders now return the two-part shape (#132); these wrappers join
+ * it so the long-standing content assertions keep evaluating exactly what the
+ * model receives. The split itself is asserted in prompt.test.ts. */
+const promptText = (m: PhaseMessages): string => joinPhaseMessages(m);
+const builderPrompt = (o: Parameters<typeof buildBuilderPrompt>[0]) => promptText(buildBuilderPrompt(o));
+const builderFindings = (o: Parameters<typeof buildBuilderFindingsPrompt>[0]) => promptText(buildBuilderFindingsPrompt(o));
 
 const ticket01: BuilderTicket = {
   file: "tickets/01-greet.md",
@@ -27,13 +36,68 @@ const ticket02: BuilderTicket = {
 
 const fresh = { session: {}, granularity: "ticket" as const, tickets: [ticket01], verify: ["npm test"] };
 
+describe("two-part builder prompts (#132 — canonical preamble + volatile task)", () => {
+  it("stable docs ride the preamble; tickets, contracts and learnings ride the task", () => {
+    const m = buildBuilderPrompt({
+      session: {},
+      granularity: "ticket",
+      tickets: [ticket01],
+      verify: ["npm test"],
+      contracts: "greet(name) -> string",
+      learnings: "the dev server needs a TTY",
+      designDoc: "Narrative: neon and gliding.",
+      architectureDoc: "Modules: grid, snake.",
+      charter: "Visual tokens: NEON from src/ui/tokens.ts.",
+    });
+    expect(m.preamble).toContain("Narrative: neon and gliding.");
+    expect(m.preamble).toContain("Modules: grid, snake.");
+    expect(m.preamble).toContain("Visual tokens: NEON from src/ui/tokens.ts.");
+    expect(m.preamble).not.toContain("Add a greet function");
+    expect(m.preamble).not.toContain("greet(name) -> string");
+    expect(m.preamble).not.toContain("the dev server needs a TTY");
+    expect(m.task).toContain("Add a greet function");
+    expect(m.task).toContain("greet(name) -> string");
+    expect(m.task).toContain("the dev server needs a TTY");
+    expect(m.task).not.toContain("Narrative: neon and gliding.");
+  });
+
+  it("findings resume keeps the same split", () => {
+    const m = buildBuilderFindingsPrompt({
+      session: { sessionId: "sess_abc", committedThrough: "01" },
+      granularity: "ticket",
+      tickets: [ticket02],
+      verify: ["npm test"],
+      feedback: { source: "verify", findings: ["Verification failed. Output:\nsrc/index.js:3 boom"] },
+      design: "Narrative: neon and gliding.",
+      coherence: "Visual tokens: NEON.",
+    });
+    expect(m.preamble).toContain("Narrative: neon and gliding.");
+    expect(m.preamble).toContain("Visual tokens: NEON.");
+    expect(m.preamble).not.toContain("boom");
+    expect(m.task).toContain("boom");
+    expect(m.task).toContain("Add a bye function");
+  });
+
+  it("a warm pointer resume carries no stable docs in the preamble (the session already holds them)", () => {
+    const m = buildBuilderPrompt({
+      session: { sessionId: "ses_x" },
+      granularity: "ticket",
+      tickets: [ticket01],
+      verify: ["npm test"],
+      contextPointers: { contracts: "railhead.contracts.json" },
+    });
+    expect(m.preamble).toBe("");
+    expect(m.task).toContain("Shared project state (on disk)");
+  });
+});
+
 describe("buildBuilderPrompt context economy (builder-seat dependency discipline)", () => {
   it("arms the seeded builder with memory-first API use and the compiler-as-oracle escalation ladder", () => {
     // The gap behind a live spiral: a builder seat spent 35 of 54 tool calls
     // grepping a dependency's installed source to pre-verify an API — the
     // implementer prompt forbids this, but the builder prompt never carried
     // the rule. The seeded session must hear it.
-    const p = buildBuilderPrompt(fresh);
+    const p = builderPrompt(fresh);
     expect(p).toContain("Context economy");
     expect(p).toContain("from memory");
     expect(p).toContain("compile error is a ~100-token oracle");
@@ -42,14 +106,14 @@ describe("buildBuilderPrompt context economy (builder-seat dependency discipline
   });
 
   it("does NOT repeat the block on a warm pointer resume (the session holds it from its seed — #106 dedup)", () => {
-    const p = buildBuilderPrompt({ ...fresh, session: { sessionId: "ses_x" }, contextPointers: { contracts: "railhead.contracts.json" } });
+    const p = builderPrompt({ ...fresh, session: { sessionId: "ses_x" }, contextPointers: { contracts: "railhead.contracts.json" } });
     expect(p).not.toContain("Context economy");
   });
 });
 
 describe("buildBuilderPrompt (issue #84)", () => {
   it("carries the ticket body, criteria, file, mission and the verify command into a fresh builder", () => {
-    const p = buildBuilderPrompt(fresh);
+    const p = builderPrompt(fresh);
     expect(p).toContain("tickets/01-greet.md");
     expect(p).toContain("Add a greet function that returns a greeting for a name.");
     expect(p).toContain("greet(name) returns `Hello, <name>!`");
@@ -58,7 +122,7 @@ describe("buildBuilderPrompt (issue #84)", () => {
   });
 
   it("is thin: names the durable-session contract but carries no implementer scaffolding", () => {
-    const p = buildBuilderPrompt(fresh);
+    const p = builderPrompt(fresh);
     expect(p).toContain("durable opencode session");
     // #75: the anti-pattern the builder must not grow — visual self-checking,
     // attempt-history, fresh-context warnings.
@@ -67,13 +131,13 @@ describe("buildBuilderPrompt (issue #84)", () => {
   });
 
   it("ends the current-ticket reply with the checkpoint marker grammar naming the ticket", () => {
-    const p = buildBuilderPrompt(fresh);
+    const p = builderPrompt(fresh);
     expect(p).toContain(`${CHECKPOINT_START} ticket=01`);
     expect(p).toContain("LAST line");
   });
 
   it("tells the builder to push reusable tooling facts via LEARNED lines BEFORE the checkpoint marker, and to retract falsified learnings (builder learnings push wiring)", () => {
-    const p = buildBuilderPrompt(fresh);
+    const p = builderPrompt(fresh);
     expect(p).toContain("Reusable tooling facts (push)");
     expect(p).toContain(`${LEARNED_MARKER} <one terse, self-contained fact>`);
     expect(p).toContain(`${RETRACTED_MARKER} <the prior learning text`);
@@ -86,13 +150,13 @@ describe("buildBuilderPrompt (issue #84)", () => {
 
   it("carries the learnings push directive into every granularity (the findings resume gets it too)", () => {
     for (const granularity of ["ticket", "group", "product"] as const) {
-      const p = buildBuilderPrompt({ session: {}, granularity, tickets: [ticket01, ticket02], verify: ["npm test"] });
+      const p = builderPrompt({ session: {}, granularity, tickets: [ticket01, ticket02], verify: ["npm test"] });
       expect(p).toContain(LEARNED_MARKER);
     }
   });
 
   it("states the commit continuity on a green-advance resume so the session does not redo committed work", () => {
-    const p = buildBuilderPrompt({
+    const p = builderPrompt({
       ...fresh,
       session: { sessionId: "sess_abc", committedThrough: "01", lastGreenCommit: "deadbeef1234" },
     });
@@ -102,12 +166,12 @@ describe("buildBuilderPrompt (issue #84)", () => {
   });
 
   it("states that no work is committed on a fresh or reseeded session", () => {
-    const p = buildBuilderPrompt(fresh);
+    const p = builderPrompt(fresh);
     expect(p).toContain("No tickets are committed yet");
   });
 
   it("injects rendered contracts, learnings and digest when supplied", () => {
-    const p = buildBuilderPrompt({
+    const p = builderPrompt({
       ...fresh,
       contracts: "greet(name) -> string",
       learnings: "screencapture -x gives raw PNG on macOS",
@@ -119,7 +183,7 @@ describe("buildBuilderPrompt (issue #84)", () => {
   });
 
   it("learnings injection tells the builder it may retract an injected learning it personally proved wrong", () => {
-    const p = buildBuilderPrompt({
+    const p = builderPrompt({
       ...fresh,
       learnings: "this project's dev server panics without a TTY",
     });
@@ -128,7 +192,7 @@ describe("buildBuilderPrompt (issue #84)", () => {
   });
 
   it("issue #106 (E): the builder's digest block carries the unverified-model-claim caveat every other seat's injection adds", () => {
-    const p = buildBuilderPrompt({
+    const p = builderPrompt({
       ...fresh,
       digest: "module map: src/\nrenderer owns the frame loop",
     });
@@ -140,7 +204,7 @@ describe("buildBuilderPrompt (issue #84)", () => {
   });
 
   it("issue #106 (A): a warm advance given contextPointers sends standing file pointers, not full content — and keeps the retraction grammar", () => {
-    const p = buildBuilderPrompt({
+    const p = builderPrompt({
       ...fresh,
       contextPointers: {
         contracts: "railhead.contracts.json",
@@ -166,7 +230,7 @@ describe("buildBuilderPrompt (issue #84)", () => {
     const group = checkpointDirective("group", [ticket01, ticket02]);
     expect(group).toContain("end of the whole group");
     expect(group).toContain("`01`");
-    const product = buildBuilderPrompt({
+    const product = builderPrompt({
       session: {},
       granularity: "product",
       tickets: [ticket01, ticket02],
@@ -190,7 +254,7 @@ describe("buildBuilderPrompt (issue #84)", () => {
   });
 
   it("gh #105: product prompts surface the current ticket only and say tickets arrive one at a time", () => {
-    const single = buildBuilderPrompt({
+    const single = builderPrompt({
       session: {},
       granularity: "product",
       tickets: [ticket01],
@@ -207,7 +271,7 @@ describe("buildBuilderPrompt (issue #84)", () => {
     expect(single).not.toMatch(/WITHOUT stopping between them/);
     expect(single).not.toMatch(/start the next ticket's work in your next message/);
 
-    const findings = buildBuilderFindingsPrompt({
+    const findings = builderFindings({
       session: { sessionId: "sess_abc", committedThrough: "01" },
       granularity: "product",
       tickets: [ticket02],
@@ -221,7 +285,7 @@ describe("buildBuilderPrompt (issue #84)", () => {
     expect(findings).toContain("surfaces tickets ONE AT A TIME");
   });
   it("injects the ticket's test-phase handoff into the prompt that first asks for it (issue #95)", () => {
-    const p = buildBuilderPrompt({
+    const p = builderPrompt({
       ...fresh,
       tickets: [
         {
@@ -236,7 +300,7 @@ describe("buildBuilderPrompt (issue #84)", () => {
   });
 
   it("omits the handoff block when the test phase produced none", () => {
-    const p = buildBuilderPrompt(fresh);
+    const p = builderPrompt(fresh);
     expect(p).not.toMatch(/TESTS FOR THIS TICKET/);
   });
 });
@@ -247,7 +311,7 @@ describe("buildBuilderFindingsPrompt (issue #84 — findings re-injection)", () 
       "[BLOCKER] greet() throws when the name contains leading whitespace",
       "[MAJOR] greet() mutates the input string",
     ];
-    const p = buildBuilderFindingsPrompt({
+    const p = builderFindings({
       session: { sessionId: "sess_abc", committedThrough: "01", lastGreenCommit: "deadbeef" },
       granularity: "ticket",
       tickets: [ticket01],
@@ -260,7 +324,7 @@ describe("buildBuilderFindingsPrompt (issue #84 — findings re-injection)", () 
   });
 
   it("carries the learnings push directive, so a gate-fix resume persists discoveries too", () => {
-    const p = buildBuilderFindingsPrompt({
+    const p = builderFindings({
       session: { sessionId: "sess_abc", committedThrough: "01" },
       granularity: "ticket",
       tickets: [ticket01],
@@ -273,7 +337,7 @@ describe("buildBuilderFindingsPrompt (issue #84 — findings re-injection)", () 
   });
 
   it("keeps the CURRENT ticket current — the builder does not advance until its gate is green", () => {
-    const p = buildBuilderFindingsPrompt({
+    const p = builderFindings({
       session: { sessionId: "sess_abc", committedThrough: "01" },
       granularity: "ticket",
       tickets: [ticket02],
@@ -291,32 +355,32 @@ describe("coherence charter in the builder (issue #99 / ADR 0028)", () => {
   const feedback = { source: "review", findings: ["[MAJOR] toolbar uses a competing recipe"] };
 
   it("injects the charter via contextBlocks when the invocation is surface (buildBuilderPrompt)", () => {
-    const p = buildBuilderPrompt({ ...fresh, charter });
+    const p = builderPrompt({ ...fresh, charter });
     expect(p).toContain("Coherence contract (visual design contract");
     expect(p).toContain("NEON palette");
     expect(p).toContain("do not introduce a competing style");
   });
 
   it("the builder charter block carries the re-read-after-compaction line that overrides the no-re-read rule", () => {
-    const p = buildBuilderPrompt({ ...fresh, charter });
+    const p = builderPrompt({ ...fresh, charter });
     expect(p).toMatch(/re-read docs\/coherence\.md.*after a compaction/i);
     expect(p).toContain('overrides the "do not re-read files you already hold" output rule');
   });
 
   it("omits the charter when none is supplied", () => {
-    const p = buildBuilderPrompt(fresh);
+    const p = builderPrompt(fresh);
     expect(p).not.toContain("Coherence contract (visual design contract");
   });
 
   it("buildBuilderFindingsPrompt carries the charter when the corrected ticket is surface", () => {
-    const p = buildBuilderFindingsPrompt({ ...fresh, feedback, coherence: charter });
+    const p = builderFindings({ ...fresh, feedback, coherence: charter });
     expect(p).toContain("Coherence contract (visual design contract");
     expect(p).toContain("NEON palette");
     expect(p).toContain("the fix is the argument");
   });
 
   it("buildBuilderFindingsPrompt omits the charter when the corrected ticket is not surface", () => {
-    const p = buildBuilderFindingsPrompt({ ...fresh, feedback });
+    const p = builderFindings({ ...fresh, feedback });
     expect(p).not.toContain("Coherence contract (visual design contract");
   });
 });
@@ -326,7 +390,7 @@ describe("design + architecture intent in the builder (issue #34 gap under sessi
   const architecture = "## Module map\nsrc/render owns the frame loop.";
 
   it("injects the planner's design vision and architecture map via contextBlocks on a full seed", () => {
-    const p = buildBuilderPrompt({ ...fresh, designDoc: design, architectureDoc: architecture });
+    const p = builderPrompt({ ...fresh, designDoc: design, architectureDoc: architecture });
     expect(p).toContain("Design intent (the planner's vision for this build)");
     expect(p).toContain("A crisp pixel-art descent with one palette.");
     expect(p).toContain("Architecture intent (the planner's structural plan)");
@@ -336,13 +400,13 @@ describe("design + architecture intent in the builder (issue #34 gap under sessi
   });
 
   it("omits the design narrative when the invocation is not surface, but keeps the architecture map", () => {
-    const p = buildBuilderPrompt({ ...fresh, architectureDoc: architecture });
+    const p = builderPrompt({ ...fresh, architectureDoc: architecture });
     expect(p).not.toContain("Design intent (the planner's vision for this build)");
     expect(p).toContain("Architecture intent (the planner's structural plan)");
   });
 
   it("carries design + architecture as standing pointers on a warm advance, not full content", () => {
-    const p = buildBuilderPrompt({
+    const p = builderPrompt({
       ...fresh,
       contextPointers: {
         contracts: "railhead.contracts.json",
@@ -358,7 +422,7 @@ describe("design + architecture intent in the builder (issue #34 gap under sessi
   });
 
   it("carries the design vision into the findings resume when the corrected ticket is surface", () => {
-    const p = buildBuilderFindingsPrompt({
+    const p = builderFindings({
       ...fresh,
       feedback: { source: "visual", findings: ["[BLOCKER] the scene does not match the intended identity"] },
       design,
@@ -368,7 +432,7 @@ describe("design + architecture intent in the builder (issue #34 gap under sessi
   });
 
   it("omits the design vision from the findings resume when none is supplied", () => {
-    const p = buildBuilderFindingsPrompt({
+    const p = builderFindings({
       ...fresh,
       feedback: { source: "review", findings: ["[MAJOR] duplicated helper"] },
     });
@@ -387,7 +451,7 @@ describe("open-ended craft ticket — the art agent", () => {
   };
 
   it("switches the directive to the screenshot-iteration craft loop, not checkpoint-on-green", () => {
-    const p = buildBuilderPrompt({ session: {}, granularity: "product", tickets: [artTicket], verify: ["npm test"] });
+    const p = builderPrompt({ session: {}, granularity: "product", tickets: [artTicket], verify: ["npm test"] });
     expect(p).toContain("OPEN-ENDED CRAFT ticket");
     expect(p).toMatch(/READ the screenshot back/i);
     expect(p).toMatch(/Keep iterating until the artifact is genuinely good/i);
@@ -395,19 +459,19 @@ describe("open-ended craft ticket — the art agent", () => {
   });
 
   it("relaxes the token-thrift output discipline for the craft ticket", () => {
-    const p = buildBuilderPrompt({ session: {}, granularity: "product", tickets: [artTicket], verify: ["npm test"] });
+    const p = builderPrompt({ session: {}, granularity: "product", tickets: [artTicket], verify: ["npm test"] });
     expect(p).not.toMatch(/Be terse/i);
     expect(p).toMatch(/token thrift does NOT apply/i);
   });
 
   it("keeps the ordinary discipline and checkpoint cadence for normal tickets", () => {
-    const p = buildBuilderPrompt(fresh);
+    const p = builderPrompt(fresh);
     expect(p).toMatch(/Be terse/i);
     expect(p).not.toContain("OPEN-ENDED CRAFT ticket");
   });
 
   it("carries the craft loop into the findings resume too", () => {
-    const p = buildBuilderFindingsPrompt({
+    const p = builderFindings({
       session: { sessionId: "sess_abc", committedThrough: "09" },
       granularity: "product",
       tickets: [artTicket],
@@ -421,7 +485,7 @@ describe("open-ended craft ticket — the art agent", () => {
 
 describe("builder vision capability injection (ADR 0036)", () => {
   it("carries the implementer self-check when surface work and a verified capability meet", () => {
-    const p = buildBuilderPrompt({
+    const p = builderPrompt({
       ...fresh,
       charter: "### Visual tokens\nUse TOKENS.",
       visionCapability: { readsImages: true, verifiedAt: "2026-01-01T00:00:00.000Z" },
@@ -431,7 +495,7 @@ describe("builder vision capability injection (ADR 0036)", () => {
   });
 
   it("omits the self-check without the charter (non-surface work)", () => {
-    const p = buildBuilderPrompt({
+    const p = builderPrompt({
       ...fresh,
       visionCapability: { readsImages: true, verifiedAt: "2026-01-01T00:00:00.000Z" },
     });

@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { joinPhaseMessages, type PhaseMessages } from "../context/preamble.ts";
+const promptText = (m: PhaseMessages): string => joinPhaseMessages(m);
+const structuralPrompt = (o: Parameters<typeof buildStructuralReviewPrompt>[0]): string => promptText(buildStructuralReviewPrompt(o));
 import { parseStructuralVerdict, buildStructuralReviewPrompt } from "./structural-review.ts";
 
 describe("parseStructuralVerdict (#49)", () => {
@@ -59,55 +62,55 @@ describe("buildStructuralReviewPrompt (#49)", () => {
   };
 
   it("includes the original prompt", () => {
-    const p = buildStructuralReviewPrompt({ ...baseOpts });
+    const p = structuralPrompt({ ...baseOpts });
     expect(p).toContain("build a greeting CLI");
   });
 
   it("includes the architecture doc when provided", () => {
-    const p = buildStructuralReviewPrompt({ ...baseOpts, architectureDoc: "Two modules: arg parsing and greeting" });
+    const p = structuralPrompt({ ...baseOpts, architectureDoc: "Two modules: arg parsing and greeting" });
     expect(p).toContain("Two modules: arg parsing and greeting");
   });
 
   it("omits the architecture doc block when null", () => {
-    const p = buildStructuralReviewPrompt({ ...baseOpts, architectureDoc: null });
+    const p = structuralPrompt({ ...baseOpts, architectureDoc: null });
     expect(p).not.toMatch(/Architecture intent/i);
   });
 
   it("includes the contracts summary when provided", () => {
-    const p = buildStructuralReviewPrompt({ ...baseOpts, contractsSummary: "formatGreeting() — formats a greeting string" });
+    const p = structuralPrompt({ ...baseOpts, contractsSummary: "formatGreeting() — formats a greeting string" });
     expect(p).toContain("formatGreeting()");
   });
 
   it("includes the $STRUCTURAL_PASS/$STRUCTURAL_FAIL marker contract", () => {
-    const p = buildStructuralReviewPrompt({ ...baseOpts });
+    const p = structuralPrompt({ ...baseOpts });
     expect(p).toContain("$STRUCTURAL_PASS");
     expect(p).toContain("$STRUCTURAL_FAIL");
   });
 
   it("instructs the reviewer to flag only structural drift, not compile failures or behavior gaps", () => {
-    const p = buildStructuralReviewPrompt({ ...baseOpts });
+    const p = structuralPrompt({ ...baseOpts });
     expect(p).toMatch(/structural.*drift|architectural.*drift/i);
     expect(p).toMatch(/not.*compile|not.*build.*failure|verify owns that/i);
     expect(p).toMatch(/not.*behavior.*gap|goal review owns/i);
   });
 
   it("instructs the reviewer to read the accumulated source as a corpus", () => {
-    const p = buildStructuralReviewPrompt({ ...baseOpts });
+    const p = structuralPrompt({ ...baseOpts });
     expect(p).toMatch(/read.*source|read.*files|file-read|corpus/i);
   });
 
   it("includes the group name", () => {
-    const p = buildStructuralReviewPrompt({ ...baseOpts });
+    const p = structuralPrompt({ ...baseOpts });
     expect(p).toContain("core-engine");
   });
 
   it("includes prior findings when present", () => {
-    const p = buildStructuralReviewPrompt({ ...baseOpts, priorFindings: ["[BLOCKER] earlier drift in utils.ts"] });
+    const p = structuralPrompt({ ...baseOpts, priorFindings: ["[BLOCKER] earlier drift in utils.ts"] });
     expect(p).toContain("earlier drift in utils.ts");
   });
 
   it("notes this is the intended consumer of the strong-model tier (ADR 0015)", () => {
-    const p = buildStructuralReviewPrompt({ ...baseOpts });
+    const p = structuralPrompt({ ...baseOpts });
     expect(p).toMatch(/strong.*model|oversight/i);
   });
 });

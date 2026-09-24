@@ -1,5 +1,17 @@
 import { describe, it, expect } from "vitest";
 import { buildImplementerPrompt, buildReviewerPrompt, buildReviewerReadModePrompt, buildTestPhasePrompt, buildContractExtractFilePrompt } from "./prompt.ts";
+import { joinPhaseMessages, type PhaseMessages } from "./preamble.ts";
+
+/** The existing assertions cover the effective single-message prompt. Phase
+ * builders now return the two-part shape (#132); these wrappers join it so the
+ * long-standing content assertions keep evaluating exactly what the model
+ * receives. The split itself is asserted separately below. */
+const promptText = (m: PhaseMessages): string => joinPhaseMessages(m);
+const implementerText = async (o: Parameters<typeof buildImplementerPrompt>[0]) => promptText(await buildImplementerPrompt(o));
+const testPhaseText = async (o: Parameters<typeof buildTestPhasePrompt>[0]) => promptText(await buildTestPhasePrompt(o));
+const reviewerText = async (o: Parameters<typeof buildReviewerPrompt>[0]) => promptText(await buildReviewerPrompt(o));
+const readModeText = async (o: Parameters<typeof buildReviewerReadModePrompt>[0]) => promptText(await buildReviewerReadModePrompt(o));
+const fileContractsText = (file: string, content: string) => promptText(buildContractExtractFilePrompt(file, content));
 import { LEARNED_MARKER } from "./learnings.ts";
 import { HANDOFF_START, HANDOFF_END } from "./handoff.ts";
 
@@ -7,7 +19,7 @@ const tmp = "/tmp";
 
 describe("buildImplementerPrompt", () => {
   it("instructs terse, unattended output without dropping the DONE marker", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -22,7 +34,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("instructs build-early discipline (#dependency-burn)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -36,7 +48,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("warns against reading dependency source caches (#dependency-burn)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -51,7 +63,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("places the LEARNED: marker instruction BEFORE the DONE terminator (ADR 0013 — push wiring fix)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -68,7 +80,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("on a review retry, includes the prior diff and tells the implementer to PATCH not rewrite", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -89,7 +101,7 @@ describe("buildImplementerPrompt", () => {
     // implementer crashed mid-write) yields an empty diff. The prompt must
     // NOT claim the work is "already on disk" in that case — the implementer
     // would believe it is patching when there is nothing to patch.
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -105,7 +117,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("instructs the implementer to emit a $HANDOFF block on failure (#9 — push handoff)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -122,7 +134,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("places the $HANDOFF instruction BEFORE the DONE terminator", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -140,7 +152,7 @@ describe("buildImplementerPrompt", () => {
 
   it("injects prevHandoff in place of priorDiff when a handoff was captured (#9)", async () => {
     const handoff = "tried adding the Bevy plugin to the app builder\nfailed because the plugin expects a RenderApp that isn't set up yet\ntry setting up the RenderApp phase first, then add the plugin";
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -160,7 +172,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("falls back to the raw priorDiff when no prevHandoff was captured (push-failed / review-retry)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -178,7 +190,7 @@ describe("buildImplementerPrompt", () => {
 
   it("injects prevHandoff as test-phase guidance on the first attempt when prevFeedback is null (#5)", async () => {
     const handoff = "src/greet.test.ts: asserts greet('a') returns 'hello a'; failing because greet is not yet defined";
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -196,7 +208,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("never instructs the implementer to self-check visually — even when the build has visual criteria (#75)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -213,7 +225,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("includes project learnings when provided", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -229,7 +241,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("warns that learnings are unverified model-claims and capability claims must be tested before deferring", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -245,7 +257,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("omits the learnings block when learnings are null or absent", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -259,7 +271,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("injects the diagnosing-bugs discipline when fixMode is true (#6)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-fix-bug.md",
       mission: "fix the paddle bug",
@@ -282,7 +294,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("omits the diagnosing-bugs discipline when fixMode is false/absent (#6)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -296,7 +308,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("includes tool-output scoping discipline (#8)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -312,7 +324,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("includes the lazy-ladder discipline block (#32)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -332,7 +344,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("includes the safety carve-out in the lazy-ladder (#32)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -348,7 +360,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("places the lazy-ladder AFTER fresh-context block and BEFORE tool-output discipline (#32)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -365,8 +377,8 @@ describe("buildImplementerPrompt", () => {
     expect(toolIdx).toBeGreaterThan(ladderIdx);
   });
 
-  it("places stable instructions BEFORE volatile per-ticket content (#33 — prefix cache)", async () => {
-    const p = await buildImplementerPrompt({
+  it("places the canonical preamble BEFORE volatile per-ticket content (#132 — message-boundary prefix cache)", async () => {
+    const m = await buildImplementerPrompt({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -375,21 +387,26 @@ describe("buildImplementerPrompt", () => {
       verify: ["npm test"],
       prevFeedback: null,
     });
-    const stableTerseIdx = p.indexOf("Terse output");
-    const stableAgentsIdx = p.indexOf("Project agent guidance");
-    const volatileTicketIdx = p.indexOf("TICKET FILE:");
-    const volatileBodyIdx = p.indexOf("do the work");
-    const volatileCriteriaIdx = p.indexOf("ACCEPTANCE CRITERIA:");
-
+    // The stable project context is message 1 (the preamble) and is byte-
+    // identical across attempts; every volatile byte lives in message 2.
+    expect(m.preamble).toContain("Project agent guidance");
+    expect(m.preamble).toContain("MISSION: a build");
+    expect(m.preamble).not.toContain("Terse output");
+    expect(m.preamble).not.toContain("do the work");
+    expect(m.preamble).not.toContain("ACCEPTANCE CRITERIA:");
+    expect(m.task).not.toContain("Project agent guidance");
+    const volatileTicketIdx = m.task.indexOf("TICKET FILE:");
+    const volatileBodyIdx = m.task.indexOf("do the work");
+    const volatileCriteriaIdx = m.task.indexOf("ACCEPTANCE CRITERIA:");
+    const stableTerseIdx = m.task.indexOf("Terse output");
     expect(stableTerseIdx).toBeGreaterThan(-1);
-    expect(stableAgentsIdx).toBeGreaterThan(stableTerseIdx);
-    expect(volatileTicketIdx).toBeGreaterThan(stableAgentsIdx);
+    expect(volatileTicketIdx).toBeGreaterThan(stableTerseIdx);
     expect(volatileBodyIdx).toBeGreaterThan(volatileTicketIdx);
     expect(volatileCriteriaIdx).toBeGreaterThan(volatileBodyIdx);
   });
 
   it("places retry-only content (feedback, handoff) AFTER all stable and ticket blocks (#33)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -409,7 +426,7 @@ describe("buildImplementerPrompt", () => {
       { attempt: 1, findings: ["[BLOCKER] missing null check"] },
       { attempt: 2, findings: ["[BLOCKER] missing null check", "[MAJOR] wrong return type"] },
     ];
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -428,7 +445,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("omits the attempt-history block when attemptHistory is empty or absent (#16)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -441,7 +458,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("attempt-history block appears after criteria but in the retry-only tail (#16, #33)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -457,7 +474,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("attempt-history records the approach summary from the handoff when available (#16)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -472,7 +489,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("escalates reviewer verbosity on attempt 3+ (#16)", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -485,7 +502,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("does not escalate reviewer verbosity on attempt 1 or 2 (#16)", async () => {
-    const p1 = await buildReviewerPrompt({
+    const p1 = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -494,7 +511,7 @@ describe("buildImplementerPrompt", () => {
     });
     expect(p1).not.toContain("attempt 3+");
 
-    const p2 = await buildReviewerPrompt({
+    const p2 = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -505,7 +522,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("escalates reviewer verbosity in read-mode too (#16)", async () => {
-    const p = await buildReviewerReadModePrompt({
+    const p = await readModeText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -518,7 +535,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("places contracts and learnings AFTER stable instructions but BEFORE ticket content (#33)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -543,7 +560,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("injects design and architecture docs when provided (#34)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a roguelike",
@@ -561,7 +578,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("omits design and architecture blocks when docs are null/absent (#34)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -575,7 +592,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("requires a RED/GREEN evidence block in the report when testable is true (#45)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -594,7 +611,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("omits the RED/GREEN evidence block when testable is false (#45)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-config.md",
       mission: "a build",
@@ -609,7 +626,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("omits the RED/GREEN evidence block when testable is absent (#45)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -623,7 +640,7 @@ describe("buildImplementerPrompt", () => {
   });
 
   it("places the RED/GREEN evidence instruction BEFORE the DONE terminator (#45)", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -643,7 +660,7 @@ describe("buildImplementerPrompt", () => {
 
 describe("buildReviewerPrompt", () => {
   it("judges repo-wide criteria from the diff alone (the seat has no search or command tools)", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["grep finds no hex color literals outside src/ui/theme.rs"],
@@ -656,7 +673,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("treats ACs that name a third-party artifact as unverified plan claims: judge capability, never double-down on the name", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -669,7 +686,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("instructs terse output with the exact markers", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -682,7 +699,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("requires every [BLOCKER] to name a diff location and warns an unanchored one is treated as [MAJOR] (#94)", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -694,7 +711,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("asks the reviewer to recheck prior blocking findings", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -707,7 +724,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("sorts findings into must-fix vs nits", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -722,7 +739,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("tells the reviewer not to raise test quality as a blocking finding", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -733,7 +750,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("includes the contracts slice so the reviewer can check signatures against real ground truth", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -752,7 +769,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("omits the contracts block entirely when no contracts are given", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -767,7 +784,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("includes project learnings when provided", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -780,7 +797,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("omits the learnings block when learnings are null or absent", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -790,7 +807,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("forbids reporting compile/build/typecheck failures since the railhead runs verify (#1)", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -801,7 +818,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("tells the reviewer to ignore tool-generated artifacts and judge only source code", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -812,7 +829,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("checks for leftover [DEBUG-...] logs when fixMode is true (#6)", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-fix.md",
       ticketBody: "fix the bug",
       criteria: ["c1"],
@@ -825,7 +842,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("does not check for debug logs when fixMode is false/absent (#6)", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -836,7 +853,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("includes the 7 Fowler code smells as a positive checklist (#10)", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -854,7 +871,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("issue #71: tells the reviewer smells never block on their own — NITS unless they risk correctness", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -867,7 +884,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("issue #71: NITS bucket is advisory (reported), not 'never report these'", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -878,7 +895,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("does not include the 5 deferred smells in the prompt (#10)", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -892,7 +909,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("includes the necessity review block (does this code need to exist?) (#40)", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -906,7 +923,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("injects pre-review lint findings when provided (#41)", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -919,7 +936,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("omits the lint block when no lint output is provided (#41)", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -929,7 +946,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("omits the lint block when lint output is empty string (#41)", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -940,7 +957,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("instructs the reviewer to treat missing red/green evidence as a finding when testable is true (#45)", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -952,7 +969,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("omits the red/green evidence check when testable is false (#45)", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-config.md",
       ticketBody: "tweak a config file",
       criteria: ["config has the new key"],
@@ -963,7 +980,7 @@ describe("buildReviewerPrompt", () => {
   });
 
   it("omits the red/green evidence check when testable is absent (#45)", async () => {
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -974,7 +991,7 @@ describe("buildReviewerPrompt", () => {
 
   it("hands the diff as a file path + stat instead of inlining the body when diffFile is set (#46)", async () => {
     const diff = "diff --git a/src/index.ts b/src/index.ts\n+export const x = 1;";
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -990,7 +1007,7 @@ describe("buildReviewerPrompt", () => {
 
   it("inlines the diff body when diffFile is absent (#46 — back-compat)", async () => {
     const diff = "diff --git a/src/index.ts b/src/index.ts\n+export const x = 1;";
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -1002,7 +1019,7 @@ describe("buildReviewerPrompt", () => {
 
   it("inlines the diff body when diffFile is set but empty (#46 — graceful)", async () => {
     const diff = "diff --git a/src/index.ts b/src/index.ts\n+export const x = 1;";
-    const p = await buildReviewerPrompt({
+    const p = await reviewerText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -1030,74 +1047,74 @@ describe("buildTestPhasePrompt", () => {
   };
 
   it("emits the $HANDOFF block instruction the implementer receives as prevHandoff", async () => {
-    const p = await buildTestPhasePrompt(baseArgs);
+    const p = await testPhaseText(baseArgs);
     expect(p).toContain(HANDOFF_START);
     expect(p).toContain(HANDOFF_END);
     expect(p).toMatch(/what the tests assert/i);
   });
 
   it("writes ONE test per criterion, not an exhaustive spec — anti-horizontal-slicing", async () => {
-    const p = await buildTestPhasePrompt(baseArgs);
+    const p = await testPhaseText(baseArgs);
     expect(p).toMatch(/one test per criterion/i);
   });
 
   it("forbids the three anti-patterns (implementation-coupled, tautological, horizontal)", async () => {
-    const p = await buildTestPhasePrompt(baseArgs);
+    const p = await testPhaseText(baseArgs);
     expect(p).toMatch(/implementation-coupled/i);
     expect(p).toMatch(/tautological/i);
     expect(p).toMatch(/horizontal/i);
   });
 
   it("names the seams the tests must target", async () => {
-    const p = await buildTestPhasePrompt(baseArgs);
+    const p = await testPhaseText(baseArgs);
     expect(p).toContain("src/index.ts:greet");
   });
 
   it("instructs the test author to run the tests and confirm failure for the right reason", async () => {
-    const p = await buildTestPhasePrompt(baseArgs);
+    const p = await testPhaseText(baseArgs);
     expect(p).toMatch(/run.*tests/i);
     expect(p).toMatch(/fail.{0,30}right reason/i);
   });
 
   it("forbids tautological tests that pass before implementation", async () => {
-    const p = await buildTestPhasePrompt(baseArgs);
+    const p = await testPhaseText(baseArgs);
     expect(p).toMatch(/passes before implementation.*tautological/i);
   });
 
   it("does NOT inherit the implementer's contracts block or prior-diff scaffolding (narrow prompt)", async () => {
-    const p = await buildTestPhasePrompt(baseArgs);
+    const p = await testPhaseText(baseArgs);
     expect(p).not.toMatch(/PATCH, do NOT rewrite/);
     expect(p).not.toMatch(/previous attempt's working diff/);
   });
 
   it("instructs the test author to bail out when the seam does not exist yet", async () => {
-    const p = await buildTestPhasePrompt(baseArgs);
+    const p = await testPhaseText(baseArgs);
     expect(p).toMatch(/seam does not exist/i);
     expect(p).toMatch(/\$HANDOFF NONE/);
     expect(p).toMatch(/do not invent types/i);
   });
 
   it("injects the context budget so the test author self-paces reads (issue: test phase compacted 9x catting whole files)", async () => {
-    const p = await buildTestPhasePrompt({ ...baseArgs, contextBudget: 65000 });
+    const p = await testPhaseText({ ...baseArgs, contextBudget: 65000 });
     expect(p).toMatch(/65k tokens/);
     expect(p).toMatch(/small-context/i);
   });
 
   it("instructs targeted reads over whole-file cats — the failure that burned 22 compactions in test phases", async () => {
-    const p = await buildTestPhasePrompt({ ...baseArgs, contextBudget: 65000 });
+    const p = await testPhaseText({ ...baseArgs, contextBudget: 65000 });
     expect(p).toMatch(/do not read entire large files/i);
     expect(p).toMatch(/targeted reads|grep/);
   });
 
   it("omits the budget line when contextBudget is not provided (back-compat)", async () => {
-    const p = await buildTestPhasePrompt(baseArgs);
+    const p = await testPhaseText(baseArgs);
     expect(p).not.toMatch(/context window is budgeted/);
   });
 });
 
 describe("buildReviewerReadModePrompt", () => {
   it("judges repo-wide criteria from the listed files alone (no search or command tools in read-mode either)", async () => {
-    const p = await buildReviewerReadModePrompt({
+    const p = await readModeText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["grep finds no hex color literals outside src/ui/theme.rs"],
@@ -1110,7 +1127,7 @@ describe("buildReviewerReadModePrompt", () => {
   });
 
   it("instructs the reviewer to read the touched files", async () => {
-    const p = await buildReviewerReadModePrompt({
+    const p = await readModeText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -1123,7 +1140,7 @@ describe("buildReviewerReadModePrompt", () => {
   });
 
   it("includes the same output format markers ($BLOCKING, $NITS, $OK)", async () => {
-    const p = await buildReviewerReadModePrompt({
+    const p = await readModeText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -1136,7 +1153,7 @@ describe("buildReviewerReadModePrompt", () => {
   });
 
   it("requires every [BLOCKER] to name a reviewed file and warns an unanchored one is treated as [MAJOR] (#94)", async () => {
-    const p = await buildReviewerReadModePrompt({
+    const p = await readModeText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -1149,7 +1166,7 @@ describe("buildReviewerReadModePrompt", () => {
   });
 
   it("includes prior findings when provided", async () => {
-    const p = await buildReviewerReadModePrompt({
+    const p = await readModeText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -1162,7 +1179,7 @@ describe("buildReviewerReadModePrompt", () => {
   });
 
   it("includes contracts slice when provided", async () => {
-    const p = await buildReviewerReadModePrompt({
+    const p = await readModeText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -1178,7 +1195,7 @@ describe("buildReviewerReadModePrompt", () => {
   });
 
   it("includes learnings when provided", async () => {
-    const p = await buildReviewerReadModePrompt({
+    const p = await readModeText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -1191,7 +1208,7 @@ describe("buildReviewerReadModePrompt", () => {
   });
 
   it("tells the reviewer NOT to report compile failures (same as diff mode)", async () => {
-    const p = await buildReviewerReadModePrompt({
+    const p = await readModeText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -1202,7 +1219,7 @@ describe("buildReviewerReadModePrompt", () => {
   });
 
   it("lists multiple files for the reviewer to read", async () => {
-    const p = await buildReviewerReadModePrompt({
+    const p = await readModeText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -1216,7 +1233,7 @@ describe("buildReviewerReadModePrompt", () => {
 
   it("includes the diff stat overview", async () => {
     const stat = " src/index.ts | 3 +++\n 1 file changed, 3 insertions(+)";
-    const p = await buildReviewerReadModePrompt({
+    const p = await readModeText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -1227,7 +1244,7 @@ describe("buildReviewerReadModePrompt", () => {
   });
 
   it("checks for [DEBUG-...] logs when fixMode is true", async () => {
-    const p = await buildReviewerReadModePrompt({
+    const p = await readModeText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -1240,7 +1257,7 @@ describe("buildReviewerReadModePrompt", () => {
   });
 
   it("injects design and architecture docs when provided (#34)", async () => {
-    const p = await buildReviewerReadModePrompt({
+    const p = await readModeText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -1256,7 +1273,7 @@ describe("buildReviewerReadModePrompt", () => {
   });
 
   it("omits doc blocks when design/architecture are not provided (#34)", async () => {
-    const p = await buildReviewerReadModePrompt({
+    const p = await readModeText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -1268,7 +1285,7 @@ describe("buildReviewerReadModePrompt", () => {
   });
 
   it("instructs the reviewer to treat missing red/green evidence as a finding when testable is true (#45)", async () => {
-    const p = await buildReviewerReadModePrompt({
+    const p = await readModeText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -1281,7 +1298,7 @@ describe("buildReviewerReadModePrompt", () => {
   });
 
   it("omits the red/green evidence check when testable is false (#45)", async () => {
-    const p = await buildReviewerReadModePrompt({
+    const p = await readModeText({
       ticketFile: "01-config.md",
       ticketBody: "tweak a config file",
       criteria: ["config has the new key"],
@@ -1293,7 +1310,7 @@ describe("buildReviewerReadModePrompt", () => {
   });
 
   it("omits the red/green evidence check when testable is absent (#45)", async () => {
-    const p = await buildReviewerReadModePrompt({
+    const p = await readModeText({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
@@ -1306,26 +1323,26 @@ describe("buildReviewerReadModePrompt", () => {
 
 describe("buildContractExtractFilePrompt", () => {
   it("includes the file name in the prompt", () => {
-    const p = buildContractExtractFilePrompt("src/shader.wgsl", "fn vertex_shader() {}");
+    const p = fileContractsText("src/shader.wgsl", "fn vertex_shader() {}");
     expect(p).toContain("src/shader.wgsl");
   });
 
   it("includes the file content as SOURCE", () => {
     const content = "export function createPlayer() { return { x: 0, y: 0 }; }";
-    const p = buildContractExtractFilePrompt("src/player.ts", content);
+    const p = fileContractsText("src/player.ts", content);
     expect(p).toContain("SOURCE:");
     expect(p).toContain(content);
   });
 
   it("emits the $CONTRACTS block with the file path pre-filled in the example", () => {
-    const p = buildContractExtractFilePrompt("src/utils.ts", "export const PI = 3.14;");
+    const p = fileContractsText("src/utils.ts", "export const PI = 3.14;");
     expect(p).toContain("$CONTRACTS");
     expect(p).toContain("$END");
     expect(p).toContain('"file":"src/utils.ts"');
   });
 
   it("does NOT include a DIFF section (per-file, not per-diff #28)", () => {
-    const p = buildContractExtractFilePrompt("src/a.ts", "export const x = 1;");
+    const p = fileContractsText("src/a.ts", "export const x = 1;");
     expect(p).not.toContain("DIFF:");
   });
 });
@@ -1337,7 +1354,7 @@ describe("browser hygiene in implementer prompts (#72 → #75)", () => {
     // is the visual review phase's job (ADR 0011), in its own subprocess with
     // its own context budget. The hygiene/scraft blocks stay exported for
     // visual.ts and goal-review.ts, which still drive browsers.
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a game",
@@ -1356,7 +1373,7 @@ describe("coherence-charter injection (issue #99 / ADR 0028)", () => {
   const narrative = "A roguelike with oppressive atmosphere. Visual identity: desaturated palette.";
 
   async function implementer(opts: Record<string, unknown> = {}) {
-    return buildImplementerPrompt({
+    return promptText(await buildImplementerPrompt({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a roguelike",
@@ -1365,26 +1382,26 @@ describe("coherence-charter injection (issue #99 / ADR 0028)", () => {
       verify: [],
       prevFeedback: null,
       ...opts,
-    });
+    }));
   }
   async function reviewer(opts: Record<string, unknown> = {}) {
-    return buildReviewerPrompt({
+    return promptText(await buildReviewerPrompt({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
       diff: "diff --git a/src/a.ts b/src/a.ts\n+export const x = 1;",
       ...opts,
-    });
+    }));
   }
   async function readReviewer(opts: Record<string, unknown> = {}) {
-    return buildReviewerReadModePrompt({
+    return promptText(await buildReviewerReadModePrompt({
       ticketFile: "01-a.md",
       ticketBody: "work",
       criteria: ["c1"],
       stat: "1 file changed",
       files: ["src/a.ts"],
       ...opts,
-    });
+    }));
   }
 
   it("implementer: a SURFACE ticket gets the charter content + pointer; the design narrative stays available", async () => {
@@ -1449,7 +1466,7 @@ describe("coherence-charter injection (issue #99 / ADR 0028)", () => {
 
 describe("implementer vision capability injection (ADR 0036)", () => {
   it("gives a verified surface implementer the screenshot self-check", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -1465,7 +1482,7 @@ describe("implementer vision capability injection (ADR 0036)", () => {
   });
 
   it("omits the vision block on a non-surface ticket even when measured", async () => {
-    const p = await buildImplementerPrompt({
+    const p = await implementerText({
       cwd: tmp,
       ticketFile: "01-a.md",
       mission: "a build",
@@ -1477,5 +1494,115 @@ describe("implementer vision capability injection (ADR 0036)", () => {
       visionCapability: { readsImages: true, verifiedAt: "2026-01-01T00:00:00.000Z" },
     });
     expect(p).not.toContain("Vision capability (railhead-verified)");
+  });
+});
+
+describe("two-part phase prompts (#132 — canonical preamble + volatile task)", () => {
+  it("implementer: stable docs ride the preamble; ticket/feedback/diff ride the task", async () => {
+    const m = await buildImplementerPrompt({
+      cwd: tmp,
+      ticketFile: "07-paddle.md",
+      mission: "build a snake game",
+      ticketBody: "fix the paddle collision",
+      criteria: ["the ball bounces off the paddle"],
+      verify: ["npm test"],
+      prevFeedback: "[BLOCKER] the ball passes through the paddle",
+      priorDiff: "diff --git a/src/main.ts b/src/main.ts\n+const paddle = 1;",
+      designDoc: "Neon palette; the snake glides.",
+      architectureDoc: "Modules: grid, snake, renderer.",
+      coherenceDoc: "Visual tokens: NEON from src/ui/tokens.ts.",
+      surface: true,
+    });
+    expect(m.preamble).toContain("build a snake game");
+    expect(m.preamble).toContain("Neon palette; the snake glides.");
+    expect(m.preamble).toContain("Modules: grid, snake, renderer.");
+    expect(m.preamble).toContain("Visual tokens: NEON from src/ui/tokens.ts.");
+    expect(m.preamble).not.toContain("fix the paddle collision");
+    expect(m.preamble).not.toContain("the ball bounces off the paddle");
+    expect(m.preamble).not.toContain("[BLOCKER] the ball passes through the paddle");
+    expect(m.preamble).not.toContain("paddle = 1");
+    expect(m.task).toContain("fix the paddle collision");
+    expect(m.task).toContain("[BLOCKER] the ball passes through the paddle");
+    expect(m.task).toContain("paddle = 1");
+    expect(m.task).not.toContain("Neon palette; the snake glides.");
+  });
+
+  it("implementer: the preamble is byte-identical across attempts while the task changes", async () => {
+    const base = {
+      cwd: tmp,
+      ticketFile: "01-a.md",
+      mission: "a build",
+      ticketBody: "do the work",
+      criteria: ["c1"],
+      verify: ["npm test"],
+      designDoc: "Narrative",
+      surface: true,
+    };
+    const first = await buildImplementerPrompt({ ...base, prevFeedback: null });
+    const second = await buildImplementerPrompt({
+      ...base,
+      prevFeedback: "[MAJOR] edge case",
+      priorDiff: "diff --git a/x b/x\n+change",
+      attemptHistory: [{ attempt: 1, findings: ["[MAJOR] edge case"] }],
+    });
+    expect(second.preamble).toBe(first.preamble);
+    expect(second.task).not.toBe(first.task);
+  });
+
+  it("test phase: AGENTS.md/CONTEXT.md are the preamble; the ticket stays in the task", async () => {
+    const m = await buildTestPhasePrompt({
+      cwd: tmp,
+      ticketFile: "01-a.md",
+      ticketBody: "add greet",
+      criteria: ["greet returns a greeting"],
+      verify: ["npm test"],
+      seams: ["src/greet.ts"],
+    });
+    expect(m.preamble).toContain("Project agent guidance");
+    expect(m.preamble).toContain("Domain glossary");
+    expect(m.preamble).not.toContain("add greet");
+    expect(m.task).toContain("add greet");
+    expect(m.task).toContain("greet returns a greeting");
+    expect(m.task).not.toContain("Project agent guidance");
+  });
+
+  it("reviewer: stable docs ride the preamble; diff and findings ride the task", async () => {
+    const m = await buildReviewerPrompt({
+      ticketFile: "01-a.md",
+      ticketBody: "work",
+      criteria: ["c1"],
+      diff: "diff --git a/src/a.ts b/src/a.ts\n+export const x = 1;",
+      priorFindings: ["[MAJOR] missing null guard"],
+      designDoc: "Narrative",
+      architectureDoc: "Modules: a, b.",
+      coherenceDoc: "Visual tokens: NEON.",
+      surface: true,
+    });
+    expect(m.preamble).toContain("Narrative");
+    expect(m.preamble).toContain("Modules: a, b.");
+    expect(m.preamble).toContain("Visual tokens: NEON.");
+    expect(m.preamble).not.toContain("missing null guard");
+    expect(m.preamble).not.toContain("x = 1");
+    expect(m.task).toContain("missing null guard");
+    expect(m.task).toContain("x = 1");
+    expect(m.task).toContain("VERIFY CONFORMANCE");
+    expect(m.task).not.toContain("Visual tokens: NEON.");
+  });
+
+  it("reviewer: a NON-surface ticket's preamble carries neither narrative nor charter", async () => {
+    const m = await buildReviewerPrompt({
+      ticketFile: "01-a.md",
+      ticketBody: "work",
+      criteria: ["c1"],
+      diff: "diff",
+      designDoc: "Narrative",
+      coherenceDoc: "Visual tokens: NEON.",
+      architectureDoc: "Modules: a, b.",
+      surface: false,
+    });
+    expect(m.preamble).toContain("Modules: a, b.");
+    expect(m.preamble).not.toContain("Narrative");
+    expect(m.preamble).not.toContain("Visual tokens: NEON.");
+    expect(m.task).toContain("not classified as surface-scoped");
   });
 });

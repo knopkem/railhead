@@ -1,4 +1,5 @@
 import { buildReviewerPrompt, buildReviewerReadModePrompt } from "../context/prompt.ts";
+import { joinPhaseMessages, type PhaseMessages } from "../context/preamble.ts";
 import { describeExecFailure, executeOpendCode, isQuotaError } from "../execute/executor.ts";
 import { extractAssistantText } from "../core/ledger.ts";
 import type { ContractsIndex } from "../core/contracts.ts";
@@ -88,7 +89,10 @@ export interface ReviewAgentArgs {
   /** Progress-line label used in thrown transient errors (e.g. "goal review").
    * Not the executor's `livePrefix` — that stays on the live stream. */
   label: string;
-  prompt: string;
+  /** The phase prompt: a plain string for the seats that have no canonical
+   * preamble, or the two-message shape (#132) that this runner joins at the
+   * current single-message wire boundary. */
+  prompt: string | PhaseMessages;
   cwd: string;
   ledgerDir: string;
   phaseFile: string;
@@ -136,7 +140,7 @@ export type ReviewAgentOutcome =
  *   run is never coerced into a pass.
  */
 export async function runReviewAgent(args: ReviewAgentArgs): Promise<ReviewAgentOutcome> {
-  const result = await executeOpendCode(args.prompt, {
+  const result = await executeOpendCode(typeof args.prompt === "string" ? args.prompt : joinPhaseMessages(args.prompt), {
     cwd: args.cwd,
     ledgerDir: args.ledgerDir,
     phaseFile: args.phaseFile,

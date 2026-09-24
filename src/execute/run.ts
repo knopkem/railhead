@@ -20,6 +20,7 @@ import { describeExecFailure, executeOpendCode, killActiveChild, withPersistentW
 import { withFailureLadder, withFailureLadderOnThrow, PhaseFailure, evidenceFromResult, SPIRAL_COMPACTION_THRESHOLD, type FailureEvidence } from "./failure-ladder.ts";
 import { setDependencySourceDeny } from "./guard.ts";
 import { buildImplementerPrompt, buildTestPhasePrompt, type AttemptRound } from "../context/prompt.ts";
+import { joinPhaseMessages } from "../context/preamble.ts";
 import { readVisionCapabilityFor } from "./vision-probe.ts";
 import { summarizeIfNeeded, writeRunSummary } from "../context/summary.ts";
 import { compressVerifyOutput } from "./output-compress.ts";
@@ -1956,7 +1957,7 @@ async function runTestPhase(
     contextBudget: contextBudget(state),
   });
 
-  const result = await executeOpendCode(prompt, {
+  const result = await executeOpendCode(joinPhaseMessages(prompt), {
     cwd: state.cwd,
     ledgerDir: ledger,
     phaseFile,
@@ -2299,7 +2300,7 @@ async function runBuilderStep(
           contextBudget: contextBudget(state),
           visionCapability: await readVisionCapabilityFor(state.cwd, state._models?.implement ?? null),
         });
-    const result = await executeOpendCode(prompt, {
+    const result = await executeOpendCode(joinPhaseMessages(prompt), {
       cwd: state.cwd,
       ledgerDir: ledger,
       phaseFile,
@@ -2645,7 +2646,7 @@ async function runImplement(
     visionCapability: await readVisionCapabilityFor(state.cwd, state._models?.implement ?? null),
   });
 
-  const result = await executeOpendCode(prompt, {
+  const result = await executeOpendCode(joinPhaseMessages(prompt), {
     cwd: state.cwd,
     ledgerDir: ledger,
     phaseFile,
