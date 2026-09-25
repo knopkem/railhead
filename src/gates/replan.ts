@@ -3,13 +3,12 @@ import { mkdir, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { parseReplanRequested } from "./goal-review.ts";
 import { nextTicketNumber, type RunTicket } from "./corrective.ts";
-import { parsePlanJson, reportConflicts, scanOrderedConflicts } from "../plan/plan.ts";
-import { orderTickets, collapseRepeatedTickets, TICKET_FIELD_SEMANTICS, type PlanTicket } from "../core/ticket-dag.ts";
-import { loadTickets, toTicketState, renderTicket, type Ticket } from "../core/ticket.ts";
-import { appendEvent, resetPhase, writeState, extractPlanText } from "../core/ledger.ts";
+import { parsePlanJson } from "../plan/plan.ts";
+import { numberTickets, toTicketState, renderTicket, type PlanTicket } from "../core/ticket.ts";
+import { resetPhase, writeState, extractPlanText } from "../core/ledger.ts";
 import { describeExecFailure, executeOpendCode } from "../execute/executor.ts";
 import { contextBudget } from "../config/config.ts";
-import { loadContracts, summarizeContracts, knownContractSymbols } from "../core/contracts.ts";
+import { loadContracts, summarizeContracts } from "../core/contracts.ts";
 import { readDigest } from "../context/digest.ts";
 import * as git from "../core/git.ts";
 import { nowClock } from "../cli/overview.ts";
@@ -115,7 +114,7 @@ ${originalPrompt}
 
 ${findingsBlock}
 
-## Current contracts index (ground truth — your revised tickets must reference these, not duplicate them)
+## Current contracts index (ground truth)
 
 ${contractsSummary || "(no contracts yet)"}
 ${digestBlock}
@@ -127,34 +126,16 @@ ${replaceSection}
 
 1. Read the findings carefully. They tell you WHY the original plan was wrong.
 2. Read the committed tickets. They are your fixed context — the new tickets must build on what exists, not re-do it.
-3. Read the contracts index. It is the ground-truth seam: your revised tickets must \`reference\` existing contracts, not re-declare them.
-4. Generate a NEW set of tickets to replace the uncommitted frontier. These tickets:
-   - Are numbered by the railhead — do NOT try to control their \`NN\` numbers; emit them in dependency order and let the railhead assign numbers.
-   - Have \`blocked_by\` following the field semantics below, with ONE replan-specific rule: your emitted array contains ONLY the new tickets, so a \`blocked_by\` value is a position in the array you emit, NOT an absolute ticket number like "06" — and Do NOT list committed tickets there. Committed work is already committed, so commit order already satisfies any reference to its contracts (the gate exempts them), and a committed ticket has no position in your emitted array.
+3. Generate a NEW set of tickets to replace the uncommitted frontier. These tickets:
+   - Are numbered by the railhead — do NOT try to control their \`NN\` numbers; emit them in the order they must run.
    - Account for the checkpoint findings — the structural flaw must be addressed by the revised plan, not ignored.
    - Must NOT duplicate work already committed.
-5. Emit the same output format as the original planner: $TICKETS JSON array with the same ticket schema (title, mission, what, criteria, blocked_by[], files[], references[], introduces[], testable, group).
-
-${TICKET_FIELD_SEMANTICS}
+4. Emit the same ticket shape as the original planner: each ticket has "title", "what" (the end-to-end behaviour, naming the files/modules it touches in prose), "criteria" (concrete checkable bullets), and optionally "group" / "open_ended". Tickets run STRICTLY in the order emitted: order the array so every prerequisite comes before the ticket that needs it.
 
 Do NOT emit $VERIFY, $SMOKE, $DESIGN, or $ARCHITECTURE blocks — those are already established from the original plan and committed work. Emit ONLY the $TICKETS block.
 
 $TICKETS
-[{"title":"...","mission":"the one-line goal of the whole build (the same on every ticket)","what":"...","criteria":["..."],"blocked_by":[],"files":["..."],"references":["..."],"introduces":["..."],"testable":true,"open_ended":false,"group":"..."}]`;
-}
-
-/** A replanned frontier's tickets must each carry the build's one-line mission
- * — plan.ts instructs the planner to stamp every ticket, so a single-ticket
- * worker sees where its work fits. The replan prompt's schema example omitted
- * the field, and the model followed the example: the platformer replan shipped
- * 15 missionless tickets, so from ticket 23 the builder was never re-given the
- * goal with its work. Backfill any blank mission from the run's existing one
- * (read from the committed tickets on disk). Pure; returns the input untouched
- * when no run mission is known. */
-export function backfillMission(tickets: PlanTicket[], mission: string): PlanTicket[] {
-  const m = mission.trim();
-  if (!m) return tickets;
-  return tickets.map((t) => (t.mission && t.mission.trim() ? t : { ...t, mission: m }));
+[{"title":"...","what":"...","criteria":["..."],"group":"...","open_ended":false}]`;
 }
 
 export function meldReplannedTickets(
@@ -167,102 +148,6 @@ export function meldReplannedTickets(
     ...state,
     tickets: [...preserved, ...newTickets],
   };
-}
-
-/** Translate a replan's ABSOLUTE-numbered `blocked_by` edges into the 0-based
- * array positions `orderTickets` expects. Only kicks in when the array actually
- * contains an absolute ticket number (a value at or past the array length that
- * maps into the new-ticket range `[startNumber, startNumber + n)`), so a
- * well-formed 0-based replan is returned unchanged and never reinterpreted.
- * Committed-ticket numbers are dropped: their work is committed, so commit
- * order already satisfies the reference (the gate exempts committed
- * introducers). Pure function. */
-export function normalizeReplanBlockedBy(
-  tickets: PlanTicket[],
-  startNumber: number,
-  committedNumbers: ReadonlySet<number>,
-): PlanTicket[] {
-  const n = tickets.length;
-  const usesAbsoluteNumbers = tickets.some((t) =>
-    t.blocked_by.some((b) => b >= n && b >= startNumber && b - startNumber < n),
-  );
-  if (!usesAbsoluteNumbers) return tickets;
-  return tickets.map((t) => ({
-    ...t,
-    blocked_by: t.blocked_by.flatMap((b) => {
-      if (committedNumbers.has(b)) return [];
-      const asAbsolute = b - startNumber;
-      if (asAbsolute >= 0 && asAbsolute < n) return [asAbsolute];
-      if (b >= 0 && b < n) return [b];
-      return [];
-    }),
-  }));
-}
-
-/** ADR 0045: `orderTickets` numbers a replan LOCALLY (01…, 02…) and returns
- * tickets whose `blocked_by` list those local file names. The run's frontier
- * uses global numbers (23…, 24…), so without this remap every dependency edge
- * in a regenerated frontier points at a file that does not exist — no ticket
- * is ever ready and the run stops as stuck (the platformer replan's exact
- * failure: ticket 24 blocked on "01-camera-…" while the file on disk was
- * "23-camera-…"). Returns the ordered tickets renumbered into the global
- * range, with `blocked_by` remapped to the global files. Pure. */
-export function globalizeReplanTickets(ordered: Ticket[], startNumber: number): Ticket[] {
-  const localToGlobal = new Map<string, string>();
-  ordered.forEach((t, i) => {
-    localToGlobal.set(t.file, `${String(startNumber + i).padStart(2, "0")}-${t.slug}.md`);
-  });
-  return ordered.map((t, i) => ({
-    ...t,
-    number: String(startNumber + i).padStart(2, "0"),
-    file: localToGlobal.get(t.file)!,
-    blocked_by: [...new Set(t.blocked_by.map((b) => localToGlobal.get(b) ?? b))],
-  }));
-}
-
-/** Order a replan's ticket array, tolerating the misreading that has actually
- * aborted runs: the planner treats `blocked_by` as ABSOLUTE ticket numbers
- * ("06", "07"…) because the prompt told it to continue the committed
- * numbering, while `orderTickets` reads 0-based array positions. A value past
- * the array length then throws and — before this guard — escaped
- * `replanFromCheckpoint` uncaught, killing the whole run at the checkpoint.
- *
- * On that throw, translate absolute numbers to array positions and retry once.
- * Any remaining ordering failure is logged and the replan skipped, never fatal:
- * a bad replan must degrade to "keep the current frontier", not crash the run.
- * Returns null when the plan cannot be ordered under either reading. */
-async function orderReplanTickets(
-  planTickets: PlanTicket[],
-  startNumber: number,
-  state: RunState,
-): Promise<Ticket[] | null> {
-  try {
-    return await orderTickets(planTickets);
-  } catch (err) {
-    const committedNumbers = new Set(
-      state.tickets
-        .filter((t) => t.status === "committed")
-        .map((t) => Number.parseInt(t.number, 10))
-        .filter((n) => Number.isFinite(n)),
-    );
-    const normalized = normalizeReplanBlockedBy(planTickets, startNumber, committedNumbers);
-    if (normalized === planTickets) {
-      console.log(`[${nowClock()}] replan: plan could not be ordered — ${describeOrderError(err)}; skipping`);
-      return null;
-    }
-    try {
-      const ordered = await orderTickets(normalized);
-      console.log(`[${nowClock()}] replan: translated absolute blocked_by ticket numbers to array positions`);
-      return ordered;
-    } catch (retryErr) {
-      console.log(`[${nowClock()}] replan: plan could not be ordered — ${describeOrderError(retryErr)}; skipping`);
-      return null;
-    }
-  }
-}
-
-function describeOrderError(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /** Run a checkpoint replan (issue #65 / #19): when the goal/structural
@@ -346,64 +231,32 @@ export async function replanFromCheckpoint(
   }
 
   const replanTranscript = await extractPlanText(ledger, phaseFile);
-  let planTickets: ReturnType<typeof parsePlanJson>;
+  let planTickets: PlanTicket[];
   try {
-    planTickets = parsePlanJson(replanTranscript);
+    planTickets = parsePlanJson(replanTranscript).tickets;
   } catch (err) {
     console.log(`[${nowClock()}] replan: failed to parse tickets: ${String(err)}; skipping`);
     return false;
-  }
-
-  // ADR 0035: the same repeat collapse the plan gate runs — a replanning model
-  // under checkpoint pressure double-emits tickets exactly like the planner,
-  // and the repeat's duplicate findings would discard the whole replan.
-  const collapsed = collapseRepeatedTickets(planTickets);
-  if (collapsed.dropped.length > 0) {
-    planTickets = collapsed.tickets;
-    console.log(`[${nowClock()}] replan: dropped ${collapsed.dropped.length} repeated ticket emission(s) (${collapsed.dropped.map((d) => `"${d.title}"`).join(", ")}) — identical to an earlier ticket (ADR 0035)`);
   }
 
   if (planTickets.length === 0) {
     console.log(`[${nowClock()}] replan: planner produced no tickets; skipping`);
     return false;
   }
-
-  // The replan model follows the prompt's example, which historically omitted
-  // `mission`; stamp the run's mission onto any ticket it left blank so the
-  // builder is never handed goal-less work (see backfillMission).
-  const existingTickets = await loadTickets(state.tickets_dir).catch(() => [] as Ticket[]);
-  const runMission = existingTickets.find((t) => t.mission.trim())?.mission ?? "";
-  planTickets = backfillMission(planTickets, runMission);
-
-  const startNumber = nextTicketNumber(state);
-  const ordered = await orderReplanTickets(planTickets, startNumber, state);
-  if (!ordered) return false;
-  // Issue #86: replan output is plan-time-shaped — it goes through the same
-  // gate escalation as any plan. Un-ruled class-A findings discard the replan
-  // (the defective ticket set must not replace the frontier); class-B prints.
-  // Issue #103: revised tickets legitimately reference committed contracts —
-  // the contracts index is that existing-symbol universe, so not dangling.
-  const replanConflicts = scanOrderedConflicts(
-    ordered,
-    { existingSymbols: knownContractSymbols(contracts) },
-  );
-  if (await reportConflicts(replanConflicts, { ledger, appendEvent })) {
-    console.log(`[${nowClock()}] replan: conflict scan found hard errors; skipping`);
-    return false;
-  }
-  const replanRuled = new Set((state.plan_rulings ?? []).map((r) => r.key));
-  const replanClassA = replanConflicts.classA.filter((f) => !replanRuled.has(f.key));
-  if (replanClassA.length > 0) {
-    console.log(`[${nowClock()}] replan: ${replanClassA.length} un-ruled class-A finding(s) — skipping (${replanClassA.map((f) => f.message).join("; ")})`);
+  const blank = planTickets.filter((t) => !t.what?.trim());
+  if (blank.length > 0) {
+    console.log(`[${nowClock()}] replan: ${blank.length} ticket(s) missing a "what" body — skipping`);
     return false;
   }
 
-  const globalized = globalizeReplanTickets(ordered, startNumber);
-  const newTicketStates: TicketState[] = globalized.map(toTicketState);
+  // Number the regenerated frontier into the run's global sequence. Tickets run
+  // strictly in array order, so no dependency remapping is needed.
+  const ordered = numberTickets(planTickets, nextTicketNumber(state));
+  const newTicketStates: TicketState[] = ordered.map(toTicketState);
 
   await mkdir(state.tickets_dir, { recursive: true });
-  for (let i = 0; i < globalized.length; i++) {
-    await writeFile(join(state.tickets_dir, newTicketStates[i].file), renderTicket(globalized[i]), "utf8");
+  for (let i = 0; i < ordered.length; i++) {
+    await writeFile(join(state.tickets_dir, newTicketStates[i].file), renderTicket(ordered[i]), "utf8");
   }
 
   const oldUncommittedFiles = state.tickets

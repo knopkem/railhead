@@ -1,5 +1,8 @@
 # Visual final review via a self-capturing vision-model agent
 
+> Amended by ADR 0048: corrective tickets carry no `blocked_by`; they are
+> inserted immediately before the remaining planned frontier and run inline.
+
 ## Context
 
 Per-ticket review (ADR 0005) is diff-based: the reviewer reads the working diff and judges it against the ticket's criteria. That covers correctness gaps a model can see in source — but it cannot validate runtime or visual criteria: "the snake renders without ghosting", "the menu opens on click", "the chart draws axes". These only manifest when the app actually runs. The snake-again run (24 Aug 2026) shipped a classic ghosting bug (missing alternate-screen buffer) that passed text review because the diff looked correct; the ticket even said "no ghosting occurs" as a criterion, but no automated check enforced it.

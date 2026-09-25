@@ -10,7 +10,8 @@ import { touchesVisualSurface } from "../context/surface.ts";
 import { pushLearnings, readLearnings } from "../context/learnings.ts";
 import { pushDigest, readDigest } from "../context/digest.ts";
 import { applyCharterRevisions, parseCharterRevisions } from "../context/coherence.ts";
-import { buildGoalReviewPrompt, parseCorrectiveTickets, parseGoalVerdict, findingsEchoLastRound, remainingPlanGroups, splitAnchoredBlockers } from "./goal-review.ts";
+import { buildGoalReviewPrompt, parseCorrectiveTickets, parseGoalVerdict, parseProbeBlock, dropClosedFindings, findingsEchoLastRound, remainingPlanGroups, splitAnchoredBlockers } from "./goal-review.ts";
+import { materializeProbeScripts, probesForGroup, registerProbes, runRegisteredProbes } from "../core/probes.ts";
 import { processCorrectiveFindings, type RunTicket } from "./corrective.ts";
 import { replanFromCheckpoint, drainFrontier } from "./replan.ts";
 import { loadContracts, summarizeContracts } from "../core/contracts.ts";
@@ -200,7 +201,7 @@ export async function runGoalReview(
 
   console.log(`\n[${nowClock()}] goal review — ${seat}`);
 
-  const mission = allTickets[0]?.mission ?? "(no mission declared)";
+  const mission = state.original_prompt ?? "(no mission declared)";
   const runHint = runCommandFromVerify(state.config.verify, allTickets);
 
   const designDoc = await git.readProjectDoc(state.cwd, "docs/design.md");
@@ -252,13 +253,25 @@ export async function runGoalReview(
   const pendingOwnsLifecycle = pending.some(ownsLifecycle);
   const committedOwnsLifecycle = allTickets.some((t) => committedFiles.has(t.file) && ownsLifecycle(t));
   const coreLoopReady = opts?.runEnd === true || isFinalGroup || (committedOwnsLifecycle && !pendingOwnsLifecycle);
-  const pendingFiles = new Set(pending.flatMap((t) => t.files));
 
   // ADR 0040: criteria the builder recorded as unverified ride into every
   // goal checkpoint as explicit must-check items.
   const unverifiedCriteria = state.tickets
     .filter((t) => t.status === "committed" && (t.unverified?.length ?? 0) > 0)
     .flatMap((t) => (t.unverified ?? []).map((u) => `${t.number} ${t.title}: ${u}`));
+
+  // v2 issue 01: a re-review of this checkpoint first re-verifies ONLY the
+  // previously open blockers via the probe registry (deterministic command +
+  // predicate), then expands. The results ride the prompt so the seat judges
+  // recorded evidence instead of re-probing the same findings by hand; a PASS
+  // closes the behavior and must not be re-found.
+  const registered = probesForGroup(state, group);
+  const probeResults = registered.length > 0
+    ? await runRegisteredProbes(state.cwd, registered, { timeoutSec: state.config.verify_timeout_sec ?? 300 })
+    : [];
+  for (const r of probeResults) {
+    console.log(`[${nowClock()}] goal review: probe ${r.status.toUpperCase()} — ${r.entry.behavior}`);
+  }
 
   const prompt = buildGoalReviewPrompt({
     originalPrompt: state.original_prompt ?? mission,
@@ -282,6 +295,9 @@ export async function runGoalReview(
     unverifiedCriteria: unverifiedCriteria.length > 0 ? unverifiedCriteria : undefined,
     coreLoopReady,
     advisory,
+    registeredProbes: probeResults.length > 0
+      ? probeResults.map((r) => ({ behavior: r.entry.behavior, command: r.entry.command, expect: r.entry.expect, status: r.status, output: r.output }))
+      : undefined,
     visionCapability: await readVisionCapabilityFor(state.cwd, state._models?.goal ?? null),
   });
 
@@ -340,6 +356,16 @@ export async function runGoalReview(
 
   const transcript = agentOutcome.transcript;
   await pushLearnings(state, ledger, phaseFile);
+  // v2 issue 01: register the round's behavior probes so a later round re-runs
+  // them deterministically instead of re-deriving the same blockers.
+  const probeRecipes = parseProbeBlock(transcript);
+  if (probeRecipes && probeRecipes.length > 0) {
+    const added = registerProbes(state, group, probeRecipes);
+    if (added.length > 0) {
+      await materializeProbeScripts(state.cwd, added);
+      console.log(`[${nowClock()}] goal review: registered ${added.length} behavior probe(s) for checkpoint "${group}"`);
+    }
+  }
   // ADR 0018: the goal reviewer's architectural-state DIGEST: lines ride out
   // too (structural-loop already pushes its own seat's); a goal checkpoint is
   // exactly when a module shape milestone lands.
@@ -360,6 +386,18 @@ export async function runGoalReview(
   }
 
   let verdict = parseGoalVerdict(transcript);
+  // v2 issue 01: a behavior a registered probe just proved closed must not be
+  // re-found. Drop those findings before recording; a fail whose findings were
+  // all closed is an ordinary pass (the probe is the evidence).
+  const closedBehaviors = probeResults.filter((r) => r.status === "pass").map((r) => r.entry.behavior);
+  const closed = dropClosedFindings(verdict.findings, closedBehaviors);
+  if (closed.dropped.length > 0) {
+    console.log(`[${nowClock()}] goal review: ${closed.dropped.length} finding(s) already proven closed by a registered probe — not re-found`);
+    verdict = { ...verdict, findings: closed.findings };
+    if (verdict.verdict === "fail" && verdict.findings.length === 0) {
+      verdict = { verdict: "pass", findings: [] };
+    }
+  }
   // Issue #97: the goal gate absorbs the ADR 0009 downgrade, keyed to the
   // declared interface. A PASS whose phase ledger shows no real user-level
   // operation (a browser-ui reviewer that drove everything through synthetic
@@ -414,7 +452,6 @@ export async function runGoalReview(
   // stays in the review record (steering) but generates no ticket.
   const anchored = splitAnchoredBlockers(verdict.findings, {
     exists: (rel) => existsSync(join(state.cwd, rel)),
-    pendingFiles,
   });
   for (const u of anchored.unanchored) {
     console.log(`[${nowClock()}] goal review: [BLOCKER] typed steering-only — ${u.reason}`);
@@ -431,8 +468,6 @@ export async function runGoalReview(
   const outcome = await processCorrectiveFindings(state, ledger, anchored.findings, {
     kind: "goal",
     label: `goal review (checkpoint "${group}")`,
-    mission,
-    blockUncommitted: true,
     suggested: suggested ?? undefined,
     runTicket,
     beforeCorrectives: async () => {

@@ -1,7 +1,6 @@
 import { writeFile, readFile } from "node:fs/promises";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Ruling } from "../core/ticket-dag.ts";
 
 export interface PlanOrigin {
   slug: string;
@@ -11,85 +10,9 @@ export interface PlanOrigin {
 }
 
 const ORIGIN_FILE = "origin.json";
-/** Issue #86: plan-time adjudications live beside origin.json so every run on
- * this plan directory can load them (a run-time re-scan must be able to see a
- * plan-time ruling, or every legitimately-ruled finding becomes a false
- * "railhead defect" abort). Run-scoped rulings NEVER write back here — they
- * reference corrective tickets that only exist in that run's graph — with one
- * deliberate exception: a corrective auto-ruling accompanies a corrective
- * ticket FILE that is itself appended to the plan directory, so it becomes
- * plan-scoped the moment its file does. `appendPlanRulings` writes exactly
- * that case; every other runtime ruling stays run-scoped. */
-const RULINGS_FILE = "rulings.json";
 
 export async function writePlanOrigin(dir: string, origin: PlanOrigin): Promise<void> {
   await writeFile(join(dir, ORIGIN_FILE), JSON.stringify(origin, null, 2) + "\n", "utf8");
-}
-
-/** Persist the plan's adjudicated rulings next to its origin marker. */
-export async function writePlanRulings(dir: string, rulings: Ruling[]): Promise<void> {
-  await writeFile(join(dir, RULINGS_FILE), JSON.stringify(rulings, null, 2) + "\n", "utf8");
-}
-
-/** Append corrective auto-rulings to the plan sidecar, deduping by key. A
- * corrective ticket file is persisted to the plan directory, so its ruling
- * must persist beside it — otherwise a fresh `railhead run` re-scans that file
- * and re-fires a class-A pair the prior run already adjudicated (#86). */
-export async function appendPlanRulings(dir: string, rulings: Ruling[]): Promise<void> {
-  const existing = await readPlanRulings(dir);
-  const seen = new Set(existing.map((r) => r.key));
-  const merged = [...existing];
-  for (const r of rulings) {
-    if (seen.has(r.key)) continue;
-    seen.add(r.key);
-    merged.push(r);
-  }
-  await writePlanRulings(dir, merged);
-}
-
-/** Read the plan's adjudicated rulings. Returns [] when the file is absent (a
- * plan from before issue #86 has no rulings file). Throws on malformed JSON —
- * mirroring readPlanOrigin: a corrupt plan artifact must be surfaced, not
- * silently treated as empty (which would re-gate a clean plan). */
-export async function readPlanRulings(dir: string): Promise<Ruling[]> {
-  let raw: string;
-  try {
-    raw = await readFile(join(dir, RULINGS_FILE), "utf8");
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw new Error(`failed to read plan rulings file at ${join(dir, RULINGS_FILE)}: ${(err as Error).message}`);
-    }
-    return [];
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error(`plan rulings file at ${join(dir, RULINGS_FILE)} is not valid JSON — the plan directory may be corrupted`);
-  }
-  if (!Array.isArray(parsed)) {
-    throw new Error(`plan rulings file at ${join(dir, RULINGS_FILE)} is not a JSON array — the plan directory may be corrupted`);
-  }
-  const rulings: Ruling[] = [];
-  for (const item of parsed as unknown[]) {
-    const r = item as Record<string, unknown>;
-    if (
-      typeof r?.key !== "string" ||
-      typeof r?.reason !== "string" ||
-      typeof r?.source !== "string" ||
-      !Array.isArray(r?.tickets)
-    ) {
-      throw new Error(`plan rulings file at ${join(dir, RULINGS_FILE)} contains a malformed ruling — the plan directory may be corrupted`);
-    }
-    rulings.push({
-      key: r.key,
-      finding: typeof r.finding === "string" ? r.finding : "",
-      reason: r.reason,
-      source: r.source as Ruling["source"],
-      tickets: (r.tickets as unknown[]).filter((f): f is string => typeof f === "string"),
-    });
-  }
-  return rulings;
 }
 
 export async function readPlanOrigin(dir: string): Promise<PlanOrigin | null> {

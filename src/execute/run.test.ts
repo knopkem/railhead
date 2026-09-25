@@ -28,8 +28,22 @@ vi.mock("./executor.ts", async (importOriginal) => {
     executeOpendCode,
     // The real `executeFreshPhase` closes over the module-internal runner, so
     // routing it through the same mock is what keeps every phase invocation
-    // in this suite from spawning a real opencode process.
-    executeFreshPhase: vi.fn((prompt: string, options: Parameters<typeof executeOpendCode>[1]) => executeOpendCode(prompt, options)),
+    // in this suite from spawning a real opencode process. A mocked builder
+    // phase that exits ok carries no checkpointTicket field; derive it from
+    // the phase file (NN-NN-build) so legacy tests that script only work and
+    // a DONE marker still reach the checkpoint the run loop asked for. Tests
+    // that script a missing/wrong marker set checkpointTicket explicitly.
+    executeFreshPhase: vi.fn(async (prompt: string, options: Parameters<typeof executeOpendCode>[1]) => {
+      const r = await executeOpendCode(prompt, options);
+      if (r && r.status === "ok" && /-build$/.test(options.phaseFile) && r.checkpointTicket === undefined && !r.block) {
+        // Legacy tests script only work + DONE; give the mocked builder the
+        // checkpoint the run loop asked for and a durable session handle, so
+        // the second attempt's gate feedback rides the in-session findings
+        // prompt exactly as it does in production.
+        return { ...r, checkpointTicket: options.phaseFile.slice(0, 2), sessionId: r.sessionId ?? "sess-mock" };
+      }
+      return r;
+    }),
     startPersistentWorker: vi.fn(),
     stopPersistentWorker: vi.fn(),
   };
@@ -81,7 +95,7 @@ function okResult(steps = 1, toolCalls = 1) {
 }
 
 /** Identify which kind of phase a mocked executeOpendCode call represents, purely from the options run.ts passes — mirrors how a human reading the ledger would tell them apart. */
-function kindOf(options: { phaseFile: string; agent?: string | null }): "base" | "review" | "contracts" | "implement" | "visual" | "test" | "goal" | "structural" | "replan" | "reconcile" {
+function kindOf(options: { phaseFile: string; agent?: string | null }): "base" | "review" | "contracts" | "implement" | "visual" | "test" | "goal" | "structural" | "replan" | "reconcile" | "interact" {
   // Issue #133: the base-session call is not a ticket phase — classify it so
   // scripted mocks keyed on phase kind never treat it as implement/review.
   if (options.agent === "railhead-base" || options.phaseFile === "base-session") return "base";
@@ -89,6 +103,7 @@ function kindOf(options: { phaseFile: string; agent?: string | null }): "base" |
   if (options.phaseFile.includes("-contracts")) return "contracts";
   if (options.phaseFile.endsWith("-visual") || options.phaseFile.startsWith("visual-")) return "visual";
   if (options.phaseFile.endsWith("-test")) return "test";
+  if (options.phaseFile.endsWith("-interact")) return "interact";
   if (options.phaseFile.startsWith("goal-")) return "goal";
   if (options.phaseFile.startsWith("structural-")) return "structural";
   if (options.phaseFile.startsWith("replan-")) return "replan";
@@ -101,15 +116,7 @@ function baseConfig(overrides: Partial<RailheadConfig> = {}): RailheadConfig {
     ...DEFAULT_CONFIG,
     verify: ["true"],
     infra_backoff_sec: [],
-    // Existing tests exercise the implement/verify/review/contracts flows,
-    // not the TDD test phase (#5). Default it off here; the test-phase-
-    // specific tests below opt in explicitly.
-    test_phase: false,
     persistent_worker: false,
-    // Existing tests drive the ADR 0001 fresh-subprocess implement engine.
-    // DEFAULT_CONFIG now flips session_builder on (#83); pin it back off here —
-    // the session-builder tests below opt in explicitly.
-    session_builder: false,
     // The per-ticket review tests exercise the working-diff gate, so default
     // code review to per-ticket `full` (issue #73); the cadence-specific
     // tests below override code_review.mode explicitly.
@@ -125,14 +132,8 @@ async function makeTicket(ticketsDir: string, over: Partial<Ticket> = {}): Promi
     slug: "add-greet",
     title: "Add greet",
     what: "export a greet function",
-    mission: "a greetable CLI",
-    blocked_by: [],
     criteria: ["exports greet"],
-    files: ["src/index.js"],
-    references: [],
-    introduces: ["greet"],
-    ...over,
-  };
+    ...over};
   await writeTickets(ticketsDir, [ticket]);
   return { ticket, state: toTicketState(ticket) };
 }
@@ -180,9 +181,7 @@ describe("assembleBranch", () => {
 
 describe("nextTicketNumber", () => {
   const t = (number: string): TicketState => ({ ...toTicketState({
-    file: `${number}-x.md`, number, slug: "x", title: "x", what: "x", mission: "",
-    blocked_by: [], criteria: [], files: [], references: [], introduces: [],
-  }) });
+    file: `${number}-x.md`, number, slug: "x", title: "x", what: "x", criteria: []}) });
 
   it("returns 1 for an empty ticket list", () => {
     expect(nextTicketNumber({ tickets: [] } as unknown as RunState)).toBe(1);
@@ -293,9 +292,7 @@ describe("processTicket", () => {
     const ledgerDir = join(cwd, ".railhead", "run-test");
     await initLedger(ledgerDir);
     const config = baseConfig();
-    const { state: ticketState } = await makeTicket(ticketsDir, {
-      files: ["src/index.ts"],
-    });
+    const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
 
@@ -388,155 +385,6 @@ describe("processTicket", () => {
     expect(ticketState.attempts).toBe(2);
     expect(ticketState.status).toBe("committed");
     expect(ticketState.logs.some((l) => /verify .*FAILED/.test(l))).toBe(true);
-  });
-
-  it("captures a $HANDOFF from a failed attempt and passes it forward to the next implementer (#9)", async () => {
-    // The failing implementer emits a $HANDOFF block in its wrap-up. The
-    // railhead parses it (readHandoffMarker) and passes it as prevHandoff to
-    // the next attempt's prompt. The next attempt's prompt must contain the
-    // handoff text and must NOT contain the raw prior diff (the handoff
-    // substitutes for it — priorDiff is the bloat the handoff sheds).
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig({ verify: [`test -f ${join(cwd, "marker.txt")}`] });
-    const { state: ticketState } = await makeTicket(ticketsDir);
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    const handoffBody = [
-      "tried adding the Bevy plugin to the app builder",
-      "failed because the plugin expects a RenderApp that isn't set up yet",
-      "try setting up the RenderApp phase first, then add the plugin",
-    ].join("\n");
-    const handoffBlock = `$HANDOFF\n${handoffBody}\n$END`;
-
-    let implementCalls = 0;
-    const prompts: string[] = [];
-    mockExec.mockImplementation(async (prompt, options) => {
-      const kind = kindOf(options);
-      if (kind === "implement") {
-        implementCalls++;
-        prompts.push(prompt);
-        await writeImplementedFile(cwd, `export function greet(n){return n;} // attempt ${implementCalls}\n`);
-        if (implementCalls >= 2) await writeFile(join(cwd, "marker.txt"), "ready\n", "utf8");
-        // Attempt 1 emits the handoff (it knows it's likely failing — verify
-        // gate is a marker file it didn't create); attempt 2 just succeeds.
-        const text = implementCalls === 1 ? `${handoffBlock}\nDONE` : "DONE";
-        await emitText(ledgerDir, options.phaseFile, text);
-      } else if (kind === "review") {
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("ok");
-    expect(ticketState.attempts).toBe(2);
-    // The handoff was captured and logged.
-    expect(ticketState.logs.some((l) => /handoff captured/.test(l))).toBe(true);
-    // The second implement attempt's prompt contains the distilled handoff
-    // and the marker the implementer was instructed to emit.
-    expect(prompts).toHaveLength(2);
-    expect(prompts[1]).toContain("Handoff from the previous attempt");
-    expect(prompts[1]).toContain(handoffBody);
-  });
-
-  it("falls back to the raw priorDiff path when the failing attempt emitted no $HANDOFF (#9 push-fallback)", async () => {
-    // When push fails (the model emitted no $HANDOFF block), the railhead must
-    // fall back to the existing priorDiff path. This test exercises the
-    // review-retry path where patching=true and no handoff was captured, so
-    // the next attempt's prompt contains the PATCH instruction and the raw
-    // diff — the pre-#9 behavior is preserved when push yields nothing.
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig();
-    const { state: ticketState } = await makeTicket(ticketsDir);
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    let reviewCalls = 0;
-    const prompts: string[] = [];
-    mockExec.mockImplementation(async (prompt, options) => {
-      const kind = kindOf(options);
-      if (kind === "implement") {
-        prompts.push(prompt);
-        await writeImplementedFile(cwd, 'export function greet(n){return n;} // patching\n');
-        // No $HANDOFF emitted — the model didn't know it was failing (review
-        // hadn't happened yet). Push yields nothing.
-        await emitText(ledgerDir, options.phaseFile, "DONE");
-      } else if (kind === "review") {
-        reviewCalls++;
-        const text = reviewCalls === 1
-          ? "$BLOCKING\n[BLOCKER] missing edge case\n$NITS\nNONE\n$OK\nneeds fix"
-          : "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good";
-        await emitText(ledgerDir, options.phaseFile, text);
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("ok");
-    expect(ticketState.attempts).toBe(2);
-    expect(prompts).toHaveLength(2);
-    // No handoff was captured, so the second attempt falls back to the
-    // PATCH + priorDiff path (the pre-#9 behavior).
-    expect(prompts[1]).toContain("PATCH, do NOT rewrite");
-    expect(prompts[1]).not.toContain("Handoff from the previous attempt");
-  });
-
-  it("a review BLOCKER retries with the worktree preserved (patching), then passes", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig();
-    const { state: ticketState } = await makeTicket(ticketsDir);
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    let reviewCalls = 0;
-    let fileExistedOnSecondImplement: boolean | null = null;
-    mockExec.mockImplementation(async (_prompt, options) => {
-      const kind = kindOf(options);
-      if (kind === "implement") {
-        if (reviewCalls >= 1) {
-          // A BLOCKER already fired once: patching means the worktree must
-          // NOT have been wiped between attempts (ADR: reviews feed the
-          // retry loop, the prior work is patched, not regenerated).
-          fileExistedOnSecondImplement = existsSync(join(cwd, "src", "index.js"));
-        }
-        await writeImplementedFile(cwd);
-        await emitText(ledgerDir, options.phaseFile, "DONE");
-      } else if (kind === "review") {
-        reviewCalls++;
-        const text = reviewCalls === 1
-          ? "$BLOCKING\n[BLOCKER] src/index.js: missing edge case\n$NITS\nNONE\n$OK\nneeds fix"
-          : "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good";
-        await emitText(ledgerDir, options.phaseFile, text);
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("ok");
-    expect(fileExistedOnSecondImplement).toBe(true);
-    expect(ticketState.status).toBe("committed");
-    expect(ticketState.reviews).toHaveLength(2);
-    expect(ticketState.reviews[0]).toMatchObject({ blocking: true, findings: ["[BLOCKER] src/index.js: missing edge case"] });
-    expect(ticketState.reviews[1]).toMatchObject({ blocking: false });
   });
 
   it("soft-passes at the attempt cap when only a repeating MAJOR finding remains", async () => {
@@ -812,262 +660,6 @@ describe("processTicket", () => {
     const visualCalls = mockExec.mock.calls.filter(([, o]) => kindOf(o!) === "visual");
     expect(visualCalls).toHaveLength(0);
   });
-
-  it("per-ticket visual: skipped (no visual call) when the ticket is testable:false, even with visual criteria (#36)", async () => {
-    // A corrective ticket generated by an earlier visual review: testable:false,
-    // criteria containing "run the app" (matches VISUAL_CRITERIA_RE). #36 makes
-    // the testable:false gate short-circuit before the regex check, so no
-    // recursive visual review spawns.
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig({
-      visual_review: { mode: "full" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "vision-model", visual: DEFAULT_MODEL, goal: null, extract: null },
-    });
-    const { state: ticketState } = await makeTicket(ticketsDir, {
-      testable: false,
-      criteria: ["Run the app and confirm the finding no longer reproduces", "Existing verify commands still pass"],
-    });
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    mockExec.mockImplementation(async (_prompt, options) => {
-      const kind = kindOf(options);
-      if (kind === "implement") {
-        await writeImplementedFile(cwd);
-        await emitText(ledgerDir, options.phaseFile, "DONE");
-      } else if (kind === "review") {
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("ok");
-    expect(ticketState.status).toBe("committed");
-    const visualCalls = mockExec.mock.calls.filter(([, o]) => kindOf(o!) === "visual");
-    expect(visualCalls).toHaveLength(0);
-  });
-});
-
-describe("processTicket — TDD test phase (#5)", () => {
-  it("runs the test phase before implement when test_phase is enabled and the ticket is testable", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig({ test_phase: true });
-    const { state: ticketState } = await makeTicket(ticketsDir, { testable: true });
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    const testHandoffBody = "src/greet.test.ts: asserts greet('a') returns 'hello a'; failing because greet is not yet defined";
-    const testHandoffBlock = `$HANDOFF\n${testHandoffBody}\n$END`;
-
-    const prompts: string[] = [];
-    mockExec.mockImplementation(async (prompt, options) => {
-      const kind = kindOf(options);
-      prompts.push(prompt);
-      if (kind === "test") {
-        await emitText(ledgerDir, options.phaseFile, `${testHandoffBlock}\nDONE src/greet.test.ts`);
-      } else if (kind === "implement") {
-        await writeImplementedFile(cwd);
-        await emitText(ledgerDir, options.phaseFile, "DONE src/index.js");
-      } else if (kind === "review") {
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("ok");
-    expect(ticketState.status).toBe("committed");
-    // The test phase ran and captured a handoff.
-    expect(ticketState.logs.some((l) => /test .*handoff captured/.test(l))).toBe(true);
-    // The implementer's prompt contains the test handoff (as prevHandoff).
-    const implPrompt = prompts.find((p) => p.includes("You are the Implementer"));
-    expect(implPrompt).toBeDefined();
-    expect(implPrompt).toContain(testHandoffBody);
-    expect(implPrompt).toContain("Handoff from the previous test phase");
-  });
-
-  it("preserves test files written by the test phase across the first implement attempt (cleanWorktree must not delete them)", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig({ test_phase: true });
-    const { state: ticketState } = await makeTicket(ticketsDir, { testable: true });
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    const testHandoffBlock = "$HANDOFF\ntests/greet.test.ts: asserts greet('a') returns 'hello a'\n$END";
-
-    mockExec.mockImplementation(async (_prompt, options) => {
-      const kind = kindOf(options);
-      if (kind === "test") {
-        // The test phase writes a test file to disk (as an untracked file)
-        await mkdir(join(cwd, "tests"), { recursive: true }).catch(() => {});
-        await writeFile(join(cwd, "tests", "greet.test.ts"), "test content\n", "utf8");
-        await emitText(ledgerDir, options.phaseFile, `${testHandoffBlock}\nDONE tests/greet.test.ts`);
-      } else if (kind === "implement") {
-        await writeImplementedFile(cwd);
-        await emitText(ledgerDir, options.phaseFile, "DONE src/index.js");
-      } else if (kind === "review") {
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("ok");
-    // The test file the test phase wrote must still exist when the implementer
-    // ran — cleanWorktree must not have deleted it.
-    expect(existsSync(join(cwd, "tests", "greet.test.ts"))).toBe(true);
-  });
-
-  it("skips the test phase when test_phase is disabled", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig({ test_phase: false });
-    const { state: ticketState } = await makeTicket(ticketsDir, { testable: true });
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    mockExec.mockImplementation(async (_prompt, options) => {
-      const kind = kindOf(options);
-      if (kind === "implement") {
-        await writeImplementedFile(cwd);
-        await emitText(ledgerDir, options.phaseFile, "DONE src/index.js");
-      } else if (kind === "review") {
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("ok");
-    // No test phase ran.
-    const testCalls = mockExec.mock.calls.filter(([, o]) => kindOf(o!) === "test");
-    expect(testCalls).toHaveLength(0);
-    expect(ticketState.logs.some((l) => /test /.test(l))).toBe(false);
-  });
-
-  it("skips the test phase when the ticket is not testable (pure-config/manifest ticket)", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig({ test_phase: true });
-    const { state: ticketState } = await makeTicket(ticketsDir, { testable: false });
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    mockExec.mockImplementation(async (_prompt, options) => {
-      const kind = kindOf(options);
-      if (kind === "implement") {
-        await writeImplementedFile(cwd);
-        await emitText(ledgerDir, options.phaseFile, "DONE src/index.js");
-      } else if (kind === "review") {
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("ok");
-    const testCalls = mockExec.mock.calls.filter(([, o]) => kindOf(o!) === "test");
-    expect(testCalls).toHaveLength(0);
-  });
-
-  it("cleans test files when the test phase bailed out ($HANDOFF NONE — seam doesn't exist yet)", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig({ test_phase: true });
-    const { state: ticketState } = await makeTicket(ticketsDir, { testable: true });
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    mockExec.mockImplementation(async (_prompt, options) => {
-      const kind = kindOf(options);
-      if (kind === "test") {
-        // The test phase wrote a broken test file then bailed out.
-        await mkdir(join(cwd, "tests"), { recursive: true }).catch(() => {});
-        await writeFile(join(cwd, "tests", "broken.test.ts"), "broken\n", "utf8");
-        await emitText(ledgerDir, options.phaseFile, "$HANDOFF\nNONE\n$END\nDONE");
-      } else if (kind === "implement") {
-        await writeImplementedFile(cwd);
-        await emitText(ledgerDir, options.phaseFile, "DONE src/index.js");
-      } else if (kind === "review") {
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("ok");
-    // The broken test file must be cleaned before the implementer ran —
-    // cleanWorktree deleted it because patching=false (no handoff).
-    expect(existsSync(join(cwd, "tests", "broken.test.ts"))).toBe(false);
-  });
-
-  it("cleans test files when the test phase crashed (budget exceeded)", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig({ test_phase: true });
-    const { state: ticketState } = await makeTicket(ticketsDir, { testable: true });
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    mockExec.mockImplementation(async (_prompt, options) => {
-      const kind = kindOf(options);
-      if (kind === "test") {
-        // Test phase wrote a file but crashed (budget exceeded).
-        await mkdir(join(cwd, "tests"), { recursive: true }).catch(() => {});
-        await writeFile(join(cwd, "tests", "broken.test.ts"), "broken\n", "utf8");
-        return { status: "budget_exceeded" as const, code: null, signal: null as null, errorMessage: null, durationMs: 1, steps: 50, peakTokens: 0, inFlightTokens: 0, estimateDriftTokens: 0, totalOutputTokens: 0, generationMs: 0, toolCalls: 0 };
-      } else if (kind === "implement") {
-        await writeImplementedFile(cwd);
-        await emitText(ledgerDir, options.phaseFile, "DONE src/index.js");
-      } else if (kind === "review") {
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("ok");
-    expect(existsSync(join(cwd, "tests", "broken.test.ts"))).toBe(false);
-  });
 });
 
 describe("runLoop", () => {
@@ -1080,14 +672,12 @@ describe("runLoop", () => {
 
     const first: Ticket = {
       file: "01-scaffold.md", number: "01", slug: "scaffold", title: "Scaffold",
-      what: "set up the project", mission: "a greetable CLI", blocked_by: [],
-      criteria: ["exists"], files: ["src/index.js"], references: [], introduces: ["greet"],
-    };
+      what: "set up the project",
+      criteria: ["exists"]};
     const second: Ticket = {
       file: "02-use-greet.md", number: "02", slug: "use-greet", title: "Use greet",
-      what: "call greet from main", mission: "a greetable CLI", blocked_by: ["01-scaffold.md"],
-      criteria: ["calls greet"], files: ["src/main.js"], references: ["greet"], introduces: [],
-    };
+      what: "call greet from main",
+      criteria: ["calls greet"]};
     await writeTickets(ticketsDir, [first, second]);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [toTicketState(first), toTicketState(second)];
@@ -1187,8 +777,7 @@ describe("runLoop", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       visual_review: { mode: "light" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "vision-model", visual: DEFAULT_MODEL, goal: null, extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "vision-model", visual: DEFAULT_MODEL, goal: null, extract: null }});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -1232,8 +821,7 @@ describe("runLoop", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       visual_review: { mode: "light" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "vision-model", visual: DEFAULT_MODEL, goal: null, extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "vision-model", visual: DEFAULT_MODEL, goal: null, extract: null }});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -1275,8 +863,7 @@ describe("runLoop", () => {
     const config = baseConfig({
       visual_review: { mode: "light" },
       model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "vision-model", visual: DEFAULT_MODEL, goal: null, extract: null },
-      projectInterface: "browser-ui",
-    });
+      projectInterface: "browser-ui"});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -1314,8 +901,7 @@ describe("runLoop", () => {
     const config = baseConfig({
       visual_review: { mode: "light" },
       model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "vision-model", visual: DEFAULT_MODEL, goal: null, extract: null },
-      projectInterface: "browser-ui",
-    });
+      projectInterface: "browser-ui"});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -1356,8 +942,7 @@ describe("runLoop", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       visual_review: { mode: "full" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "vision-model", visual: DEFAULT_MODEL, goal: null, extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "vision-model", visual: DEFAULT_MODEL, goal: null, extract: null }});
     const { state: ticketState } = await makeTicket(ticketsDir, { criteria: ["app renders a visible snake on screen"] });
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -1398,18 +983,15 @@ describe("runLoop", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       visual_review: { mode: "full" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "vision-model", visual: DEFAULT_MODEL, goal: null, extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "vision-model", visual: DEFAULT_MODEL, goal: null, extract: null }});
     const first: Ticket = {
       file: "01-render.md", number: "01", slug: "render", title: "Render",
-      what: "render the app", mission: "a snake game", blocked_by: [],
-      criteria: ["app renders a visible snake on screen"], files: ["src/index.js"], references: [], introduces: ["render"],
-    };
+      what: "render the app",
+      criteria: ["app renders a visible snake on screen"]};
     const second: Ticket = {
       file: "02-score.md", number: "02", slug: "score", title: "Score",
-      what: "compute score", mission: "a snake game", blocked_by: ["01-render.md"],
-      criteria: ["exports a computeScore function that sums points"], files: ["src/score.js"], references: ["render"], introduces: [],
-    };
+      what: "compute score",
+      criteria: ["exports a computeScore function that sums points"]};
     await writeTickets(ticketsDir, [first, second]);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [toTicketState(first), toTicketState(second)];
@@ -1479,18 +1061,15 @@ describe("runLoop", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       visual_review: { mode: "full" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "vision-model", visual: DEFAULT_MODEL, goal: null, extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "vision-model", visual: DEFAULT_MODEL, goal: null, extract: null }});
     const first: Ticket = {
       file: "01-render.md", number: "01", slug: "render", title: "Render",
-      what: "render the app", mission: "a snake game", blocked_by: [],
-      criteria: ["app renders a visible snake on screen"], files: ["src/index.js"], references: [], introduces: ["render"],
-    };
+      what: "render the app",
+      criteria: ["app renders a visible snake on screen"]};
     const second: Ticket = {
       file: "02-score.md", number: "02", slug: "score", title: "Score",
-      what: "compute score", mission: "a snake game", blocked_by: ["01-render.md"],
-      criteria: ["exports a computeScore function that sums points"], files: ["src/score.js"], references: ["render"], introduces: [],
-    };
+      what: "compute score",
+      criteria: ["exports a computeScore function that sums points"]};
     await writeTickets(ticketsDir, [first, second]);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [toTicketState(first), toTicketState(second)];
@@ -1552,7 +1131,6 @@ describe("runLoop", () => {
       file,
       title: opts.title ?? file,
       number: opts.number ?? "01",
-      blocked_by: opts.blocked_by ?? [],
       status: opts.status ?? "ready",
       attempts: 0,
       start_commit: null,
@@ -1758,8 +1336,7 @@ describe("RunState goal_review fields (#19)", () => {
       pause_on_failure: false,
       verbose: false,
       quiet: false,
-      original_prompt: "build a game",
-    });
+      original_prompt: "build a game"});
     expect(state.goal_reviews).toEqual([]);
     expect(state.original_prompt).toBe("build a game");
   });
@@ -1772,8 +1349,7 @@ describe("RunState goal_review fields (#19)", () => {
       config: DEFAULT_CONFIG,
       pause_on_failure: false,
       verbose: false,
-      quiet: false,
-    });
+      quiet: false});
     expect(state.original_prompt).toBeUndefined();
   });
 
@@ -1784,14 +1360,8 @@ describe("RunState goal_review fields (#19)", () => {
       slug: "a",
       title: "A",
       what: "do A",
-      mission: "test",
-      blocked_by: [],
       criteria: [],
-      files: [],
-      references: [],
-      introduces: [],
-      group: "core-engine",
-    };
+      group: "core-engine"};
     const ts = toTicketState(ticket);
     expect(ts.group).toBe("core-engine");
   });
@@ -1803,13 +1373,7 @@ describe("RunState goal_review fields (#19)", () => {
       slug: "a",
       title: "A",
       what: "do A",
-      mission: "test",
-      blocked_by: [],
-      criteria: [],
-      files: [],
-      references: [],
-      introduces: [],
-    };
+      criteria: []};
     const ts = toTicketState(ticket);
     expect(ts.group).toBeUndefined();
   });
@@ -1829,27 +1393,17 @@ describe("goal review prompt scope (#19 — pendingDeliverables at group checkpo
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "medium", fallback_cadence: 4 },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null }});
 
     const core1: Ticket = {
       file: "01-scaffold.md", number: "01", slug: "scaffold", title: "Scaffold",
-      what: "set up the project skeleton", mission: "a platformer game",
-      blocked_by: [], criteria: ["project exists"], files: ["src/index.js"],
-      references: [], introduces: ["setup"], group: "core-engine",
-    };
+      what: "set up the project skeleton", criteria: ["project exists"], group: "core-engine"};
     const core2: Ticket = {
       file: "02-player.md", number: "02", slug: "player", title: "Player movement",
-      what: "implement player movement and jumping", mission: "a platformer game",
-      blocked_by: ["01-scaffold.md"], criteria: ["player can move and jump"],
-      files: ["src/player.js"], references: ["setup"], introduces: ["player"], group: "core-engine",
-    };
+      what: "implement player movement and jumping", criteria: ["player can move and jump"], group: "core-engine"};
     const polish1: Ticket = {
       file: "03-particles.md", number: "03", slug: "particles", title: "Particle trail",
-      what: "add a fading particle trail behind the player", mission: "a platformer game",
-      blocked_by: ["02-player.md"], criteria: ["particle trail visible when moving"],
-      files: ["src/particles.js"], references: ["player"], introduces: ["particles"], group: "polish",
-    };
+      what: "add a fading particle trail behind the player", criteria: ["particle trail visible when moving"], group: "polish"};
     await writeTickets(ticketsDir, [core1, core2, polish1]);
     const state = await makeState(cwd, ticketsDir, config);
     state.original_prompt = "build a platformer with particle trail and screen shake";
@@ -1921,20 +1475,15 @@ describe("goal review prompt scope (#19 — pendingDeliverables at group checkpo
       entries: [
         { symbol: "BootScene", kind: "class", file: "src/scenes/BootScene.ts", signature: "export class BootScene extends Phaser.Scene", added_by: "01" },
         { symbol: "PlayerController", kind: "class", file: "src/player/PlayerController.ts", signature: "export class PlayerController", added_by: "02" },
-      ],
-    }, null, 2), "utf8");
+      ]}, null, 2), "utf8");
     const config = baseConfig({
       model: { plan: DEFAULT_MODEL, implement: "impl-model", review: "rev-model", visual: null, goal: null, extract: null },
       // This test counts per-ticket review prompts; `medium` = per-ticket only
       // (no run-end final code pass, issue #73) keeps the count at exactly one.
-      code_review: { mode: "medium" },
-    });
+      code_review: { mode: "medium" }});
     const ticket: Ticket = {
       file: "02-wire.md", number: "02", slug: "wire", title: "Wire player",
-      what: "wire the player controller into the scene", mission: "a game",
-      blocked_by: [], criteria: ["player moves"], files: ["src/player/PlayerController.ts"],
-      references: ["PlayerController"], introduces: [],
-    };
+      what: "wire the player controller into the scene", criteria: ["player moves"]};
     await writeTickets(ticketsDir, [ticket]);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [toTicketState(ticket)];
@@ -1969,7 +1518,7 @@ describe("goal review prompt scope (#19 — pendingDeliverables at group checkpo
   });
 
   it("goal review corrective tickets must not block on themselves", async () => {
-    // platformer-test-2 ticket 09 had `blocked_by: ["09-goal-review-fix-...md"]`
+    // platformer-test-2 ticket 09 had ``
     // — its own file. A self-blocked ticket can never enter the frontier (it
     // needs itself to be committed before it can start). This happens because
     // the dependency-injection loop at runGoalReview adds every corrective
@@ -1981,21 +1530,14 @@ describe("goal review prompt scope (#19 — pendingDeliverables at group checkpo
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "medium", fallback_cadence: 4 },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null }});
 
     const t1: Ticket = {
       file: "01-scaffold.md", number: "01", slug: "scaffold", title: "Scaffold",
-      what: "set up the project", mission: "a snake game",
-      blocked_by: [], criteria: ["project exists"], files: ["src/index.js"],
-      references: [], introduces: ["setup"], group: "core",
-    };
+      what: "set up the project", criteria: ["project exists"], group: "core"};
     const t2: Ticket = {
       file: "02-gameplay.md", number: "02", slug: "gameplay", title: "Gameplay",
-      what: "implement the snake", mission: "a snake game",
-      blocked_by: ["01-scaffold.md"], criteria: ["snake moves"], files: ["src/game.js"],
-      references: ["setup"], introduces: ["game"], group: "core",
-    };
+      what: "implement the snake", criteria: ["snake moves"], group: "core"};
     await writeTickets(ticketsDir, [t1, t2]);
     const state = await makeState(cwd, ticketsDir, config);
     state.original_prompt = "build a snake game";
@@ -2030,8 +1572,6 @@ describe("goal review prompt scope (#19 — pendingDeliverables at group checkpo
     const corrective = final.tickets.find((t) => t.number === "03");
     expect(corrective).toBeDefined();
     expect(corrective!.status).toBe("committed");
-    // THE bug: the corrective ticket must NOT block on itself.
-    expect(corrective!.blocked_by).not.toContain(corrective!.file);
   });
 
   it("ADR 0043: an unanchored [BLOCKER] generates no corrective ticket (recorded for steering only)", async () => {
@@ -2041,21 +1581,14 @@ describe("goal review prompt scope (#19 — pendingDeliverables at group checkpo
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "medium", fallback_cadence: 4 },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null }});
 
     const t1: Ticket = {
       file: "01-scaffold.md", number: "01", slug: "scaffold", title: "Scaffold",
-      what: "set up the project", mission: "a snake game",
-      blocked_by: [], criteria: ["project exists"], files: ["src/index.js"],
-      references: [], introduces: ["setup"], group: "core",
-    };
+      what: "set up the project", criteria: ["project exists"], group: "core"};
     const t2: Ticket = {
       file: "02-gameplay.md", number: "02", slug: "gameplay", title: "Gameplay",
-      what: "implement the snake", mission: "a snake game",
-      blocked_by: ["01-scaffold.md"], criteria: ["snake moves"], files: ["src/game.js"],
-      references: ["setup"], introduces: ["game"], group: "core",
-    };
+      what: "implement the snake", criteria: ["snake moves"], group: "core"};
     await writeTickets(ticketsDir, [t1, t2]);
     const state = await makeState(cwd, ticketsDir, config);
     state.original_prompt = "build a snake game";
@@ -2103,20 +1636,13 @@ describe("goal review prompt scope (#19 — pendingDeliverables at group checkpo
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "medium", fallback_cadence: 4 },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null }});
     const t1: Ticket = {
       file: "01-scaffold.md", number: "01", slug: "scaffold", title: "Scaffold",
-      what: "set up the project", mission: "a snake game",
-      blocked_by: [], criteria: ["project exists"], files: ["src/index.js"],
-      references: [], introduces: ["setup"], group: "core",
-    };
+      what: "set up the project", criteria: ["project exists"], group: "core"};
     const t2: Ticket = {
       file: "02-gameplay.md", number: "02", slug: "gameplay", title: "Gameplay",
-      what: "implement the snake", mission: "a snake game",
-      blocked_by: ["01-scaffold.md"], criteria: ["snake moves"], files: ["src/game.js"],
-      references: ["setup"], introduces: ["game"], group: "core",
-    };
+      what: "implement the snake", criteria: ["snake moves"], group: "core"};
     await writeTickets(ticketsDir, [t1, t2]);
     const state = await makeState(cwd, ticketsDir, config);
     state.original_prompt = "build a snake game";
@@ -2148,11 +1674,6 @@ describe("goal review prompt scope (#19 — pendingDeliverables at group checkpo
     expect(corrective.length).toBe(2);
     for (const c of corrective) {
       expect(c.status).toBe("committed");
-      for (const other of corrective) {
-        if (c.file !== other.file) {
-          expect(c.blocked_by).not.toContain(other.file);
-        }
-      }
     }
   });
 
@@ -2167,21 +1688,14 @@ describe("goal review prompt scope (#19 — pendingDeliverables at group checkpo
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "medium", fallback_cadence: 4 },
-      model: { plan: "plan-model", implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: "plan-model", implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null }});
 
     const t1: Ticket = {
       file: "01-scaffold.md", number: "01", slug: "scaffold", title: "Scaffold",
-      what: "set up the project", mission: "a snake game",
-      blocked_by: [], criteria: ["project exists"], files: ["src/index.js"],
-      references: [], introduces: ["setup"], group: "core",
-    };
+      what: "set up the project", criteria: ["project exists"], group: "core"};
     const t2: Ticket = {
       file: "02-gameplay.md", number: "02", slug: "gameplay", title: "Gameplay",
-      what: "implement the snake", mission: "a snake game",
-      blocked_by: ["01-scaffold.md"], criteria: ["snake moves"], files: ["src/game.js"],
-      references: ["setup"], introduces: ["game"], group: "core",
-    };
+      what: "implement the snake", criteria: ["snake moves"], group: "core"};
     await writeTickets(ticketsDir, [t1, t2]);
     const state = await makeState(cwd, ticketsDir, config);
     state.original_prompt = "build a snake game";
@@ -2230,20 +1744,13 @@ describe("goal review prompt scope (#19 — pendingDeliverables at group checkpo
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "medium", fallback_cadence: 4 },
-      model: { plan: "plan-model", implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: "plan-model", implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null }});
     const t1: Ticket = {
       file: "01-scaffold.md", number: "01", slug: "scaffold", title: "Scaffold",
-      what: "set up the project", mission: "a game",
-      blocked_by: [], criteria: ["renders the shell"], files: ["src/index.js"],
-      references: [], introduces: ["setup"], group: "core",
-    };
+      what: "set up the project", criteria: ["renders the shell"], group: "core"};
     const t2: Ticket = {
       file: "02-gameplay.md", number: "02", slug: "gameplay", title: "Gameplay",
-      what: "implement the loop", mission: "a game",
-      blocked_by: ["01-scaffold.md"], criteria: ["draws the world"], files: ["src/game.js"],
-      references: ["setup"], introduces: ["game"], group: "core",
-    };
+      what: "implement the loop", criteria: ["draws the world"], group: "core"};
     await writeTickets(ticketsDir, [t1, t2]);
     const state = await makeState(cwd, ticketsDir, config);
     state.original_prompt = "build a game";
@@ -2276,18 +1783,13 @@ describe("goal review prompt scope (#19 — pendingDeliverables at group checkpo
     expect(final.status).toBe("finished");
     const rebuilt = final.tickets.find((t) => t.title === "Rebuilt renderer")!;
     const world = final.tickets.find((t) => t.title === "Rebuilt world")!;
-    // The dependency edge points at the globally numbered file, not the
-    // replan-local "01-rebuilt-renderer.md" — otherwise the world ticket is
-    // never frontier-ready and the run stops as stuck.
-    expect(world.blocked_by).toEqual([rebuilt.file]);
+    // Both regenerated tickets commit in the run's global numbering.
     expect(rebuilt.status).toBe("committed");
     expect(world.status).toBe("committed");
     // The on-disk ticket file is rewritten too — its header and blocked_by
     // line carry the global numbers, not the replan-local ones.
     const worldFile = await readFile(join(ticketsDir, world.file), "utf8");
     expect(worldFile).toContain(`# ${world.number}:`);
-    expect(worldFile).toContain("**Blocked by:**");
-    expect(worldFile).toContain(rebuilt.file.replace(/\.md$/, ""));
   });
 
   it("goal review waits for the pending per-ticket visual review so they never share the browser concurrently (#62)", async () => {
@@ -2303,20 +1805,13 @@ describe("goal review prompt scope (#19 — pendingDeliverables at group checkpo
     const config = baseConfig({
       visual_review: { mode: "full" },
       goal_review: { mode: "medium", fallback_cadence: 4 },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "review-model", visual: "vision-model", goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "review-model", visual: "vision-model", goal: "goal-model", extract: null }});
     const t1: Ticket = {
       file: "01-scaffold.md", number: "01", slug: "scaffold", title: "Scaffold",
-      what: "set up the project", mission: "a snake game",
-      blocked_by: [], criteria: ["project exists"], files: ["src/index.js"],
-      references: [], introduces: ["setup"], group: "core",
-    };
+      what: "set up the project", criteria: ["project exists"], group: "core"};
     const t2: Ticket = {
       file: "02-gameplay.md", number: "02", slug: "gameplay", title: "Gameplay",
-      what: "implement the snake", mission: "a snake game",
-      blocked_by: ["01-scaffold.md"], criteria: ["snake renders and moves"], files: ["src/game.js"],
-      references: ["setup"], introduces: ["game"], group: "core",
-    };
+      what: "implement the snake", criteria: ["snake renders and moves"], group: "core"};
     await writeTickets(ticketsDir, [t1, t2]);
     const state = await makeState(cwd, ticketsDir, config);
     state.original_prompt = "build a snake game";
@@ -2376,21 +1871,14 @@ describe("goal review prompt scope (#19 — pendingDeliverables at group checkpo
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "medium", fallback_cadence: 4 },
-      model: { plan: "plan-model", implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: "plan-model", implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null }});
 
     const t1: Ticket = {
       file: "01-scaffold.md", number: "01", slug: "scaffold", title: "Scaffold",
-      what: "set up the project", mission: "a snake game",
-      blocked_by: [], criteria: ["project exists"], files: ["src/index.js"],
-      references: [], introduces: ["setup"], group: "core",
-    };
+      what: "set up the project", criteria: ["project exists"], group: "core"};
     const t2: Ticket = {
       file: "02-gameplay.md", number: "02", slug: "gameplay", title: "Gameplay",
-      what: "implement the snake", mission: "a snake game",
-      blocked_by: ["01-scaffold.md"], criteria: ["snake moves"], files: ["src/game.js"],
-      references: ["setup"], introduces: ["game"], group: "core",
-    };
+      what: "implement the snake", criteria: ["snake moves"], group: "core"};
     await writeTickets(ticketsDir, [t1, t2]);
     const state = await makeState(cwd, ticketsDir, config);
     state.original_prompt = "build a snake game";
@@ -2438,21 +1926,14 @@ describe("goal review prompt scope (#19 — pendingDeliverables at group checkpo
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "medium", fallback_cadence: 4 },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null }});
 
     const t1: Ticket = {
       file: "01-scaffold.md", number: "01", slug: "scaffold", title: "Scaffold",
-      what: "set up the project", mission: "a snake game",
-      blocked_by: [], criteria: ["project exists"], files: ["src/index.js"],
-      references: [], introduces: ["setup"], group: "core",
-    };
+      what: "set up the project", criteria: ["project exists"], group: "core"};
     const t2: Ticket = {
       file: "02-gameplay.md", number: "02", slug: "gameplay", title: "Gameplay",
-      what: "implement the snake", mission: "a snake game",
-      blocked_by: ["01-scaffold.md"], criteria: ["snake moves"], files: ["src/game.js"],
-      references: ["setup"], introduces: ["game"], group: "core",
-    };
+      what: "implement the snake", criteria: ["snake moves"], group: "core"};
     await writeTickets(ticketsDir, [t1, t2]);
     const state = await makeState(cwd, ticketsDir, config);
     state.original_prompt = "build a snake game";
@@ -2493,9 +1974,8 @@ $END`);
     expect(corrective.length).toBe(2);
     expect(final.tickets.some((t) => t.title === "Replace rectangle rendering with sprites")).toBe(true);
     expect(final.tickets.some((t) => t.title === "Add parallax depth bands")).toBe(true);
-    // The reviewer's files/references survived into the generated ticket.
-    const sprites = final.tickets.find((t) => t.title === "Replace rectangle rendering with sprites")!;
-    expect(sprites.blocked_by).not.toContain(sprites.file);
+    // The reviewer's corrective suggestions survived into the generated tickets.
+    expect(final.tickets.some((t) => t.title === "Replace rectangle rendering with sprites")).toBe(true);
   });
 });
 
@@ -2809,8 +2289,7 @@ describe("goal review cadence (issue #73)", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "light" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -2847,14 +2326,10 @@ describe("goal review cadence (issue #73)", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "medium", fallback_cadence: 2 },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
     const mk = (n: string, file: string): Ticket => ({
       file, number: n, slug: `t${n}`, title: `Ticket ${n}`,
-      what: `build part ${n} that draws on the canvas`, mission: "a game",
-      blocked_by: [], criteria: ["renders on the canvas"], files: [`src/t${n}.js`],
-      references: [], introduces: [`part${n}`], group: "big",
-    });
+      what: `build part ${n} that draws on the canvas`, criteria: ["renders on the canvas"], group: "big"});
     const tickets = [mk("01", "01-a.md"), mk("02", "02-b.md"), mk("03", "03-c.md"), mk("04", "04-d.md")];
     await writeTickets(ticketsDir, tickets);
     const state = await makeState(cwd, ticketsDir, config);
@@ -2894,20 +2369,13 @@ describe("goal review cadence (issue #73)", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "medium", fallback_cadence: 4 },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
     const t1: Ticket = {
       file: "01-settings.md", number: "01", slug: "settings", title: "Settings store",
-      what: "add a versioned settings store with migration", mission: "an app",
-      blocked_by: [], criteria: ["migrateSettings upgrades any older version"], files: ["src/settings.js"],
-      references: [], introduces: ["settings"], group: "engine",
-    };
+      what: "add a versioned settings store with migration", criteria: ["migrateSettings upgrades any older version"], group: "engine"};
     const t2: Ticket = {
       file: "02-save.md", number: "02", slug: "save", title: "Save store",
-      what: "persist save data through the store", mission: "an app",
-      blocked_by: ["01-settings.md"], criteria: ["loadSave round-trips"], files: ["src/save.js"],
-      references: ["settings"], introduces: ["save"], group: "engine",
-    };
+      what: "persist save data through the store", criteria: ["loadSave round-trips"], group: "engine"};
     await writeTickets(ticketsDir, [t1, t2]);
     const state = await makeState(cwd, ticketsDir, config);
     state.original_prompt = "build an app";
@@ -2951,8 +2419,7 @@ describe("goal review cadence (issue #73)", () => {
     const config = baseConfig({
       goal_review: { mode: "light" },
       model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-      projectInterface: "browser-ui",
-    });
+      projectInterface: "browser-ui"});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -2992,8 +2459,7 @@ describe("goal review cadence (issue #73)", () => {
     const config = baseConfig({
       goal_review: { mode: "light" },
       model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-      projectInterface: "browser-ui",
-    });
+      projectInterface: "browser-ui"});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -3026,19 +2492,18 @@ describe("goal review cadence (issue #73)", () => {
   // ADR 0029 (#102): under a plain `mode: "light"` goal gate a group boundary
   // fires nothing mid-run even in a grouped plan — the knob is what changes
   // that, so this pins the no-regression boundary before the advisory test.
-  it("light WITHOUT checkpoint_action: a group boundary still fires nothing mid-run", async () => {
+  it("light WITHOUT checkpoint_action fires a corrective group checkpoint mid-run (v2 issue 01 default)", async () => {
     const cwd = await freshRepo();
     const ticketsDir = ticketsDirOf(cwd);
     const ledgerDir = join(cwd, ".railhead", "run-test");
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "light" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
     const engine: Ticket[] = [
-      { file: "01-a.md", number: "01", slug: "a", title: "Scaffold", what: "scaffold", mission: "a game", blocked_by: [], criteria: ["renders the scene"], files: ["src/a.js"], references: [], introduces: [], group: "engine" },
-      { file: "02-b.md", number: "02", slug: "b", title: "Physics", what: "physics", mission: "a game", blocked_by: ["01-a.md"], criteria: ["draws the world"], files: ["src/b.js"], references: [], introduces: [], group: "engine" },
-      { file: "03-c.md", number: "03", slug: "c", title: "Render", what: "render", mission: "a game", blocked_by: ["02-b.md"], criteria: ["shows the HUD"], files: ["src/c.js"], references: [], introduces: [], group: "engine" },
+      { file: "01-a.md", number: "01", slug: "a", title: "Scaffold", what: "scaffold", criteria: ["renders the scene"], group: "engine" },
+      { file: "02-b.md", number: "02", slug: "b", title: "Physics", what: "physics", criteria: ["draws the world"], group: "engine" },
+      { file: "03-c.md", number: "03", slug: "c", title: "Render", what: "render", criteria: ["shows the HUD"], group: "engine" },
     ];
     await writeTickets(ticketsDir, engine);
     const state = await makeState(cwd, ticketsDir, config);
@@ -3064,8 +2529,10 @@ describe("goal review cadence (issue #73)", () => {
     const final = await runLoop(state, ledgerDir);
 
     expect(final.status).toBe("finished");
-    expect(goalPhases).toEqual(["goal-run-end"]);
-    expect(final.goal_reviews?.map((r) => r.group)).toEqual(["run-end"]);
+    // v2 issue 01: the group boundary judges and corrects inline, then the
+    // run-end pass closes the run.
+    expect(goalPhases).toEqual(["goal-engine", "goal-run-end"]);
+    expect(final.goal_reviews?.map((r) => r.group)).toEqual(["engine", "run-end"]);
   });
 
   it("light + checkpoint_action advisory (ADR 0029): group boundary runs an advisory pass — records findings, zero corrective tickets, steering reaches the run-end pass", async () => {
@@ -3075,12 +2542,11 @@ describe("goal review cadence (issue #73)", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "light", checkpoint_action: "advisory" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
     const engine: Ticket[] = [
-      { file: "01-a.md", number: "01", slug: "a", title: "Scaffold", what: "scaffold", mission: "a game", blocked_by: [], criteria: ["renders the scene"], files: ["src/a.js"], references: [], introduces: [], group: "engine" },
-      { file: "02-b.md", number: "02", slug: "b", title: "Physics", what: "physics", mission: "a game", blocked_by: ["01-a.md"], criteria: ["draws the world"], files: ["src/b.js"], references: [], introduces: [], group: "engine" },
-      { file: "03-c.md", number: "03", slug: "c", title: "Render", what: "render", mission: "a game", blocked_by: ["02-b.md"], criteria: ["shows the HUD"], files: ["src/c.js"], references: [], introduces: [], group: "engine" },
+      { file: "01-a.md", number: "01", slug: "a", title: "Scaffold", what: "scaffold", criteria: ["renders the scene"], group: "engine" },
+      { file: "02-b.md", number: "02", slug: "b", title: "Physics", what: "physics", criteria: ["draws the world"], group: "engine" },
+      { file: "03-c.md", number: "03", slug: "c", title: "Render", what: "render", criteria: ["shows the HUD"], group: "engine" },
     ];
     await writeTickets(ticketsDir, engine);
     const state = await makeState(cwd, ticketsDir, config);
@@ -3163,12 +2629,11 @@ describe("goal review cadence (issue #73)", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "light", checkpoint_action: "advisory" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
     const engine: Ticket[] = [
-      { file: "01-a.md", number: "01", slug: "a", title: "Scaffold", what: "scaffold", mission: "a game", blocked_by: [], criteria: ["renders the scene"], files: ["src/a.js"], references: [], introduces: [], group: "engine" },
-      { file: "02-b.md", number: "02", slug: "b", title: "Physics", what: "physics", mission: "a game", blocked_by: ["01-a.md"], criteria: ["draws the world"], files: ["src/b.js"], references: [], introduces: [], group: "engine" },
-      { file: "03-c.md", number: "03", slug: "c", title: "Render", what: "render", mission: "a game", blocked_by: ["02-b.md"], criteria: ["shows the HUD"], files: ["src/c.js"], references: [], introduces: [], group: "engine" },
+      { file: "01-a.md", number: "01", slug: "a", title: "Scaffold", what: "scaffold", criteria: ["renders the scene"], group: "engine" },
+      { file: "02-b.md", number: "02", slug: "b", title: "Physics", what: "physics", criteria: ["draws the world"], group: "engine" },
+      { file: "03-c.md", number: "03", slug: "c", title: "Render", what: "render", criteria: ["shows the HUD"], group: "engine" },
     ];
     await writeTickets(ticketsDir, engine);
     const state = await makeState(cwd, ticketsDir, config);
@@ -3214,6 +2679,217 @@ describe("goal review cadence (issue #73)", () => {
     expect(final.goal_reviews?.filter((r) => r.group === "run-end").length).toBe(2); // fail round + post-corrective pass round
   });
 
+  it("v2 issue 01: light checkpoints are corrective-anchored by default — an anchored blocker splices a corrective inline", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      goal_review: { mode: "light" }, // no checkpoint_action: the v2 default
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
+    const engine: Ticket[] = [
+      { file: "01-a.md", number: "01", slug: "a", title: "Scaffold", what: "scaffold", criteria: ["renders the scene"], group: "engine" },
+    ];
+    await writeTickets(ticketsDir, engine);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = engine.map((t) => toTicketState(t));
+
+    const goalPhases: string[] = [];
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else if (kind === "goal") {
+        goalPhases.push(options.phaseFile);
+        if (options.phaseFile === "goal-engine") {
+          await emitText(ledgerDir, options.phaseFile, "$GOAL_FAIL\n[BLOCKER] the snake has no food (src/index.js)\n$END");
+        } else {
+          await emitText(ledgerDir, options.phaseFile, "$GOAL_PASS\n$END");
+        }
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    // The mid-run checkpoint ran corrective (not advisory) and spliced a
+    // corrective ticket before the frontier; the run-end pass still fired.
+    expect(goalPhases).toEqual(["goal-engine", "goal-run-end"]);
+    const midRun = final.goal_reviews?.find((r) => r.group === "engine");
+    expect(midRun?.advisory).toBeUndefined();
+    const corrective = final.tickets.find((t) => t.number === "02");
+    expect(corrective).toBeDefined();
+    expect(corrective!.status).toBe("committed");
+  });
+
+  it("v2 issue 01: a run-end re-review re-runs registered probes deterministically instead of re-deriving the finding", async () => {
+    // Round 0 registers a probe for its blocker. Round 1 (after the corrective
+    // committed) must receive the probe's deterministic result — a PASS closes
+    // the behavior — and the seat must not need to re-derive it.
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      goal_review: { mode: "light" },
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
+    const engine: Ticket[] = [
+      { file: "01-a.md", number: "01", slug: "a", title: "Scaffold", what: "scaffold", criteria: ["renders the scene"] },
+    ];
+    await writeTickets(ticketsDir, engine);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = engine.map((t) => toTicketState(t));
+
+    const goalPrompts: string[] = [];
+    let goalRounds = 0;
+    mockExec.mockImplementation(async (prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else if (kind === "goal") {
+        goalRounds++;
+        goalPrompts.push(prompt);
+        if (goalRounds === 1) {
+          await emitText(ledgerDir, options.phaseFile, [
+            "$GOAL_FAIL",
+            "[BLOCKER] the snake has no food (src/index.js)",
+            "$END",
+            "$PROBE",
+            '{"behavior":"the snake eats food","command":"echo food=eaten","expect":"food=eaten"}',
+            "$END",
+          ].join("\n"));
+        } else {
+          await emitText(ledgerDir, options.phaseFile, "$GOAL_PASS\n$END");
+        }
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    // The probe was registered and persisted on the run state.
+    expect(final.probes).toHaveLength(1);
+    expect(final.probes![0]!.behavior).toBe("the snake eats food");
+    expect(final.probes![0]!.group).toBe("run-end");
+    // The re-review prompt carried the deterministic result, not a request to
+    // re-derive: a PASS closes the behavior.
+    const second = goalPrompts[1]!;
+    expect(second).toContain("Registered probes");
+    expect(second).toContain("[PASS] the snake eats food");
+    expect(second).toMatch(/CLOSED/);
+    expect(goalRounds).toBe(2);
+  });
+
+  it("v2 issue 01: a reviewer invocation that exits non-ok is infra — no green review line, and the ticket fails", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      max_attempts: 2,
+      max_retries: 1,
+      infra_backoff_sec: [0, 0, 0],
+      code_review: { mode: "full" },
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: null, extract: null },
+    });
+    const t: Ticket = { file: "01-a.md", number: "01", slug: "a", title: "A", what: "a", criteria: ["renders a"] };
+    await writeTickets(ticketsDir, [t]);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [toTicketState(t)];
+
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...args) => { logs.push(args.join(" ")); });
+    try {
+      mockExec.mockImplementation(async (_prompt, options) => {
+        const kind = kindOf(options);
+        if (kind === "implement") {
+          await writeImplementedFile(cwd);
+          await emitText(ledgerDir, options.phaseFile, "DONE");
+        } else if (kind === "review") {
+          // The reviewer process ran but never completed: non-ok, no verdict.
+          return { status: "error" as const, code: 1, signal: null, errorMessage: "step budget exhausted", durationMs: 1, steps: 1, peakTokens: 0, inFlightTokens: 0, estimateDriftTokens: 0, totalOutputTokens: 0, generationMs: 0, toolCalls: 0 };
+        } else {
+          await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+        }
+        return okResult();
+      });
+
+      const final = await runLoop(state, ledgerDir);
+
+      expect(final.status).toBe("failed");
+      // The lie this closes: an errored review that logged "review ✓ PASS
+      // (minor only)" because an empty finding set classified as minor.
+      expect(logs.some((l) => /review (✓|⛔)/.test(l))).toBe(false);
+      expect(logs.some((l) => /passed \(minor only\)/.test(l))).toBe(false);
+      expect(final.tickets[0]!.review_ok).not.toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("v2 issue 01: interaction smoke defaults on for browser-ui, runs once at the group boundary, and blocks", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      projectInterface: "browser-ui",
+      // interaction_smoke intentionally unset: the derived default turns it on.
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: null, extract: null },
+    });
+    const group: Ticket[] = [
+      { file: "01-a.md", number: "01", slug: "a", title: "A", what: "a", criteria: ["renders a"], group: "core" },
+      { file: "02-b.md", number: "02", slug: "b", title: "B", what: "b", criteria: ["renders b"], group: "core" },
+    ];
+    await writeTickets(ticketsDir, group);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = group.map((t) => toTicketState(t));
+
+    const interactPhases: string[] = [];
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else if (kind === "interact") {
+        interactPhases.push(options.phaseFile);
+        await emitText(ledgerDir, options.phaseFile, interactPhases.length === 1
+          ? "$SMOKE_FAIL\n[BLOCKER] the canvas does not change after clicking New game\n$END"
+          : "$SMOKE_PASS\n$END");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    // Never on the group's first ticket; on the boundary ticket only — twice,
+    // because the blocking FAIL fed back and the retry passed.
+    expect(interactPhases).toEqual(["02-01-interact", "02-02-interact"]);
+    expect(final.tickets.every((t) => t.status === "committed")).toBe(true);
+    // The retry's $SMOKE_PASS carried no real-input/render evidence (it emitted
+    // only text), so it was downgraded to inconclusive — a curl-only 200 never
+    // counts as smoke evidence — yet inconclusive never fails the run.
+    const ticket02 = final.tickets.find((t) => t.number === "02")!;
+    expect(ticket02.logs.join("\n")).toContain("downgraded to inconclusive");
+  });
+
   it("fails the run when a run-end goal review's corrective ticket fails (issue #120)", async () => {
     // The run-end goal review is the strict gate: a [BLOCKER] that survives the
     // corrective cycle must fail the run, not leave it "finished". Planned
@@ -3229,12 +2905,11 @@ describe("goal review cadence (issue #73)", () => {
       max_retries: 5,
       max_review_retries: 5,
       max_attempts: 2,
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
     const engine: Ticket[] = [
-      { file: "01-a.md", number: "01", slug: "a", title: "Scaffold", what: "scaffold", mission: "a game", blocked_by: [], criteria: ["renders the scene"], files: ["src/a.js"], references: [], introduces: [], group: "engine" },
-      { file: "02-b.md", number: "02", slug: "b", title: "Physics", what: "physics", mission: "a game", blocked_by: ["01-a.md"], criteria: ["draws the world"], files: ["src/b.js"], references: [], introduces: [], group: "engine" },
-      { file: "03-c.md", number: "03", slug: "c", title: "Render", what: "render", mission: "a game", blocked_by: ["02-b.md"], criteria: ["shows the HUD"], files: ["src/c.js"], references: [], introduces: [], group: "engine" },
+      { file: "01-a.md", number: "01", slug: "a", title: "Scaffold", what: "scaffold", criteria: ["renders the scene"], group: "engine" },
+      { file: "02-b.md", number: "02", slug: "b", title: "Physics", what: "physics", criteria: ["draws the world"], group: "engine" },
+      { file: "03-c.md", number: "03", slug: "c", title: "Render", what: "render", criteria: ["shows the HUD"], group: "engine" },
     ];
     await writeTickets(ticketsDir, engine);
     const state = await makeState(cwd, ticketsDir, config);
@@ -3279,12 +2954,10 @@ describe("goal review cadence (issue #73)", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "light", checkpoint_action: "advisory", fallback_cadence: 4 },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
     const tickets: Ticket[] = [1, 2, 3, 4].map((n) => ({
-      file: `0${n}-t.md`, number: `0${n}`, slug: `t${n}`, title: `Ticket ${n}`, what: `work ${n}`, mission: "a game",
-      blocked_by: n > 1 ? [`0${n - 1}-t.md`] : [], criteria: [`c${n}`], files: [`src/f${n}.js`], references: [], introduces: [],
-    }));
+      file: `0${n}-t.md`, number: `0${n}`, slug: `t${n}`, title: `Ticket ${n}`, what: `work ${n}`,
+      blocked_by: n > 1 ? [`0${n - 1}-t.md`] : [], criteria: [`c${n}`]}));
     await writeTickets(ticketsDir, tickets);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = tickets.map((t) => toTicketState(t));
@@ -3323,8 +2996,7 @@ describe("goal review cadence (issue #73)", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "medium" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -3367,11 +3039,10 @@ describe("goal review cadence (issue #73)", () => {
     const config = baseConfig({
       goal_review: { mode: "medium", fallback_cadence: 4 },
       structural_review: { mode: "medium" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
     const engine: Ticket[] = [
-      { file: "01-a.md", number: "01", slug: "a", title: "Scaffold", what: "scaffold", mission: "a game", blocked_by: [], criteria: ["renders the scene"], files: ["src/a.js"], references: [], introduces: [], group: "engine" },
-      { file: "02-b.md", number: "02", slug: "b", title: "Physics", what: "physics", mission: "a game", blocked_by: ["01-a.md"], criteria: ["draws the world"], files: ["src/b.js"], references: [], introduces: [], group: "engine" },
+      { file: "01-a.md", number: "01", slug: "a", title: "Scaffold", what: "scaffold", criteria: ["renders the scene"], group: "engine" },
+      { file: "02-b.md", number: "02", slug: "b", title: "Physics", what: "physics", criteria: ["draws the world"], group: "engine" },
     ];
     await writeTickets(ticketsDir, engine);
     const state = await makeState(cwd, ticketsDir, config);
@@ -3421,8 +3092,7 @@ describe("goal review cadence (issue #73)", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "light" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -3466,8 +3136,7 @@ describe("goal review cadence (issue #73)", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "light", max_rounds: 3 },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -3515,8 +3184,7 @@ describe("goal review cadence (issue #73)", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "light" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -3559,21 +3227,14 @@ describe("goal review cadence (issue #73)", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "medium", fallback_cadence: 4 },
-      model: { plan: "plan-model", implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: "plan-model", implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: "goal-model", extract: null }});
 
     const t1: Ticket = {
       file: "01-scaffold.md", number: "01", slug: "scaffold", title: "Scaffold",
-      what: "set up the project", mission: "a snake game",
-      blocked_by: [], criteria: ["project exists"], files: ["src/index.js"],
-      references: [], introduces: ["setup"], group: "core",
-    };
+      what: "set up the project", criteria: ["project exists"], group: "core"};
     const t2: Ticket = {
       file: "02-gameplay.md", number: "02", slug: "gameplay", title: "Gameplay",
-      what: "implement the snake", mission: "a snake game",
-      blocked_by: ["01-scaffold.md"], criteria: ["snake moves"], files: ["src/game.js"],
-      references: ["setup"], introduces: ["game"], group: "core",
-    };
+      what: "implement the snake", criteria: ["snake moves"], group: "core"};
     await writeTickets(ticketsDir, [t1, t2]);
     const state = await makeState(cwd, ticketsDir, config);
     state.original_prompt = "build a snake game";
@@ -3620,8 +3281,7 @@ describe("goal review cadence (issue #73)", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "light", max_replans: 2 },
-      model: { plan: "plan-model", implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: "plan-model", implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -3893,83 +3553,6 @@ describe("visual review cadence (issue #73)", () => {
   });
 });
 
-describe("zero-tool-call implementer (#69)", () => {
-  it("skips verify/smoke/review and retries when an implement attempt made no tool calls", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig();
-    const { state: ticketState } = await makeTicket(ticketsDir);
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    const reviewPhases: string[] = [];
-    let implementCalls = 0;
-    mockExec.mockImplementation(async (_prompt, options) => {
-      const kind = kindOf(options);
-      if (kind === "implement") {
-        implementCalls++;
-        if (implementCalls === 1) {
-          // Prose-only attempt: emits DONE but performs zero tool calls.
-          await emitText(ledgerDir, options.phaseFile, "DONE I thought about it");
-          return okResult(1, 0);
-        }
-        await writeImplementedFile(cwd);
-        await emitText(ledgerDir, options.phaseFile, "DONE");
-        return okResult();
-      } else if (kind === "review") {
-        reviewPhases.push(options.phaseFile);
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("ok");
-    expect(ticketState.status).toBe("committed");
-    expect(ticketState.attempts).toBe(2);
-    // The zero-tool attempt must not have reached the reviewer.
-    expect(reviewPhases).toEqual(["01-02-review"]);
-    expect(ticketState.logs.some((l) => l.includes("no tool calls made"))).toBe(true);
-  });
-
-  it("proceeds to verify normally when the attempt made at least one tool call", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig();
-    const { state: ticketState } = await makeTicket(ticketsDir);
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    mockExec.mockImplementation(async (_prompt, options) => {
-      const kind = kindOf(options);
-      if (kind === "implement") {
-        await writeImplementedFile(cwd);
-        await emitText(ledgerDir, options.phaseFile, "DONE");
-        return okResult();
-      } else if (kind === "review") {
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("ok");
-    expect(ticketState.attempts).toBe(1);
-    expect(ticketState.status).toBe("committed");
-    expect(ticketState.logs.some((l) => l.includes("no tool calls made"))).toBe(false);
-  });
-});
-
 describe("end-of-run reviews skipped on failed run", () => {
   it("does not run final code review or structural review when a ticket fails", async () => {
     const cwd = await freshRepo();
@@ -3992,8 +3575,10 @@ describe("end-of-run reviews skipped on failed run", () => {
       execPhases.push(options.phaseFile);
       const kind = kindOf(options);
       if (kind === "implement") {
-        await emitText(ledgerDir, options.phaseFile, "DONE I thought about it");
-        return okResult(1, 0);
+        // The builder exits cleanly but never emits the checkpoint marker the
+        // run loop asked for, so the ticket exhausts its ladder and fails.
+        await emitText(ledgerDir, options.phaseFile, "I thought about it but did not checkpoint");
+        return { ...okResult(), sessionId: "sess-fail", checkpointTicket: null };
       } else if (kind === "review") {
         await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
       } else {
@@ -4011,370 +3596,13 @@ describe("end-of-run reviews skipped on failed run", () => {
   });
 });
 
-describe("implementer exits without DONE", () => {
-  it("gates a clean exit with no DONE when the worktree has real work — the SpriteForge-14 regression", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig();
-    const { state: ticketState } = await makeTicket(ticketsDir);
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    let implementCalls = 0;
-    mockExec.mockImplementation(async (_prompt, options) => {
-      const kind = kindOf(options);
-      if (kind === "implement") {
-        implementCalls++;
-        // Writes real code, exits cleanly, but never emits the DONE marker —
-        // the exact shape that wiped a green, verified ticket (it closed with
-        // a prose summary instead of "DONE"). The worktree has real changes,
-        // so the railhead must gate it through verify/review, not wipe it.
-        await writeImplementedFile(cwd);
-        await emitText(ledgerDir, options.phaseFile, "Shipped. Typecheck + build + 65 tests pass. Verified at 1280x800.");
-        return okResult(38, 20);
-      } else if (kind === "review") {
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    // The real work survives and is committed on the FIRST attempt — no wipe,
-    // no retry-from-scratch, no second implementer.
-    expect(outcome).toBe("ok");
-    expect(ticketState.status).toBe("committed");
-    expect(ticketState.attempts).toBe(1);
-    expect(implementCalls).toBe(1);
-    expect(existsSync(join(cwd, "src", "index.js"))).toBe(true);
-    expect(ticketState.logs.some((l) => l.includes("never emitted DONE"))).toBe(true);
-  });
-
-  it("retries a clean exit with no DONE when the worktree is empty", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig();
-    const { state: ticketState } = await makeTicket(ticketsDir);
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    let implementCalls = 0;
-    mockExec.mockImplementation(async (_prompt, options) => {
-      const kind = kindOf(options);
-      if (kind === "implement") {
-        implementCalls++;
-        if (implementCalls === 1) {
-          // Exits cleanly with no DONE AND wrote nothing — genuinely stopped
-          // before doing any work, so the empty tree must retry (not gate).
-          await emitText(ledgerDir, options.phaseFile, "All tests pass. Now verify the dev server and visually check:");
-          return okResult(38, 20);
-        }
-        // Second attempt emits DONE properly.
-        await writeImplementedFile(cwd);
-        await emitText(ledgerDir, options.phaseFile, "DONE");
-        return okResult();
-      } else if (kind === "review") {
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("ok");
-    expect(ticketState.status).toBe("committed");
-    expect(ticketState.attempts).toBe(2);
-    expect(ticketState.logs.some((l) => l.includes("never emitted DONE"))).toBe(true);
-  });
-
-  it("fails the ticket when every attempt exits without DONE and leaves an empty tree", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig({ max_retries: 1 });
-    const { state: ticketState } = await makeTicket(ticketsDir);
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    mockExec.mockImplementation(async (_prompt, options) => {
-      const kind = kindOf(options);
-      if (kind === "implement") {
-        // Never writes a file AND never emits DONE — every attempt is a
-        // genuinely-empty no-DONE, so no attempt can gate; the budget exhausts.
-        await emitText(ledgerDir, options.phaseFile, "Working on it...");
-        return okResult(5, 3);
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-        return okResult();
-      }
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("failed");
-    expect(ticketState.status).toBe("failed");
-    expect(ticketState.logs.some((l) => l.includes("never emitted DONE"))).toBe(true);
-  });
-});
-
-describe("failure ladder at the implementer site (#80)", () => {
-  it("restarts the worker exactly once at rung 2 for a server-state failure, then succeeds", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig({ persistent_worker: true, infra_backoff_sec: [0, 0] });
-    const { state: ticketState } = await makeTicket(ticketsDir);
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    let implementCalls = 0;
-    mockExec.mockImplementation(async (_prompt, options) => {
-      const kind = kindOf(options);
-      if (kind === "implement") {
-        implementCalls++;
-        if (implementCalls <= 2) {
-          return { status: "transient" as const, code: 1, signal: null, durationMs: 1, steps: 1, peakTokens: 0, inFlightTokens: 0, estimateDriftTokens: 0, totalOutputTokens: 0, generationMs: 0, toolCalls: 0, errorMessage: "503 Service Unavailable" };
-        }
-        await writeImplementedFile(cwd);
-        await emitText(ledgerDir, options.phaseFile, "DONE");
-        return okResult();
-      } else if (kind === "review") {
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("ok");
-    expect(ticketState.status).toBe("committed");
-    expect(implementCalls).toBe(3);
-    expect(mockStartWorker.mock.calls.length).toBe(1);
-    expect(mockStopWorker.mock.calls.length).toBe(1);
-  });
-
-  it("never restarts the worker for a capacity failure", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig({ persistent_worker: true, infra_backoff_sec: [0, 0], max_retries: 1, max_attempts: 1 });
-    const { state: ticketState } = await makeTicket(ticketsDir);
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    mockExec.mockImplementation(async (_prompt, options) => {
-      const kind = kindOf(options);
-      if (kind === "implement") {
-        return { status: "transient" as const, code: 1, signal: null, durationMs: 1, steps: 1, peakTokens: 60_000, inFlightTokens: 60_000, estimateDriftTokens: 0, totalOutputTokens: 0, generationMs: 0, toolCalls: 0, errorMessage: "insufficient memory" };
-      }
-      await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      return okResult();
-    });
-
-    await processTicket(state, ledgerDir, ticketState);
-
-    expect(mockStartWorker.mock.calls.length).toBe(0);
-    expect(ticketState.logs.some((l) => l.includes("capacity failure"))).toBe(true);
-  });
-
-  it("fails as capacity_limited after two capacity failures, feeding a slimmed re-prompt", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig({ max_retries: 1, max_attempts: 2 });
-    const { state: ticketState } = await makeTicket(ticketsDir);
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    const prompts: string[] = [];
-    mockExec.mockImplementation(async (prompt, options) => {
-      const kind = kindOf(options);
-      if (kind === "implement") {
-        prompts.push(prompt);
-        return { status: "transient" as const, code: 1, signal: null, durationMs: 1, steps: 1, peakTokens: 60_000, inFlightTokens: 60_000, estimateDriftTokens: 0, totalOutputTokens: 0, generationMs: 0, toolCalls: 0, errorMessage: "insufficient memory" };
-      }
-      await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("failed");
-    expect(ticketState.status).toBe("failed");
-    expect(ticketState.logs.some((l) => l.includes("capacity_limited"))).toBe(true);
-    // Each capacity failure short-circuits the ladder (no identical retry), so
-    // two loop attempts = two implement prompts.
-    expect(prompts.length).toBe(2);
-    // The second attempt's prompt carries the shrink-scope instruction with the
-    // peak/budget figures, and no attempt history.
-    expect(prompts[1]).toContain("request-size problem");
-    expect(prompts[1]).toContain("peak 60000 tokens");
-    expect(prompts[1]).not.toContain("Attempt history");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// gh #110 / ADR 0033: the plan-producing diagnosis rung at rung 3 of the
-// implement path. A third consecutive diagnosed failure runs exactly one
-// deep-diagnosis phase; a $PLAN feeds one final guided attempt, a missing plan
-// (or a failed phase) falls through to today's terminal rung.
-// ---------------------------------------------------------------------------
-describe("plan-producing diagnosis rung at the implementer site (#110)", () => {
-  const transient = () => ({
-    status: "transient" as const,
-    code: 1, signal: null, durationMs: 1, steps: 1, peakTokens: 10_000,
-    inFlightTokens: 10_000, estimateDriftTokens: 0, totalOutputTokens: 0,
-    generationMs: 0, toolCalls: 0, errorMessage: "connection reset by peer",
-  });
-
-  it("feeds the diagnosis $PLAN into exactly one guided implement attempt", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig({ infra_backoff_sec: [0, 0], max_retries: 1, max_attempts: 4 });
-    const { state: ticketState } = await makeTicket(ticketsDir);
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    let implementCalls = 0;
-    let diagnoseCalls = 0;
-    const implementPrompts: string[] = [];
-    mockExec.mockImplementation(async (prompt, options) => {
-      if (options.phaseFile.endsWith("-diagnose")) {
-        diagnoseCalls++;
-        await emitText(ledgerDir, options.phaseFile, "$DIAGNOSIS\nthe implementer kept using the phantom dependency foo-bar\n$END\n$PLAN\n1. replace foo-bar with the real package\n2. run the build\n$END");
-        return okResult();
-      }
-      const kind = kindOf(options);
-      if (kind === "implement") {
-        implementCalls++;
-        implementPrompts.push(prompt);
-        if (implementCalls <= 3) return transient();
-        await writeImplementedFile(cwd);
-        await emitText(ledgerDir, options.phaseFile, "DONE src/index.js");
-        return okResult();
-      }
-      if (kind === "review") {
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("ok");
-    expect(ticketState.status).toBe("committed");
-    expect(diagnoseCalls).toBe(1);
-    expect(ticketState.diagnosis?.plan_spent).toBe(true);
-    expect(ticketState.diagnosis?.text).toContain("phantom dependency");
-    // The guided attempt is the one that carries the plan as its feedback.
-    expect(implementCalls).toBe(4);
-    expect(implementPrompts[3]).toContain("replace foo-bar");
-  });
-
-  it("stops at the terminal rung when the diagnosis omits $PLAN, without re-diagnosing", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig({ infra_backoff_sec: [0, 0], max_retries: 1, max_attempts: 4 });
-    const { state: ticketState } = await makeTicket(ticketsDir);
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    let diagnoseCalls = 0;
-    mockExec.mockImplementation(async (_prompt, options) => {
-      if (options.phaseFile.endsWith("-diagnose")) {
-        diagnoseCalls++;
-        await emitText(ledgerDir, options.phaseFile, "$DIAGNOSIS\nthe plan is wrong — the ticket cannot be met this run\n$END");
-        return okResult();
-      }
-      const kind = kindOf(options);
-      if (kind === "implement") return transient();
-      if (kind === "review") {
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("failed");
-    expect(ticketState.status).toBe("failed");
-    expect(diagnoseCalls).toBe(1);
-    expect(ticketState.diagnosis?.plan_spent).toBe(false);
-    expect(ticketState.diagnosis?.text).toContain("cannot be met");
-  });
-
-  it("fails open when the diagnosis phase itself fails (terminal, no wedging)", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig({ infra_backoff_sec: [0, 0], max_retries: 1, max_attempts: 4 });
-    const { state: ticketState } = await makeTicket(ticketsDir);
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    let diagnoseCalls = 0;
-    mockExec.mockImplementation(async (_prompt, options) => {
-      if (options.phaseFile.endsWith("-diagnose")) {
-        diagnoseCalls++;
-        return { ...transient(), errorMessage: "diagnose stalled" };
-      }
-      const kind = kindOf(options);
-      if (kind === "implement") return transient();
-      if (kind === "review") {
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("failed");
-    expect(ticketState.status).toBe("failed");
-    expect(diagnoseCalls).toBe(1);
-    expect(ticketState.diagnosis?.plan_spent).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Issue #95 (ADR 0022 stages 1–3): the durable-session builder, exercised over
-// a real temp git repo with executeOpendCode mocked at the ONE seam run.ts
-// uses. session_builder flips processTicket's implement engine to runBuilderStep
-// (session resume + $CHECKPOINT marker + telemetry-only ceiling guards) while
-// keeping the verify/review/commit gates identical to the ADR 0001 path.
-// ---------------------------------------------------------------------------
 describe("session builder (issue #95)", () => {
   function builderOk(ticketNumber: string, session = "sess-abc123") {
     return {
       ...okResult(),
       sessionId: session,
       checkpointTicket: ticketNumber,
-      inFlightTokens: 0,
-    };
+      inFlightTokens: 0};
   }
 
   /** A two-ticket linear plan (02 blocked by 01) on the same branch/dir as the
@@ -4382,14 +3610,12 @@ describe("session builder (issue #95)", () => {
   async function twoTicketState(cwd: string, ticketsDir: string, config: RailheadConfig): Promise<RunState> {
     const first: Ticket = {
       file: "01-scaffold.md", number: "01", slug: "scaffold", title: "Scaffold",
-      what: "set up the project", mission: "a greetable CLI", blocked_by: [],
-      criteria: ["exists"], files: ["src/index.js"], references: [], introduces: ["greet"],
-    };
+      what: "set up the project",
+      criteria: ["exists"]};
     const second: Ticket = {
       file: "02-use-greet.md", number: "02", slug: "use-greet", title: "Use greet",
-      what: "call greet from main", mission: "a greetable CLI", blocked_by: ["01-scaffold.md"],
-      criteria: ["calls greet"], files: ["src/main.js"], references: [], introduces: [],
-    };
+      what: "call greet from main",
+      criteria: ["calls greet"]};
     await writeTickets(ticketsDir, [first, second]);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [toTicketState(first), toTicketState(second)];
@@ -4407,7 +3633,7 @@ describe("session builder (issue #95)", () => {
     const ticketsDir = ticketsDirOf(cwd);
     const ledgerDir = join(cwd, ".railhead", "run-test");
     await initLedger(ledgerDir);
-    const config = baseConfig({ session_builder: true, checkpoint_granularity: "ticket" });
+    const config = baseConfig({ checkpoint_granularity: "ticket" });
     const state = await twoTicketState(cwd, ticketsDir, config);
 
     const buildPrompts: { prompt: string; session: string | null | undefined }[] = [];
@@ -4447,7 +3673,7 @@ describe("session builder (issue #95)", () => {
     const ticketsDir = ticketsDirOf(cwd);
     const ledgerDir = join(cwd, ".railhead", "run-test");
     await initLedger(ledgerDir);
-    const config = baseConfig({ session_builder: true, checkpoint_granularity: "ticket" });
+    const config = baseConfig({ checkpoint_granularity: "ticket" });
     const state = await twoTicketState(cwd, ticketsDir, config);
 
     const buildSessions: (string | null | undefined)[] = [];
@@ -4501,12 +3727,11 @@ describe("session builder (issue #95)", () => {
     // them both prompts are empty and this test pins nothing.
     await writeFile(join(cwd, CONTRACTS_FILE), JSON.stringify({
       schema_version: 1,
-      entries: [{ symbol: "greet", kind: "function", file: "src/greet.js", signature: "greet(name) -> string", added_by: "run-x/00" }],
-    }), "utf8");
+      entries: [{ symbol: "greet", kind: "function", file: "src/greet.js", signature: "greet(name) -> string", added_by: "run-x/00" }]}), "utf8");
     await mkdir(join(cwd, ".railhead"), { recursive: true });
     await writeFile(join(cwd, ".railhead", "learnings.md"), "the dev server needs a TTY on this project\n", "utf8");
     await writeFile(join(cwd, ".railhead", "digest.md"), "module map: src/ owns the world\n", "utf8");
-    const config = baseConfig({ session_builder: true, checkpoint_granularity: "ticket" });
+    const config = baseConfig({ checkpoint_granularity: "ticket" });
     const state = await twoTicketState(cwd, ticketsDir, config);
 
     const buildPrompts: { prompt: string; session: string | null | undefined }[] = [];
@@ -4551,9 +3776,8 @@ describe("session builder (issue #95)", () => {
     await initLedger(ledgerDir);
     await writeFile(join(cwd, CONTRACTS_FILE), JSON.stringify({
       schema_version: 1,
-      entries: [{ symbol: "greet", kind: "function", file: "src/greet.js", signature: "greet(name) -> string", added_by: "run-x/00" }],
-    }), "utf8");
-    const config = baseConfig({ session_builder: true, checkpoint_granularity: "ticket" });
+      entries: [{ symbol: "greet", kind: "function", file: "src/greet.js", signature: "greet(name) -> string", added_by: "run-x/00" }]}), "utf8");
+    const config = baseConfig({ checkpoint_granularity: "ticket" });
     const state = await twoTicketState(cwd, ticketsDir, config);
 
     const buildPrompts: { prompt: string; session: string | null | undefined }[] = [];
@@ -4594,7 +3818,7 @@ describe("session builder (issue #95)", () => {
     await initLedger(ledgerDir);
     await mkdir(join(cwd, ".railhead"), { recursive: true });
     await writeFile(join(cwd, ".railhead", "learnings.md"), "the dev server panics without a TTY\n", "utf8");
-    const config = baseConfig({ session_builder: true, checkpoint_granularity: "ticket" });
+    const config = baseConfig({ checkpoint_granularity: "ticket" });
     const state = await twoTicketState(cwd, ticketsDir, config);
 
     const buildPrompts: string[] = [];
@@ -4645,9 +3869,7 @@ describe("session builder (issue #95)", () => {
     const ledgerDir = join(cwd, ".railhead", "run-test");
     await initLedger(ledgerDir);
     const config = baseConfig({
-      session_builder: true,
-      verify: ["node -e \"require('node:fs').existsSync('ok.txt') ? process.exit(0) : process.exit(1)\""],
-    });
+      verify: ["node -e \"require('node:fs').existsSync('ok.txt') ? process.exit(0) : process.exit(1)\""]});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -4700,47 +3922,6 @@ describe("session builder (issue #95)", () => {
     expect(state.builder!.restarts.some((r) => r.cause.includes("session-lost"))).toBe(true);
   });
 
-  it("issue #106 (F): under the session builder the reviewer's red/green checklist item is suppressed — the builder prompt never asks for the evidence block, so the text must not claim it did", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig({
-      session_builder: true,
-      test_phase: true,
-    });
-    const { state: ticketState } = await makeTicket(ticketsDir, { testable: true });
-    const state = await makeState(cwd, ticketsDir, config);
-    state.tickets = [ticketState];
-
-    const reviewPrompts: string[] = [];
-    mockExec.mockImplementation(async (prompt, options) => {
-      const kind = kindOf(options);
-      if (options.phaseFile.endsWith("-build")) {
-        await writeImplementedFile(cwd);
-        await emitText(ledgerDir, options.phaseFile, "$CHECKPOINT ticket=01");
-        return builderOk("01");
-      }
-      if (kind === "review") {
-        reviewPrompts.push(prompt);
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
-      }
-      return okResult();
-    });
-
-    const outcome = await processTicket(state, ledgerDir, ticketState);
-
-    expect(outcome).toBe("ok");
-    expect(reviewPrompts.length).toBe(1);
-    // The ticket is testable and a test phase ran, but the builder was never
-    // asked to put a red→green evidence block in a report — so the reviewer's
-    // "the implementer was asked to include a red→green evidence block in its
-    // report" item must not ride (issue #106-F).
-    expect(reviewPrompts[0]).not.toMatch(/RED\/GREEN evidence/i);
-  });
-
   it("gate findings land in the SAME resumed session and drive the bounded argument loop (#70)", async () => {
     const cwd = await freshRepo();
     const ticketsDir = ticketsDirOf(cwd);
@@ -4749,9 +3930,7 @@ describe("session builder (issue #95)", () => {
     // Verify only passes once ok.txt exists — the builder must be told what
     // failed and fix it IN the same session.
     const config = baseConfig({
-      session_builder: true,
-      verify: ["node -e \"require('node:fs').existsSync('ok.txt') ? process.exit(0) : process.exit(1)\""],
-    });
+      verify: ["node -e \"require('node:fs').existsSync('ok.txt') ? process.exit(0) : process.exit(1)\""]});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -4796,7 +3975,7 @@ describe("session builder (issue #95)", () => {
     const ticketsDir = ticketsDirOf(cwd);
     const ledgerDir = join(cwd, ".railhead", "run-test");
     await initLedger(ledgerDir);
-    const config = baseConfig({ session_builder: true, max_retries: 2 });
+    const config = baseConfig({ max_retries: 2 });
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -4834,6 +4013,96 @@ describe("session builder (issue #95)", () => {
     expect(state.builder!.session_id).toBe("sess-abc123");
   });
 
+  it("v2 issue 01: a hardener ticket with nothing to transcribe commits as a no-op and keeps verify green", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({});
+    const hardener: Ticket = {
+      file: "01-harden.md",
+      number: "01",
+      slug: "harden",
+      title: "Harden: transcribe confirmed behaviors into the test suite",
+      what: "Turn the run's confirmed behaviors into tests; if the registry is empty, make no changes.",
+      criteria: ["the project's verify commands still pass"],
+      group: "harden",
+    };
+    await writeTickets(ticketsDir, [hardener]);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [toTicketState(hardener)];
+
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        // The builder finds an empty probe registry and honestly makes no changes.
+        await emitText(ledgerDir, options.phaseFile, "$CHECKPOINT ticket=01");
+        return builderOk("01");
+      }
+      if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    expect(final.tickets[0]!.status).toBe("committed");
+    expect(final.tickets[0]!.verify_ok).toBe(true);
+    expect(final.tickets[0]!.commit).toBeTruthy();
+  });
+
+  it("v2 issue 01: a marker-less turn after a green verify counts as the checkpoint (no wasted re-invocation)", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({ max_retries: 2, code_review: { mode: "full" } });
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+
+    let buildCalls = 0;
+    let reviewCalls = 0;
+    const prompts: string[] = [];
+    mockExec.mockImplementation(async (prompt, options) => {
+      const kind = kindOf(options);
+      if (options.phaseFile.endsWith("-build")) {
+        buildCalls++;
+        prompts.push(prompt);
+        await writeImplementedFile(cwd);
+        if (buildCalls === 1) {
+          await emitText(ledgerDir, options.phaseFile, "$CHECKPOINT ticket=01");
+          return builderOk("01");
+        }
+        // The findings turn ends without re-emitting the marker. The ticket was
+        // already verify-green, so the railhead must count it, not re-invoke.
+        await emitText(ledgerDir, options.phaseFile, "fixed the finding, all green now");
+        return { ...okResult(), sessionId: "sess-abc123", checkpointTicket: null };
+      }
+      if (kind === "review") {
+        reviewCalls++;
+        await emitText(ledgerDir, options.phaseFile, reviewCalls === 1
+          ? "$BLOCKING\n[BLOCKER] the helper is duplicated (src/index.js)\n$NITS\nNONE\n$OK\nfix it"
+          : "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const outcome = await processTicket(state, ledgerDir, ticketState);
+
+    expect(outcome).toBe("ok");
+    expect(buildCalls).toBe(2);
+    expect(buildCalls).toBeLessThan(3);
+    expect(ticketState.logs.join("\n")).toContain("counting it as the checkpoint");
+    expect(ticketState.status).toBe("committed");
+  });
+
   it("ticket telemetry merges compactions from a no-checkpoint build attempt (run-20260907-2146)", async () => {
     // The durable builder compacts mid-ticket; the compaction usually lands in
     // an attempt that exits WITHOUT a checkpoint marker (ticket 07 of
@@ -4845,7 +4114,7 @@ describe("session builder (issue #95)", () => {
     const ticketsDir = ticketsDirOf(cwd);
     const ledgerDir = join(cwd, ".railhead", "run-test");
     await initLedger(ledgerDir);
-    const config = baseConfig({ session_builder: true });
+    const config = baseConfig({});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -4893,7 +4162,7 @@ describe("session builder (issue #95)", () => {
     const ticketsDir = ticketsDirOf(cwd);
     const ledgerDir = join(cwd, ".railhead", "run-test");
     await initLedger(ledgerDir);
-    const config = baseConfig({ session_builder: true, max_retries: 1, verify: ["false"] });
+    const config = baseConfig({ max_retries: 1, verify: ["false"] });
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -4924,18 +4193,17 @@ describe("session builder (issue #95)", () => {
     const ticketsDir = ticketsDirOf(cwd);
     const ledgerDir = join(cwd, ".railhead", "run-test");
     await initLedger(ledgerDir);
-    const config = baseConfig({ session_builder: true, checkpoint_granularity: "product" });
+    const config = baseConfig({ checkpoint_granularity: "product" });
     const third: Ticket = {
       file: "03-bye.md", number: "03", slug: "bye", title: "Add bye",
-      what: "add a bye", mission: "a greetable CLI", blocked_by: ["02-use-greet.md"],
-      criteria: ["calls bye"], files: ["src/bye.js"], references: [], introduces: [],
-    };
+      what: "add a bye",
+      criteria: ["calls bye"]};
     const state = await twoTicketState(cwd, ticketsDir, config);
     state.tickets = [...state.tickets, toTicketState(third)];
     // Rebuild the on-disk ticket set to include the third (writeTickets clears).
     await writeTickets(ticketsDir, [
-      { file: "01-scaffold.md", number: "01", slug: "scaffold", title: "Scaffold", what: "set up the project", mission: "a greetable CLI", blocked_by: [], criteria: ["exists"], files: ["src/index.js"], references: [], introduces: ["greet"] },
-      { file: "02-use-greet.md", number: "02", slug: "use-greet", title: "Use greet", what: "call greet from main", mission: "a greetable CLI", blocked_by: ["01-scaffold.md"], criteria: ["calls greet"], files: ["src/main.js"], references: [], introduces: [] },
+      { file: "01-scaffold.md", number: "01", slug: "scaffold", title: "Scaffold", what: "set up the project", criteria: ["exists"]},
+      { file: "02-use-greet.md", number: "02", slug: "use-greet", title: "Use greet", what: "call greet from main", criteria: ["calls greet"]},
       third,
     ]);
 
@@ -4990,17 +4258,15 @@ describe("session builder (issue #95)", () => {
     const ticketsDir = ticketsDirOf(cwd);
     const ledgerDir = join(cwd, ".railhead", "run-test");
     await initLedger(ledgerDir);
-    const config = baseConfig({ session_builder: true, checkpoint_granularity: "group" });
+    const config = baseConfig({ checkpoint_granularity: "group" });
     const t01: Ticket = {
       file: "01-ui.md", number: "01", slug: "ui", title: "UI shell", group: "core",
-      what: "build the shell", mission: "an app", blocked_by: [],
-      criteria: ["shell"], files: ["src/ui.js"], references: [], introduces: [],
-    };
+      what: "build the shell",
+      criteria: ["shell"]};
     const t02: Ticket = {
       file: "02-logic.md", number: "02", slug: "logic", title: "Logic", group: "core",
-      what: "wire the logic", mission: "an app", blocked_by: ["01-ui.md"],
-      criteria: ["logic"], files: ["src/logic.js"], references: [], introduces: [],
-    };
+      what: "wire the logic",
+      criteria: ["logic"]};
     await writeTickets(ticketsDir, [t01, t02]);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [toTicketState(t01), toTicketState(t02)];
@@ -5044,16 +4310,6 @@ describe("session builder (issue #95)", () => {
     expect(await git.lastCommitMessage(cwd)).toBe("01 — UI shell");
   });
 
-  it("the ADR 0001 shape (session_builder: false) needs no builder record at all", async () => {
-    const cwd = await freshRepo();
-    const ticketsDir = ticketsDirOf(cwd);
-    const ledgerDir = join(cwd, ".railhead", "run-test");
-    await initLedger(ledgerDir);
-    const config = baseConfig({ session_builder: false });
-    const state = await makeState(cwd, ticketsDir, config);
-    expect(state.builder).toBeUndefined();
-  });
-
   it("issue #106 (B): the group-boundary goal review joins the pending first-member per-ticket visual first (#62 parity)", async () => {
     // The group's first member commits while members 2..N are uncommitted, so
     // committedTicket's own #62 serialization sees detectGroupCheckpoints == []
@@ -5066,24 +4322,16 @@ describe("session builder (issue #95)", () => {
     const ledgerDir = join(cwd, ".railhead", "run-test");
     await initLedger(ledgerDir);
     const config = baseConfig({
-      session_builder: true,
       checkpoint_granularity: "group",
       visual_review: { mode: "full" },
       goal_review: { mode: "medium", fallback_cadence: 4 },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "review-model", visual: "vision-model", goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "review-model", visual: "vision-model", goal: "goal-model", extract: null }});
     const t1: Ticket = {
       file: "01-scaffold.md", number: "01", slug: "scaffold", title: "Scaffold",
-      what: "set up the project", mission: "a snake game", group: "core",
-      blocked_by: [], criteria: ["snake renders in a canvas"], files: ["src/index.js"],
-      references: [], introduces: ["setup"],
-    };
+      what: "set up the project", group: "core", criteria: ["snake renders in a canvas"]};
     const t2: Ticket = {
       file: "02-gameplay.md", number: "02", slug: "gameplay", title: "Gameplay",
-      what: "implement the snake", mission: "a snake game", group: "core",
-      blocked_by: ["01-scaffold.md"], criteria: ["snake moves"], files: ["src/game.js"],
-      references: ["setup"], introduces: ["game"],
-    };
+      what: "implement the snake", group: "core", criteria: ["snake moves"]};
     await writeTickets(ticketsDir, [t1, t2]);
     const state = await makeState(cwd, ticketsDir, config);
     state.original_prompt = "build a snake game";
@@ -5414,7 +4662,7 @@ describe("spec-anchored reconciliation (gh #105)", () => {
     const ticketsDir = ticketsDirOf(cwd);
     const ledgerDir = join(cwd, ".railhead", "run-test");
     await initLedger(ledgerDir);
-    const config = baseConfig({ session_builder: true, verify: [greetVerify(cwd)] });
+    const config = baseConfig({ verify: [greetVerify(cwd)] });
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -5463,14 +4711,12 @@ describe("graceful stop — soft Ctrl-C", () => {
 
     const first: Ticket = {
       file: "01-scaffold.md", number: "01", slug: "scaffold", title: "Scaffold",
-      what: "set up the project", mission: "a greetable CLI", blocked_by: [],
-      criteria: ["exists"], files: ["src/index.js"], references: [], introduces: ["greet"],
-    };
+      what: "set up the project",
+      criteria: ["exists"]};
     const second: Ticket = {
       file: "02-use-greet.md", number: "02", slug: "use-greet", title: "Use greet",
-      what: "call greet from main", mission: "a greetable CLI", blocked_by: ["01-scaffold.md"],
-      criteria: ["calls greet"], files: ["src/main.js"], references: ["greet"], introduces: [],
-    };
+      what: "call greet from main",
+      criteria: ["calls greet"]};
     await writeTickets(ticketsDir, [first, second]);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [toTicketState(first), toTicketState(second)];
@@ -5547,8 +4793,7 @@ describe("graceful stop — soft Ctrl-C", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       visual_review: { mode: "full" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "vision-model", visual: DEFAULT_MODEL, goal: null, extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "vision-model", visual: DEFAULT_MODEL, goal: null, extract: null }});
     const { state: ticketState } = await makeTicket(ticketsDir, { criteria: ["app renders a visible greeting on screen"] });
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -5587,8 +4832,7 @@ describe("graceful stop — soft Ctrl-C", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       visual_review: { mode: "light" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "vision-model", visual: DEFAULT_MODEL, goal: null, extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "vision-model", visual: DEFAULT_MODEL, goal: null, extract: null }});
     const { state: ticketState } = await makeTicket(ticketsDir, { criteria: ["app renders a visible greeting on screen"] });
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -5625,8 +4869,8 @@ describe("graceful stop — soft Ctrl-C", () => {
 
 describe("owed-gate replay on resume", () => {
   const engineTickets = (): Ticket[] => [
-    { file: "01-a.md", number: "01", slug: "a", title: "Scaffold", what: "scaffold", mission: "a game", blocked_by: [], criteria: ["renders the scene"], files: ["src/a.js"], references: [], introduces: [], group: "engine" },
-    { file: "02-b.md", number: "02", slug: "b", title: "Physics", what: "physics", mission: "a game", blocked_by: ["01-a.md"], criteria: ["draws the world"], files: ["src/b.js"], references: [], introduces: [], group: "engine" },
+    { file: "01-a.md", number: "01", slug: "a", title: "Scaffold", what: "scaffold", criteria: ["renders the scene"], group: "engine" },
+    { file: "02-b.md", number: "02", slug: "b", title: "Physics", what: "physics", criteria: ["draws the world"], group: "engine" },
   ];
 
   async function committedState(cwd: string, ticketsDir: string, config: RailheadConfig): Promise<RunState> {
@@ -5650,8 +4894,7 @@ describe("owed-gate replay on resume", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "medium" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
     const state = await committedState(cwd, ticketsDir, config);
     // The prior process stopped after the group's last commit but before the
     // checkpoint gate could record.
@@ -5681,8 +4924,7 @@ describe("owed-gate replay on resume", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       structural_review: { mode: "medium" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
     const state = await committedState(cwd, ticketsDir, config);
     state.pending_checkpoints = { goal: [], structural: ["engine"] };
 
@@ -5710,8 +4952,7 @@ describe("owed-gate replay on resume", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "medium" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
 
     // This time the run actually processes the group: the commit marks the
     // checkpoint owed, the gate runs, and the marker is cleared.
@@ -5749,8 +4990,7 @@ describe("owed-gate replay on resume", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       goal_review: { mode: "medium" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
     const state = await committedState(cwd, ticketsDir, config);
     state.pending_checkpoints = { goal: ["engine"], structural: [] };
     state.goal_reviews = [{ group: "engine", round: 0, verdict: "pass", findings: [] }];
@@ -5775,8 +5015,7 @@ describe("owed-gate replay on resume", () => {
     await initLedger(ledgerDir);
     const config = baseConfig({
       visual_review: { mode: "medium" },
-      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: DEFAULT_MODEL, goal: null, extract: null },
-    });
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: DEFAULT_MODEL, goal: null, extract: null }});
     const { ticket, state: ticketState } = await makeTicket(ticketsDir, { criteria: ["app renders a visible greeting on screen"] });
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -5810,7 +5049,7 @@ describe("ADR 0040 — blocked exit and per-ticket budget", () => {
     const ticketsDir = ticketsDirOf(cwd);
     const ledgerDir = join(cwd, ".railhead", "run-test");
     await initLedger(ledgerDir);
-    const config = baseConfig({ session_builder: true, ...configOverrides });
+    const config = baseConfig({ ...configOverrides });
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -6096,7 +5335,7 @@ describe("ADR 0040 — plan-defect auto-replan", () => {
     const ticketsDir = ticketsDirOf(cwd);
     const ledgerDir = join(cwd, ".railhead", "run-test");
     await initLedger(ledgerDir);
-    const config = baseConfig({ session_builder: true });
+    const config = baseConfig({});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -6126,7 +5365,7 @@ describe("ADR 0040 — plan-defect auto-replan", () => {
     const ticketsDir = ticketsDirOf(cwd);
     const ledgerDir = join(cwd, ".railhead", "run-test");
     await initLedger(ledgerDir);
-    const config = baseConfig({ session_builder: true });
+    const config = baseConfig({});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];
@@ -6236,7 +5475,7 @@ describe("builder seed forks the base (#133)", () => {
     const ticketsDir = ticketsDirOf(cwd);
     const ledgerDir = join(cwd, ".railhead", "run-test");
     await initLedger(ledgerDir);
-    const config = baseConfig({ session_builder: true });
+    const config = baseConfig({});
     const { state: ticketState } = await makeTicket(ticketsDir);
     const state = await makeState(cwd, ticketsDir, config);
     state.tickets = [ticketState];

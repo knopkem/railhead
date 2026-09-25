@@ -73,3 +73,12 @@ gate's recall bias.
   first boundary too long is visible in the plan itself.
 - Tests pin the ceiling (mid-group synthetic checkpoint), the skip (no agent,
   recorded pass), and the planner guidance.
+
+## Amendment (v2 issue 01): light fires corrective group checkpoints
+
+The schedule's mode gate changes: `light` no longer defers mid-run feedback to
+run end. Its group checkpoints fire (the light preset is corrective-anchored —
+ADR 0029 amendment) and the run-end pass remains, so a light run sees and
+corrects a group's whole-app gaps at the first boundary while still owning the
+final whole-app review. The cadence ceiling and the no-surface-group skip are
+unchanged.

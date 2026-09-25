@@ -1,6 +1,5 @@
 import type { RailheadConfig, ResolvedModels } from "../config/config.ts";
 import type { PhaseContext } from "./telemetry.ts";
-import type { Ruling } from "./ticket-dag.ts";
 
 export const SCHEMA_VERSION = 1;
 
@@ -98,7 +97,6 @@ export interface TicketState {
   file: string;
   title: string;
   number: string;
-  blocked_by: string[];
   status: TicketStatus;
   attempts: number;
   start_commit: string | null;
@@ -126,20 +124,6 @@ export interface TicketState {
   /** Issue #80: the ladder class of the last implement failure (fatal-config /
    * capacity / server-state / blip / diagnosed). Persisted for resume + report. */
   last_failure_class?: string;
-  /** gh #110 / ADR 0033: the one plan-producing diagnosis spent on this ticket
-   * at rung 3 of the implement path — the root-cause text and whether the
-   * `$PLAN` it produced was fed into a guided attempt. Bounded to exactly one
-   * diagnosis call and one guided attempt per ticket per run; persisted by
-   * writeState so a resume neither re-diagnoses nor re-spends the attempt.
-   * `undefined` = not yet spent (the terminal rung has not been reached, or
-   * this ticket never exhausted its ladder). */
-  diagnosis?: {
-    /** The root-cause text the diagnosis phase produced. */
-    text: string;
-    /** Whether the phase's `$PLAN` was spent on one guided implement attempt.
-     * false = no plan produced (or the phase failed) — terminal, like rung 3. */
-    plan_spent: boolean;
-  } | null;
   /** gh #105 / ADR 0032: the one spec-anchored reconciliation spent on this
    * ticket — the fresh arbiter's verdict, its findings, and the files whose
    * railhead-applied fixes were recorded. Bounded to exactly one reconciliation
@@ -182,6 +166,26 @@ export interface TicketState {
   blocks?: { kind: string; reason: string; at: string }[];
 }
 
+/** One materialized behavior probe (v2 issue 01, ADR 0043/0044): the goal
+ * review records a finding's deterministic re-check so a later round can run
+ * it instead of re-deriving and re-probing the same blocker by hand. The
+ * `command` is a shell command (a materialized script under
+ * `.railhead/probes/`) whose output contains `expect` IFF the behavior holds. */
+export interface ProbeEntry {
+  /** Stable id (`p1`, `p2`, …) — also the script file's stem. */
+  id: string;
+  /** The group/checkpoint label that owns the probe. */
+  group: string;
+  /** The behavior/finding the probe proves. */
+  behavior: string;
+  /** The shell command, runnable from the repo root. */
+  command: string;
+  /** The predicate: this substring appears in the command's output when the
+   * behavior holds. */
+  expect: string;
+  created_at: string;
+}
+
 export interface RunState {
   schema_version: number;
   cwd: string;
@@ -209,14 +213,6 @@ export interface RunState {
   /** Issue #19: the original user prompt/goal, stored so the goal reviewer
    * can evaluate against it at group checkpoints. Set by `startRun`. */
   original_prompt?: string;
-  /** Issue #86: plan-time adjudications (from the plan's rulings.json),
-   * loaded at startRun. Every run on the same plan dir loads the same set so
-   * a plan-time-ruled finding never re-fires as a runtime railhead-defect. */
-  plan_rulings?: Ruling[];
-  /** Issue #86: run-scoped rulings (runtime corrective auto-rulings). Appended
-   * during the run, persisted for resume, listed in report.md. Never written
-   * back to the plan's rulings.json. */
-  rulings?: Ruling[];
   /** Issue #19: records of goal-review checkpoints completed so far. Prevents
    * re-reviewing an already-reviewed group on resume and lets later groups
    * see what was flagged before. */
@@ -250,9 +246,15 @@ export interface RunState {
    * this run has honored so far. Enforced against `goal_review.max_replans`;
    * absent until the first replan fires. */
   replan_count?: number;
+  /** v2 issue 01: the persistent probe registry. The goal review materializes
+   * one probe per concrete finding (a command + expected predicate) so a later
+   * round re-runs it deterministically instead of re-deriving the same
+   * blockers. Persisted in `state.json`; the scripts live under
+   * `.railhead/probes/`. Absent/empty for runs without goal findings. */
+  probes?: ProbeEntry[];
   /** Issue #84 (ADR 0022 stage 3): the durable-session builder's ledger — the
    * session id to re-attach on resume and the commit a fresh-session recovery
-   * seeds from. Present only when `config.session_builder` is true. */
+   * seeds from. */
   builder?: BuilderState;
   /** Issue #133: the run's base session — the `[system][preamble]` prefix
    * every fresh phase forks (`--session <id> --fork`) so its task message
@@ -318,9 +320,7 @@ export function createRunState(meta: RunMeta): RunState {
     visual_pending: null,
     pending_checkpoints: { goal: [], structural: [] },
     original_prompt: meta.original_prompt,
-    plan_rulings: [],
-    rulings: [],
-    ...(meta.config.session_builder === true ? { builder: newBuilderState() } : {}),
+    builder: newBuilderState(),
   };
 }
 
@@ -331,13 +331,13 @@ export function findTicket(
   return state.tickets.find((t) => t.file === file);
 }
 
+/** The next ticket to run: the first `ready` ticket in plan order. Execution
+ * is strictly sequential — array order IS the execution order, and correctives
+ * are inserted immediately before the remaining planned frontier. Returns an
+ * empty array only when nothing is ready (the run loop then terminates). */
 export function frontier(state: RunState): TicketState[] {
-  const committed = new Set(
-    state.tickets.filter((t) => t.status === "committed").map((t) => t.file),
-  );
-  return state.tickets
-    .filter((t) => t.status === "ready")
-    .filter((t) => t.blocked_by.every((b) => committed.has(b)));
+  const next = state.tickets.find((t) => t.status === "ready");
+  return next ? [next] : [];
 }
 
 export const isFinished = (s: RunStatus) =>

@@ -1,5 +1,9 @@
 # Replan ticket numbering is globalized before it reaches the frontier
 
+> Superseded by ADR 0048: with no `blocked_by` edges there is nothing to remap;
+> a replan numbers its regenerated frontier into the run's sequence and runs in
+> array order.
+
 Recorded after the platformer run (run-20260918-1154). A plan-defect block
 triggered an auto-replan; the replan regenerated 15 tickets, and the run
 stopped immediately after the first of them committed. The stop was silent —

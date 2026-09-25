@@ -3,7 +3,6 @@ import { renderContracts, type ContractsIndex } from "../core/contracts.ts";
 import { LEARNED_MARKER, RETRACTED_MARKER } from "./learnings.ts";
 import { visionCapabilityBlock, type VisionCapabilityFact } from "../execute/vision-probe.ts";
 import { buildDigestInjection } from "./digest.ts";
-import { HANDOFF_START, HANDOFF_END } from "./handoff.ts";
 import { CHARTER_DOC } from "./coherence.ts";
 import { renderPreamble, renderTask, type PhaseMessages } from "./preamble.ts";
 
@@ -81,464 +80,6 @@ If the plan or environment is FUNDAMENTALLY wrong — continuing would stack bad
 
 Do NOT use this as an escape from a hard ticket, a failing gate, or retry pressure. Those have their own machinery: review feedback, the retry/failure ladder, corrective tickets. Use the halt signal ONLY for a real "this needs a human" conclusion (the plan is wrong, the environment is broken) — not for "this ticket is hard."`;
 
-export interface Runnable {
-  generate: () => Promise<string>;
-}
-
-/** Issue #45: the RED/GREEN evidence check item injected into both reviewer
- * prompt variants when the ticket has a test phase. The reviewer never sees
- * the implementer's transcript — it judges evidence from the diff or the
- * touched files alone. `evidenceSource` is the noun phrase for what the
- * reviewer inspects ("the diff" or "the touched files") so the same wording
- * serves both prompt variants without duplication. Returns "" when the
- * ticket is not testable. */
-function redGreenEvidenceCheckItem(
-  testable: boolean | undefined,
-  fixMode: boolean | undefined,
-  evidenceSource: "diff" | "touched files",
-): string {
-  if (!testable) return "";
-  const num = fixMode ? "6" : "5";
-  const testCode = evidenceSource === "diff"
-    ? "the diff contains NO test code at all (no new or modified test file exercising the acceptance criteria), OR the diff's tests could not plausibly have gone red→green"
-    : "NO test file in the touched-files list exercises the acceptance criteria, OR the tests you read could not plausibly have gone red→green";
-  return `
-${num}. RED/GREEN evidence: this ticket was marked testable, so the implementer was asked to include a red→green evidence block in its report (a RED run with the failing command + relevant failing output + why the failure was expected, and a GREEN run with the passing command + relevant passing output). The implementer's transcript is NOT in front of you — judge red/green evidence from ${evidenceSource} alone. If ${testCode} against the implementation change (e.g. the assertion recomputes the answer the way the code does, the test mocks the very behaviour it claims to verify, or the test would already pass before this change was applied), treat that as missing or implausible red/green evidence and flag it as [MAJOR]. This is a trust check on whether real tests went red then green — it is distinct from "test quality / thoroughness" opinions, which remain out of scope. Do NOT raise this as [BLOCKER] — the verify gate already confirmed the suite passes now; the finding is about whether the change carries evidence the implementer observed the red→green transition it describes, not about correctness.`;
-}
-
-/** One round of prior implement→review on the same ticket (#16). The fresh-
- * context implementer has no memory of what it already tried, so the loop
- * converges on the same fix. This record gives it just enough history to
- * diverge: the finding text (so it can see the pattern) and optionally the
- * approach summary (from the prior attempt's handoff). */
-export interface AttemptRound {
-  attempt: number;
-  findings: string[];
-  approach?: string;
-}
-
-export async function buildImplementerPrompt(
-  options: {
-    cwd: string;
-    ticketFile: string;
-    mission: string;
-    ticketBody: string;
-    criteria: string[];
-    verify: string[];
-    prevFeedback: string | null;
-    /** Working diff from the previous attempt, carried only on a REVIEW retry
-     * (verify-failure retries clean the worktree). When present, the
-     * implementer is told to PATCH this diff, not regenerate from scratch. */
-    priorDiff?: string | null;
-    /** Distilled handoff from the previous failed attempt (issue #9): a 1-2k
-     * token "what was tried / why it failed / suggested next" summary parsed
-     * from the prior attempt's `$HANDOFF ... $END` block. When present, this
-     * SUBSTITUTES for `priorDiff` — the raw diff is the bloat (5-10k tokens at
-     * the 64k budget) the handoff was introduced to shed. Falls back to
-     * `priorDiff` when null (push failed, or first attempt). */
-    prevHandoff?: string | null;
-    /** Prior attempt rounds on this ticket (#16): each carries the findings
-     * that blocked it and optionally the approach summary. Injected as a compact
-     * block so a fresh-context implementer can see "I already tried X and it
-     * got rejected for Y" instead of converging on the same fix. */
-    attemptHistory?: AttemptRound[];
-    contracts?: ContractsIndex;
-    /** Model context-window size in tokens; guides the worker to stay within budget. */
-    contextBudget?: number;
-    /** Project learnings (tooling facts from prior phases). Injected as a
-     * `## Project learnings` section so the model sees tooling discoveries
-     * made by prior agents on this project. See ADR 0012. */
-    learnings?: string | null;
-    /** Fix mode (issue #6): when true, inject the diagnosing-bugs discipline
-     * (build a reproducer before hypothesizing, minimize, rank 3-5 falsifiable
-     * hypotheses, change one variable at a time, write the regression test
-     * before the fix, clean up debug logs). The railhead owns the environment,
-     * so the interactive skill's "ask the user for access" escape hatch
-     * collapses to "mark the ticket inconclusive." */
-    fixMode?: boolean;
-    /** Issue #34: the planner's design intent (redefined goal, visual identity,
-     * quality bar). When present, injected so the implementer reconstructs
-     * the planner's aesthetic/narrative vision instead of reverse-engineering
-     * intent from a symbol list. */
-    designDoc?: string | null;
-    /** Issue #34: the planner's architecture intent (module map, rationale).
-     * When present, injected so the implementer understands the planned
-     * structure and cross-cutting concerns. */
-    architectureDoc?: string | null;
-    /** Issue #99 (ADR 0028): whether this ticket touches the rendered surface.
-     * Gates the visual design NARRATIVE (`designDoc`) — only surface tickets
-     * get it in full; a non-surface ticket gets at most a one-line pointer.
-     * The architecture doc is NOT surface-gated (the module map is a model
-     * ticket's audience too). Undefined behaves as surface (back-compat with
-     * callers that pass a narrative and expect it injected). */
-    surface?: boolean;
-    /** Issue #99 (ADR 0028): the coherence charter (docs/coherence.md content)
-     * for a SURFACE ticket. Injected so the implementer honors the plan-time
-     * visual contract rather than inventing its own chrome. */
-    coherenceDoc?: string | null;
-    /** Issue #45: when true, the ticket has a testable seam and the test
-      * phase ran — inject a RED/GREEN evidence requirement so the reviewer
-      * can audit red→green behaviour from the diff alone. `false` (pure
-      * config / manifest / docs tickets, or test phase opted out) omits
-      * cleanly. */
-    testable?: boolean;
-    /** Issue #50: rolling project digest — architectural state summary from
-      * prior checkpoints. Injected so the implementer sees structural context
-      * accumulated across tickets. See ADR 0018. */
-    digest?: string | null;
-    /** ADR 0036: the railhead-measured vision capability of this seat's model.
-     * Injected for surface tickets so a capable implementer self-checks with
-     * pixels, and a blind one does not claim visual verification. */
-    visionCapability?: VisionCapabilityFact | null;
-  },
-): Promise<PhaseMessages> {
-  const { cwd, ticketFile, mission, ticketBody, criteria, verify, prevFeedback, priorDiff, prevHandoff, attemptHistory, contracts, contextBudget, learnings, fixMode, designDoc, architectureDoc, surface, coherenceDoc, testable, digest, visionCapability } =
-    options;
-
-  const criteriaBlock = criteria.length
-    ? criteria.map((c) => `- [ ] ${c}`).join("\n")
-    : "- (no acceptance criteria listed)";
-
-  const verifyBlock = verify.length
-    ? verify.map((c) => `  - ${c}`).join("\n")
-    : "  - (none configured)";
-
-  // When the prior attempt emitted a $HANDOFF block (#9, failed attempt) OR
-  // the test phase ran (#5, test author's guidance), inject the distilled
-  // handoff IN PLACE OF the raw prior diff. For #5, the handoff seeds the
-  // FIRST implement attempt even when prevFeedback is null — the test author's
-  // "what the tests assert / where to look" is guidance the implementer needs
-  // before writing a line. For #9, it substitutes for priorDiff on retries
-  // where prevFeedback is already present. When no handoff exists (push
-  // failed, or first attempt with no test phase), falls back to priorDiff.
-  const handoffBlock = prevHandoff
-    ? `\n## Handoff from the previous ${prevFeedback ? "attempt" : "test phase"}\n\n${prevFeedback ? "The previous attempt failed and emitted this handoff summary. Read it before re-reading any diff — it names what was tried and what to try next, so you do not re-derive the prior attempt's reasoning from its raw diff." : "The test phase wrote failing tests for this ticket and emitted this handoff. It names what each test asserts and where to look — read it before writing implementation, so your code targets the tests the railhead will run against you."}\n${prevFeedback ? `\n${prevFeedback}\n` : ""}\n--- handoff ---\n${prevHandoff}`
-    : "";
-  const feedbackBlock = prevFeedback
-    ? prevHandoff
-      ? ""
-      : priorDiff
-        ? `\n## Reviewer feedback from the previous attempt (PATCH, do NOT rewrite)\n\nYour previous attempt is already on disk. It was MOSTLY CORRECT — the review found addressable issues, not a wholesale rewrite mandate. Make TARGETED edits to the specific findings below against your existing code. Do NOT regenerate files that already work; do NOT restructure working modules; edit only what the findings name. Anything you rewrite from scratch is a fresh roll of the dice that can introduce NEW severe bugs.\n\n${prevFeedback}\n\n--- previous attempt's working diff ---\n${priorDiff}`
-        : `\n## Reviewer feedback from the previous attempt\n\n${prevFeedback}\n\nFix every "must-fix" item and keep the "already-resolved" ones as they are.`
-    : "";
-
-  const historyBlock = attemptHistory?.length
-    ? `\n## Attempt history (you have fresh context — read this before editing)\nThis is NOT your first attempt. Previous attempts are summarized below. READ THIS FIRST so you do not repeat an approach that already failed. If a finding appears across multiple attempts, the same fix has already been tried and rejected — try a DIFFERENT approach.\n${attemptHistory.map((r) => {
-  const approach = r.approach ? `\n  Approach: ${r.approach}` : "";
-  return `\n### Attempt ${r.attempt}\n  Findings: ${r.findings.length ? r.findings.join("; ") : "(verify/smoke failure)"}${approach}`;
-}).join("\n")}`
-    : "";
-
-  const contractBlock = contracts?.entries.length
-    ? `\n## Existing public contracts you must REUSE or EXTEND (do not create duplicates)
-These are the interfaces already in the repo that this ticket should build on. Honor their signatures exactly:
-${renderContracts(contracts)}`
-    : "";
-
-  // Issue #34: the planner's design and architecture intent are STABLE inputs:
-  // they live in the canonical preamble (message 1) so they sit before every
-  // volatile byte. Issue #99 (ADR 0028) still gates the design NARRATIVE —
-  // a non-surface ticket gets the preamble without it and a one-line pointer
-  // in the task instead; the architecture doc stays for ALL tickets (the
-  // module map is precisely the model ticket's audience).
-  const designDocBlock = surface !== false && designDoc
-    ? designRequestBlock("implement")
-    : surface === false && designDoc
-      ? DESIGN_POINTER_BLOCK
-      : "";
-  const coherenceBlockText = surface !== false && coherenceDoc
-    ? coherenceRequestBlock("honor")
-    : "";
-  const architectureDocBlock = architectureDoc
-    ? architectureRequestBlock("implement")
-    : "";
-
-  const learningsBlock = learnings
-    ? `\n## Project learnings (tooling facts from prior phases)\nThese are tooling/environment facts discovered by prior agents on this project. They are unverified model-claims, not tested facts. Most are safe to trust (a command that needs a flag, a port that isn't default). But a claim about YOUR OWN capabilities (e.g. "this model cannot read images") is a self-assessment that may be wrong — if such a claim would change your approach, TEST it once before deferring to it. If a learning turns out to be false, retract it with the ${RETRACTED_MARKER} marker below.\n${learnings.split("\n").map((l) => `- ${l}`).join("\n")}\n`
-    : "";
-
-  const digestBlock = buildDigestInjection(digest);
-  const implementVisionBlock = surface !== false ? visionCapabilityBlock(visionCapability ?? null, "implement") : "";
-
-  // Fix-mode discipline (issue #6): the diagnosing-bugs skill ported for an
-  // unattended railhead. The model MUST build a reproducer before hypothesizing
-  // — small models fixate on the first plausible idea, never instrument, never
-  // minimize. This block is injected only when config.fix_mode is true (set by
-  // `railhead fix`). The interactive skill's "ask the user for access" escape
-  // hatch collapses to "mark the ticket inconclusive" — the railhead owns the
-  // environment (cwd), so there is nothing to ask for.
-  const fixModeBlock = fixMode
-    ? `
-## Diagnosing-bugs discipline (fix mode)
-This is a BUG FIX, not a new build. The ticket body contains reproduction steps. Follow these phases IN ORDER — skipping ahead to a hypothesis without a reproducer is the exact failure this discipline prevents.
-
-### Phase 1: Build a feedback loop (THIS IS THE DISCIPLINE)
-Before writing ANY fix, build a tight, red-capable reproducer — one command you have ALREADY RUN that goes red on this bug and will go green once fixed. Be aggressive and creative: failing test, curl/HTTP script, CLI invocation with a fixture, headless browser script, replay a captured trace, throwaway railhead, property/fuzz loop, git-bisect railhead, differential loop. Pick the tightest loop that reaches the bug's code path and asserts the USER'S EXACT symptom (not "didn't crash" — it must catch THIS specific bug).
-
-Tighten it: make it fast (seconds, not minutes), deterministic (pin time, seed RNG, isolate the filesystem), and sharp (assert the specific symptom, not a vague "works"). A 30-second flaky loop is barely better than no loop; a 2-second deterministic one is a debugging superpower.
-
-If you genuinely cannot build a loop, say so explicitly in your output — list what you tried, then emit DONE with no changes. Do NOT proceed to hypothesizing without a reproducer. No red-capable command, no fix.
-
-### Phase 2: Minimize
-Once red, shrink the repro to the smallest scenario that still goes red. Cut inputs, callers, config, data, and steps ONE AT A TIME, re-running the loop after each cut. Keep only what is load-bearing for the failure. A minimal repro shrinks the hypothesis space and becomes the regression test in Phase 5.
-
-### Phase 3: Hypothesize (3-5 ranked, falsifiable)
-Generate 3-5 ranked hypotheses BEFORE testing any. Single-hypothesis generation anchors on the first plausible idea — that is the failure mode this prevents. Each hypothesis must be falsifiable: state the prediction in the form "If <X> is the cause, then <changing Y> will make the bug disappear / <changing Z> will make it worse." If you cannot state the prediction, the hypothesis is a vibe — discard or sharpen it. Document your ranked list in the output (for human audit), then proceed with your own ranking.
-
-### Phase 4: Instrument (one variable at a time)
-Each probe maps to a specific prediction from Phase 3. Change ONE variable at a time. Prefer a debugger/REPL breakpoint over logs; when logs are needed, place them at the boundaries that distinguish hypotheses. NEVER "log everything and grep." Tag every debug log with a unique prefix (e.g. [DEBUG-a4f2]) so cleanup is a single grep at the end.
-
-### Phase 5: Fix + regression test
-Write the regression test BEFORE the fix — turn the minimized repro into a failing test at the correct seam (a seam that exercises the real bug pattern at the call site, not a shallow unit test that can't replicate the failure). Watch it fail. Apply the fix. Watch it pass. Re-run the Phase 1 feedback loop against the original un-minimized scenario. If no correct seam exists, that itself is the finding — note it in your output (the codebase architecture is preventing the bug from being locked down).
-
-### Phase 6: Cleanup
-Before declaring DONE: (1) re-run the original reproducer — it must no longer reproduce; (2) the regression test passes (or the absence of a correct seam is documented); (3) grep for your [DEBUG-...] prefix and remove every tagged log line; (4) delete any throwaway reproducer scripts (or move them to a clearly-marked debug location); (5) state which hypothesis turned out correct in your output, so the next debugger learns.
-`
-    : "";
-
-  const [agents, context] = await Promise.all([
-    readPreambleDoc(cwd, "AGENTS.md"),
-    readPreambleDoc(cwd, "CONTEXT.md"),
-  ]);
-
-  const preamble = renderPreamble({
-    mission,
-    agents,
-    context,
-    design: surface !== false ? designDoc : null,
-    architecture: architectureDoc,
-    coherence: surface !== false ? coherenceDoc : null,
-  });
-
-  // Issue #45: a small-context implementer may claim DONE on code it never
-  // ran the suite against — verify catches that, but the reviewer can only
-  // audit red→green if the implementer's report actually carries the
-  // transcript. Gate on "test phase ran" so the requirement is omitted for
-  // pure-config tickets and when the user opted out of the test phase (no
-  // pre-written tests to red→green against).
-  const evidenceBlock = testable
-    ? `
-## RED/GREEN evidence (required in your final report)
-This ticket has a testable seam, so your final report MUST include a red→green evidence block BEFORE the DONE marker, in exactly this form:
-
-RED
-<the command you ran to see the test fail, before implementation — the project's own test command scoped to the test file this ticket targets>
-<the relevant failing output — 5-15 lines pasted from the run, not a paraphrase>
-<why the failure was expected at this point — one line: the function/type/behaviour did not exist yet, or the assertion exercised not-yet-implemented logic>
-
-GREEN
-<the command you ran to see the test pass, after implementation — the project's actual verify/test command>
-<the relevant passing output — 5-15 lines pasted from the run>
-
-Rules:
-- The RED run must be a command you ACTUALLY EXECUTED, with output pasted from the run — not a prediction. If you did not run the suite before implementing (e.g. you followed "Build early, build often" and built incrementally), you may reconstruct the red state by reverting your implementation change, running the test, then re-applying it.
-- The GREEN run must be the project's actual verify/test command, not a one-off compile check.
-- If the test phase wrote tests you are satisfying, the RED evidence is the test-phase failure (re-run it to capture the output if you did not capture it during implement).
-- A report that claims DONE without a RED/GREEN evidence block is treated by the reviewer as a missing-evidence finding and may be sent back.
-`
-    : "";
-
-  const roleBlock = `You are the Implementer for one ticket of an unattended build. Work only within this ticket's scope; the acceptance criteria are the contract.
-
-The contracts you list under "expected new contracts" (introduces) are load-bearing: later tickets in this build will consume them by name. Design their interfaces accordingly, since re-deriving or renaming them later is expensive.
-
-## Fresh context, small model
-This is a small-context run. Keep your edits minimal and targeted. The full repo may exceed your window — that is expected. Do not read entire large files; use targeted reads/greps. Do NOT re-derive interfaces that already exist — use the contracts listed above and the specific files the ticket names.${contextBudget ? `\nYour context window is budgeted to roughly ${Math.floor(contextBudget / 1000)}k tokens — keep reads small and edits targeted so you do not run out.` : ""}
-
-## Lazy code discipline
-Before writing any code, stop at the first rung that holds:
-1. Does this need to exist? (YAGNI — skip if not)
-2. Already in this codebase? (reuse it, don't rewrite)
-3. Does the stdlib do it? (use it)
-4. Native platform feature? (use it)
-5. Installed dependency? (use it)
-6. One line? (one line)
-7. Only then: write the minimum that works.
-
-The ladder runs AFTER you understand the problem: read the code the ticket touches, trace the real flow, then climb. Lazy about the solution, never about reading.
-
-Never simplify away: input validation at trust boundaries, error handling that prevents data loss, security, accessibility.
-
-No abstractions that weren't requested. No new dependency if avoidable. Deletion over addition. Shortest working diff wins, but only once you understand the problem.
-
-## Tool-output discipline
-When you run a build, test, or diff command, scope its output before reading it back. Use \`command 2>&1 | tail -30\`, \`--stat\`, \`--name-only\`, or \`2>&1 | head -50\` to get the signal at a fraction of the tokens. A 10k-token build log fills your context and slows every subsequent token — read summaries first, expand only the axis that actually failed.
-
-## Build early, build often
-After writing your first file, immediately run the project's build command (the first item in the verify list). Do NOT write all files first and then build — a wrong API assumption in the first file will cascade into every file you write after it. Build after each file or pair of files, fix the errors while the context is small, then continue. This costs 2-3 extra builds but saves 20+ steps of reading dependency source to understand an API you already got wrong.
-
-## Dependency APIs
-When using an external library, do NOT read its installed source code (dependency caches, vendored directories, lock files) — it is unstructured, massive, and burns your step budget. Instead: (1) look for an \`examples/\` directory in the dependency and read ONE example file, (2) check the package manifest for feature flags or entry points, (3) if no examples exist, write a minimal compile-test (a 5-line program that imports the API) to probe it. If the API doesn't match what the ticket spec says, adapt to the real API — the spec's code sketches are best-effort, not ground truth.
-
-## File editing
-Prefer the \`write\` tool (create or overwrite a whole file) for new files and small files. Use \`edit\` (find-and-replace) only for targeted changes to large existing files. When using \`edit\`, always read the file immediately before editing — never rely on memory of a prior read, as the file may have changed. If \`edit\` fails with "oldString not found", re-read the file and retry with the exact content. For new files, always use \`write\` — never \`edit\` on a non-existent file.
-
-## Verify
-When done, run these commands and make sure they pass:
-${verifyBlock}
-If you have not already run the build during implementation (see "Build early, build often" above), run it NOW before declaring DONE. Never declare DONE on unverified code.
-## Failed-attempt handoff (push)
-If this attempt is failing — verify fails, or review returned blocking findings you cannot address in this attempt — end your run with a handoff block so the next attempt does not have to re-read your whole diff to learn what you already figured out. Emit it on its own lines, BEFORE your final DONE marker, exactly in this form:
-
-${HANDOFF_START}
-<what you tried, max 5 lines>
-<why it failed, max 3 lines>
-<suggested approach for the next attempt, max 3 lines>
-${HANDOFF_END}
-
-Rules:
-- The block is OPTIONAL when you are succeeding — omit it entirely on a successful attempt. Emit it only when you know you are failing.
-- Keep it terse and self-contained: a fresh agent holding only this block (no diff, no transcript) must understand what to try next. Do not reference "the issue" or "the bug"; name the thing.
-- One block per attempt. If you start one and get cut off, start a fresh one — the railhead takes the first COMPLETE ${HANDOFF_START}...${HANDOFF_END} pair.
-- Tooling facts belong in the ${LEARNED_MARKER} line below, not here. This block is about the attempt's reasoning, not reusable environment facts.
-
-## Reusable tooling facts (push)
-While working you may have discovered a non-obvious tooling or environment fact a fresh agent on this project would have to rediscover: how to capture a screenshot, a command that fails without a TTY, a port that's not the default, a runtime quirk. If you discovered such a fact, push it back so the railhead can persist it. Emit it on its own line, exactly in this form, BEFORE your final DONE marker (the railhead treats DONE as a hard stop, so anything after it is never read):
-
-${LEARNED_MARKER} <one terse line, self-contained, no preamble — e.g. "${LEARNED_MARKER} the dev server panics without a TTY on this project; build first, then run the binary directly">
-
-Rules:
-- One line, beginning with the exact marker \`${LEARNED_MARKER}\`. Mid-sentence mentions are ignored.
-- Omit it entirely if you discovered nothing reusable. Do NOT emit \`${LEARNED_MARKER} NONE\` "just in case"; silence is the correct empty signal.
-- Each fact must be self-contained — a future agent with no context must understand it. Do not reference "the issue" or "the bug"; name the thing.
-- Tooling facts only. Not code facts (visible in the diff), not reviewer findings, not summaries. If in doubt, omit.
-
-If a prior learning injected into your prompt above is WRONG — you personally verified it does not hold (e.g. it claims "this model cannot read images" but you just successfully read a screenshot file) — emit a retraction on its own line, in this form:
-
-${RETRACTED_MARKER} <the prior learning text, or enough of it to uniquely identify the line>
-
-The railhead removes the matched line from future prompts. Use this only for facts you personally falsified, not for facts you simply did not need this attempt.
-${evidenceBlock}
-${HALT_CONTRACT}
-## Terse output
-You run unattended — no human reads your narration, and every prose token you emit stays in your context for the next step. Do not explain what you did. Skip preamble, summaries, and "I will" plans. Do the work, then end with exactly the required marker:
-
-DONE <files touched, comma or newline separated>`;
-
-  const ticketBlock = `TICKET FILE: ${ticketFile}
-
-TICKET:
-${ticketBody}
-
-ACCEPTANCE CRITERIA:
-${criteriaBlock}`;
-
-  return {
-    preamble,
-    task: renderTask([
-      roleBlock,
-      learningsBlock,
-      digestBlock,
-      implementVisionBlock,
-      designDocBlock,
-      coherenceBlockText,
-      architectureDocBlock,
-      contractBlock,
-      ticketBlock,
-      `${feedbackBlock}${handoffBlock}${historyBlock}${fixModeBlock}`,
-    ]),
-  };
-}
-
-/**
- * Build the prompt for the test phase (issue #5 — TDD as a railhead phase).
- * A fresh opencode subprocess runs this BEFORE the implement phase on
- * testable tickets: it writes one failing test per acceptance criterion at
- * the seams the ticket names, runs them, confirms they fail for the right
- * reasons, and emits a `$HANDOFF` block the implementer receives as
- * `prevHandoff`. The test is the external oracle a small-context model
- * cannot provide for itself (ADR 0014) — it substitutes self-judgment with
- * a check the implementer must satisfy.
- *
- * Deliberately NARROW: does not inherit the implementer's contracts block,
- * priorDiff scaffolding, or visual self-check. The test author's job is one
- * thing — write failing tests at the named seams — and the prompt is sized
- * to that job so the phase stays in the fast band (ADR 0014).
- */
-export async function buildTestPhasePrompt(options: {
-  cwd: string;
-  ticketFile: string;
-  ticketBody: string;
-  criteria: string[];
-  verify: string[];
-  /** Seams the tests must target — typically the ticket's `files` + the
-   * symbols its `references`/`introduces` name. Surfaced as a block so the
-   * test author writes tests at the right boundary, not at an imagined one. */
-  seams: string[];
-  /** Project learnings (tooling facts). Same injection as the implementer. */
-  learnings?: string | null;
-  /** Model context-window size in tokens; guides the test author to stay
-   * within budget. Same signal the implementer gets — without it the test
-   * phase cat'd 8 whole files in a real run and compacted 9 times. */
-  contextBudget?: number;
-}): Promise<PhaseMessages> {
-  const { cwd, ticketFile, ticketBody, criteria, verify, seams, learnings, contextBudget } = options;
-
-  const criteriaBlock = criteria.length
-    ? criteria.map((c) => `- [ ] ${c}`).join("\n")
-    : "- (no acceptance criteria listed — emit $HANDOFF NONE and DONE; nothing to test)";
-
-  const verifyBlock = verify.length
-    ? verify.map((c) => `- ${c}`).join("\n")
-    : "  - (none configured — run whatever the project's test command is)";
-
-  const seamsBlock = seams.length
-    ? seams.map((s) => `- \`${s}\``).join("\n")
-    : "- (no specific seam named — write tests at the public boundary the criteria describe)";
-
-  const learningsBlock = learnings
-    ? `\n## Project learnings (tooling facts from prior phases)\nThese are tooling/environment facts discovered by prior agents on this project. They are unverified model-claims, not tested facts. Most are safe to trust (a command that needs a flag, a port that isn't default). But a claim about YOUR OWN capabilities (e.g. "this model cannot read images") is a self-assessment that may be wrong — if such a claim would change your approach, TEST it once before deferring to it. If a learning turns out to be false, retract it with the ${RETRACTED_MARKER} marker below.\n${learnings.split("\n").map((l) => `- ${l}`).join("\n")}\n`
-    : "";
-
-  const [agents, context] = await Promise.all([
-    readPreambleDoc(cwd, "AGENTS.md"),
-    readPreambleDoc(cwd, "CONTEXT.md"),
-  ]);
-
-  const roleBlock = `You are the Test Author for one ticket of an unattended build. Your job: write failing tests at the seams this ticket names, run them, confirm they fail for the right reasons, then end with the $HANDOFF marker describing what the tests assert and where the implementer should look.
-
-This is a small-context run. Keep your reads minimal and targeted. Do not read entire large files (no \`cat src/foo.ts\`); use targeted reads (read a line range, grep for a symbol) to confirm the seam's signature — you only need the type/function shape to write an importing test, not the file's body.${contextBudget ? `\nYour context window is budgeted to roughly ${Math.floor(contextBudget / 1000)}k tokens — keep reads small so you do not run out.` : ""}
-
-TICKET FILE: ${ticketFile}
-
-TICKET:
-${ticketBody}
-
-ACCEPTANCE CRITERIA (write ONE test per criterion, not an exhaustive spec):
-${criteriaBlock}
-${learningsBlock}
-## Seams
-${seamsBlock}
-
-## Create new files — do NOT edit implementation files
-Write tests as NEW files (e.g. \`tests/ball_tests.rs\`, \`src/greet.test.ts\`). Use the \`write\` tool to create them. Do NOT use \`edit\` on implementation files (\`src/main.rs\`, \`src/ball.rs\`, etc.) — you are the test author, not the implementer. If you need to add a test module to an existing file, create a separate test file that imports from it instead.
-
-## Bail out when the seam does not exist
-If the types, functions, or modules the tests would import do not exist yet (no module file, no exported symbol, no public API to call), you CANNOT write a meaningful pre-implementation test. Do NOT invent types, stub implementations, or redefine components in the test file to make it compile — a test against your own mock types tests nothing. Instead, emit \`$HANDOFF NONE\` and \`DONE\` with no test files. The implementer will proceed without pre-written tests; the verify gate still catches correctness after implementation. This is the correct response for frameworks where a system can only be tested after it is registered (ECS, event loops, render pipelines) and the registration is the implementer's job.
-
-## Run and verify failure
-After writing tests, run them via the verify command (${verifyBlock}). Confirm each test FAILS for the right reason — the function is missing, the type is absent, the behavior is wrong — NOT a syntax error in the test itself. A test that passes before implementation is tautological: rewrite it so its expected value comes from an independent source of truth (a known literal, a worked example), not from recomputing the answer the way the code does.
-
-## Anti-patterns (must avoid)
-- Implementation-coupled: mocks internal collaborators, tests private methods, verifies through a side channel. The tell: the test breaks when you refactor but behavior hasn't changed. Test through the PUBLIC seam the criteria name.
-- Tautological: the assertion recomputes the expected value the way the code does (expect(add(a, b)).toBe(a + b), a snapshot derived by hand the same way). Expected values must come from a known-good literal or worked example — never from re-deriving the implementation's own logic.
-- Horizontal slicing: writing all tests first then implementing. You write tests ONLY; the implement phase writes the impl. But do not write tests for IMAGINED behavior the criteria don't name — one test per criterion, scoped to what the ticket actually asks for.
-
-## End
-When done, emit your handoff so the implementer reads intent without re-deriving from your test code:
-
-${HANDOFF_START}
-<for each test: file path, what it asserts, why it is failing right now, where the implementer should look>
-${HANDOFF_END}
-
-DONE <test files touched, comma or newline separated>`;
-
-  return {
-    preamble: renderPreamble({ agents, context }),
-    task: roleBlock,
-  };
-}
-
 export async function buildReviewerPrompt(options: {
   ticketFile: string;
   ticketBody: string;
@@ -577,11 +118,6 @@ export async function buildReviewerPrompt(options: {
    * what the linter flagged so it can focus on logic/design rather than
    * style or common bug patterns the linter already caught. */
   lintOutput?: string | null;
-  /** Issue #45: when true, the reviewer treats missing/implausible red/green
-   * evidence (no tests in the diff, or tests that could not have gone
-   * red→green against this change) as a [MAJOR] finding. Omitted for
-   * `testable: false` tickets. */
-  testable?: boolean;
   /** Issue #46: when set, the diff was written to this ledger file path and
    * the reviewer should read it itself instead of having it inlined. The
    * prompt substitutes a "read the diff file at <path>" block + stat for the
@@ -593,7 +129,7 @@ export async function buildReviewerPrompt(options: {
   /** Issue #50: rolling project digest. See ADR 0018. */
   digest?: string | null;
 }): Promise<PhaseMessages> {
-  const { ticketFile, ticketBody, criteria, diff, priorFindings, contracts, learnings, fixMode, attempt, designDoc, architectureDoc, surface, coherenceDoc, lintOutput, testable, diffFile, diffStat, digest } = options;
+  const { ticketFile, ticketBody, criteria, diff, priorFindings, contracts, learnings, fixMode, attempt, designDoc, architectureDoc, surface, coherenceDoc, lintOutput, diffFile, diffStat, digest } = options;
   const criteriaBlock = criteria.length
     ? criteria.map((c) => `- [ ] ${c}`).join("\n")
     : "- (no acceptance criteria listed)";
@@ -665,7 +201,7 @@ Check:
 2. Are there bugs, crashes, security issues, or broken wiring that would stop it from working?
 3. Does it assemble correctly in context (e.g. geometry/normals, coordinates, imports, runtime behavior), not just read in isolation?
 4. Does the change introduce spurious or duplicated contracts rather than reusing existing ones? If EXISTING PUBLIC CONTRACTS were listed above, check the diff's calls/signatures against them exactly — a mismatch (wrong arity, renamed field, re-derived constant) is a MUST-FIX, not a nit.${fixMode ? `
-5. Leftover debug instrumentation: the diff must NOT add any [DEBUG-...] log lines (the fix-mode discipline requires cleanup before DONE — Phase 6). If the diff introduces tagged debug logs, flag each as [MAJOR].` : ""}${redGreenEvidenceCheckItem(testable, fixMode, "diff")}
+5. Leftover debug instrumentation: the diff must NOT add any [DEBUG-...] log lines (the fix-mode discipline requires cleanup before DONE — Phase 6). If the diff introduces tagged debug logs, flag each as [MAJOR].` : ""}
 
 Do NOT report: style preferences, naming, formatting, unused imports, subjective taste, or anything that does not affect whether the ticket works and is complete. The diff may contain tool-generated artifacts (binary files, screenshots, log files, MCP tool directories like .playwright-mcp/) — these are runtime side effects, not the implementer's work. Ignore them; judge only source code changes.
 
@@ -835,15 +371,10 @@ export async function buildReviewerReadModePrompt(options: {
   coherenceDoc?: string | null;
   /** Issue #41: linter output to inject into the reviewer prompt. */
   lintOutput?: string | null;
-  /** Issue #45: when true, the reviewer treats missing/implausible red/green
-   * evidence (no test among the touched files, or tests that could not have
-   * gone red→green against this change) as a [MAJOR] finding. Omitted for
-   * `testable: false` tickets. */
-  testable?: boolean;
   /** Issue #50: rolling project digest. See ADR 0018. */
   digest?: string | null;
 }): Promise<PhaseMessages> {
-  const { ticketFile, ticketBody, criteria, stat, files, priorFindings, contracts, learnings, fixMode, attempt, designDoc, architectureDoc, surface, coherenceDoc, lintOutput, testable, digest } = options;
+  const { ticketFile, ticketBody, criteria, stat, files, priorFindings, contracts, learnings, fixMode, attempt, designDoc, architectureDoc, surface, coherenceDoc, lintOutput, digest } = options;
   const criteriaBlock = criteria.length
     ? criteria.map((c) => `- [ ] ${c}`).join("\n")
     : "- (no acceptance criteria listed)";
@@ -905,7 +436,7 @@ Read each file listed above. For each file, check:
 2. Are there bugs, crashes, security issues, or broken wiring that would stop it from working?
 3. Does it assemble correctly in context (e.g. geometry/normals, coordinates, imports, runtime behavior), not just read in isolation?
 4. Does the change introduce spurious or duplicated contracts rather than reusing existing ones? If EXISTING PUBLIC CONTRACTS were listed above, check the code's calls/signatures against them exactly — a mismatch (wrong arity, renamed field, re-derived constant) is a MUST-FIX, not a nit.${fixMode ? `
-5. Leftover debug instrumentation: the code must NOT add any [DEBUG-...] log lines (the fix-mode discipline requires cleanup before DONE — Phase 6). If the code introduces tagged debug logs, flag each as [MAJOR].` : ""}${redGreenEvidenceCheckItem(testable, fixMode, "touched files")}
+5. Leftover debug instrumentation: the code must NOT add any [DEBUG-...] log lines (the fix-mode discipline requires cleanup before DONE — Phase 6). If the code introduces tagged debug logs, flag each as [MAJOR].` : ""}
 
 Do NOT report: style preferences, naming, formatting, unused imports, subjective taste, or anything that does not affect whether the ticket works and is complete. Ignore binary files, screenshots, log files, and MCP tool directories — these are runtime side effects, not the implementer's work.
 

@@ -16,8 +16,7 @@ function makeState(ctxPeak: number, budget?: number): RunState {
       max_review_retries: null,
       infra_backoff_sec: [5, 15, 45, 120],
       max_context_tokens: budget,
-      model: { plan: null, implement: null, review: null, visual: null, goal: null, extract: null },
-    },
+      model: { plan: null, implement: null, review: null, visual: null, goal: null, extract: null }},
 
     pause_on_failure: false,
     verbose: false, quiet: false,
@@ -26,7 +25,6 @@ function makeState(ctxPeak: number, budget?: number): RunState {
         file: "01-a.md",
         title: "a",
         number: "01",
-        blocked_by: [],
         status: "committed",
         attempts: 1,
         start_commit: null,
@@ -40,12 +38,10 @@ function makeState(ctxPeak: number, budget?: number): RunState {
         ],
         duration_ms: 120000,
         context: { compactions: 0, peakInputTokens: ctxPeak, finalInputTokens: ctxPeak, totalInputTokens: ctxPeak, totalOutputTokens: 0, generationMs: 0, decodeOutputTokens: 0, outputTokensPerSec: 0, wallMs: 0, endToEndTokensPerSec: 0 },
-        logs: [],
-      },
+        logs: []},
     ],
     started_at: "x",
-    updated_at: "x",
-  };
+    updated_at: "x"};
 }
 
 describe("buildReport context guard-rail", () => {
@@ -64,15 +60,14 @@ describe("buildReport context guard-rail", () => {
     expect(r).not.toContain("⚠");
   });
 
-  it("warns when a ticket compacted (non-zero compaction count)", () => {
-    // The whole point of the railhead is to avoid compaction; a non-zero count
-    // means the budget was mis-set or the model over-read. Surface it so the
-    // run's health is visible without digging into the ledger.
+  it("notes compactions as the durable builder's context manager (non-zero compaction count)", () => {
+    // The durable-session builder compacts as its normal context management;
+    // surface the count so the run's shape is visible without digging into
+    // the ledger (ADR 0022).
     const s = makeState(30000, 100000);
     s.tickets[0].context = { compactions: 4, peakInputTokens: 30000, finalInputTokens: 30000, totalInputTokens: 30000, totalOutputTokens: 0, generationMs: 0, decodeOutputTokens: 0, outputTokensPerSec: 0, wallMs: 0, endToEndTokensPerSec: 0 };
     const r = buildReport(s);
-    expect(r).toContain("⚠ 4 compactions");
-    expect(r).toMatch(/budget may be mis-set|over-read/i);
+    expect(r).toContain("4 (expected — the durable-session builder's context manager");
   });
 
   it("stays silent when compactions is zero (the healthy case)", () => {
@@ -138,6 +133,15 @@ describe("buildReport visual review status", () => {
     expect(r).toContain("manual visual inspection required");
     expect(r).not.toContain("- Visual review: PASS");
   });
+
+  it("never claims visual coverage when the gate is configured but did not run or did not pass (v2 issue 01)", () => {
+    for (const rounds of [-1, 0, 1, 2] as const) {
+      for (const ok of [null, false] as const) {
+        const r = buildReport(makeVisualState(ok, rounds));
+        expect(r).not.toContain("- Visual review: PASS");
+      }
+    }
+  });
 });
 
 describe("elapsedLabel", () => {
@@ -159,7 +163,6 @@ function ts(file: string, number: string, title: string, overrides: Partial<Tick
     file,
     number,
     title,
-    blocked_by: [],
     status: "ready",
     attempts: 0,
     start_commit: null,
@@ -205,7 +208,7 @@ describe("renderNextActionable (#43)", () => {
   it("shows a ready ticket when the frontier is non-empty", () => {
     const s = nextState([
       ts("01-add-greet.md", "01", "Add greet function", { status: "committed", commit: "abc123" }),
-      ts("02-add-farewell.md", "02", "Add farewell function", { status: "ready", blocked_by: ["01-add-greet.md"] }),
+      ts("02-add-farewell.md", "02", "Add farewell function", { status: "ready" }),
     ]);
     const out = renderNextActionable(s);
     expect(out).toContain("READY TO BUILD:");
@@ -232,32 +235,22 @@ describe("renderNextActionable (#43)", () => {
     expect(out).toContain("01 Greet");
   });
 
-  it("shows blocked tickets and what they're waiting on", () => {
+  it("shows only the first ready ticket as the actionable frontier (strict array order)", () => {
     const s = nextState([
-      ts("01-setup-db.md", "01", "Set up database", { status: "ready", blocked_by: [] }),
-      ts("02-add-models.md", "02", "Add models", { status: "ready", blocked_by: ["01-setup-db.md"] }),
+      ts("01-setup-db.md", "01", "Set up database", { status: "ready" }),
+      ts("02-add-models.md", "02", "Add models", { status: "ready" }),
     ]);
     const out = renderNextActionable(s);
     expect(out).toContain("READY TO BUILD:");
     expect(out).toContain("01 Set up database");
-    expect(out).toContain("BLOCKED:");
-    expect(out).toContain("02 Add models");
-    expect(out).toContain("waiting on: 01-setup-db.md (Set up database)");
-  });
-
-  it("shows the group label when a ready ticket has one", () => {
-    const s = nextState([
-      ts("01-core.md", "01", "Core engine", { status: "ready", group: "engine" }),
-    ]);
-    const out = renderNextActionable(s);
-    expect(out).toContain("group: engine");
+    expect(out).not.toContain("02 Add models");
   });
 
   it("shows committed/total count in the header", () => {
     const s = nextState([
       ts("01-a.md", "01", "A", { status: "committed", commit: "abc" }),
       ts("02-b.md", "02", "B", { status: "ready" }),
-      ts("03-c.md", "03", "C", { status: "ready", blocked_by: ["02-b.md"] }),
+      ts("03-c.md", "03", "C", { status: "ready" }),
     ]);
     const out = renderNextActionable(s);
     expect(out).toMatch(/1\/3 committed/);
@@ -273,14 +266,14 @@ describe("renderNextActionable (#43)", () => {
     expect(out).not.toContain("READY TO BUILD:");
   });
 
-  it("shows multiple ready tickets when the frontier has parallel work", () => {
+  it("shows only the first ready ticket (strict sequential order)", () => {
     const s = nextState([
       ts("01-a.md", "01", "A", { status: "ready" }),
       ts("02-b.md", "02", "B", { status: "ready" }),
     ]);
     const out = renderNextActionable(s);
     expect(out).toContain("01 A");
-    expect(out).toContain("02 B");
+    expect(out).not.toContain("02 B");
   });
 
   it("shows the run status in the header", () => {
@@ -289,34 +282,6 @@ describe("renderNextActionable (#43)", () => {
     ], { status: "stopped" });
     const out = renderNextActionable(s);
     expect(out).toMatch(/stopped/);
-  });
-});
-
-describe("buildReport Rulings section (#86)", () => {
-  it("lists plan and runtime rulings with their source and the tickets involved", () => {
-    const s = nextState([
-      ts("01-a.md", "01", "A", { status: "committed", commit: "abc" }),
-    ], {
-      status: "finished",
-      plan_rulings: [
-        { key: "dup-introduce:greet:a:b", finding: "duplicate introduces: symbol \"greet\" is introduced by tickets 01-a.md and 04-b.md", reason: "intentional — same symbol reused as a local in a separate module", source: "plan", tickets: ["01-a.md", "04-b.md"] },
-      ],
-      rulings: [
-        { key: "same-file:fix:b", finding: "tickets 02-fix.md and 04-b.md both touch src/engine.ts", reason: "defect-fix precedence (extendBlockedBy edge), 04 redefines at run", source: "runtime", tickets: ["02-fix.md", "04-b.md"] },
-      ],
-    });
-    const r = buildReport(s);
-    expect(r).toContain("## Rulings");
-    expect(r).toContain("[plan]");
-    expect(r).toContain("intentional — same symbol reused as a local in a separate module");
-    expect(r).toContain("[runtime]");
-    expect(r).toContain("defect-fix precedence");
-    expect(r).toContain("(01-a.md, 04-b.md)");
-  });
-
-  it("omits the Rulings section when no rulings were recorded", () => {
-    const r = buildReport(nextState([ts("01-a.md", "01", "A", { status: "ready" })], { status: "running" }));
-    expect(r).not.toContain("## Rulings");
   });
 });
 

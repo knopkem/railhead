@@ -78,7 +78,7 @@ export async function runStructuralReview(
   console.log(`\n[${nowClock()}] structural review — checkpoint "${group}"`);
 
   const allTickets = await loadTickets(state.tickets_dir);
-  const mission = allTickets[0]?.mission ?? "(no mission declared)";
+  const mission = state.original_prompt ?? "(no mission declared)";
   const architectureDoc = await git.readProjectDoc(state.cwd, "architecture");
   const contractsIndex = await loadContracts(state.cwd);
   const contractsSummary = summarizeContracts(contractsIndex);
@@ -87,7 +87,7 @@ export async function runStructuralReview(
   const priorFindings = (state.goal_reviews ?? []).flatMap((r) => r.findings);
 
   const prompt = buildStructuralReviewPrompt({
-    originalPrompt: state.original_prompt ?? mission,
+    originalPrompt: state.original_prompt ?? "(no mission declared)",
     architectureDoc,
     contractsSummary,
     verifyCommands: state.config.verify,
@@ -155,8 +155,6 @@ export async function runStructuralReview(
   const outcome = await processCorrectiveFindings(state, ledger, verdict.findings, {
     kind: "structural",
     label: `structural review (checkpoint "${group}")`,
-    mission,
-    blockUncommitted: true,
     runTicket,
     beforeCorrectives: async () => {
       structuralReplanTriggered = await replanFromCheckpoint(state, ledger, verdict.findings, group, transcript);

@@ -1,5 +1,9 @@
 # A tracked contracts index keeps per-ticket context O(ticket)
 
+> Amended by ADR 0048: the index is now built solely from committed source
+> (regex + per-file model fallback). The planner no longer declares
+> `references`/`introduces`, and gates read the whole index.
+
 The core invariant is that executing a ticket costs context proportional to the ticket, not to the accumulated project. To hold that as a repo grows, we maintain a tracked `railhead.contracts.json` at the repo root, grown at every commit.
 
 Planning and runtime use the same index, splitting the work the way the user wanted:

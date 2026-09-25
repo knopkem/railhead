@@ -1,5 +1,8 @@
 # The gate resolves references to introducers and auto-inserts implied ordering edges
 
+> Superseded by ADR 0048: `references`/`introduces` and the `blocked_by`
+> ordering edges this ADR resolves no longer exist.
+
 Issue #103. Builds on ADR 0027 (slug identity, array coordinates) and the
 single-owner rule (#101). Plan ordering must be *provably consistent with the
 contracts it declares*: a ticket that `references` a symbol another ticket

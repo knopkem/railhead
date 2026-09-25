@@ -5,7 +5,7 @@ The command entry point and everything that renders to a human.
 ## Seams
 
 - `cli.ts` — `main` dispatch (`init`/`build`/`fix`/`run`/`resume`/`status`/`next`/`log`/`reset`/`diagnose`), interactive prompts, usage text, wiring of config/policy/recovery/run. Bundled by esbuild to `dist/cli.js`.
-- `overview.ts` — status table, run report (`buildReport`, `writeReport`), `renderNextActionable`, and `nowClock`.
+- `overview.ts` — status table, run report (`buildReport`, `writeReport`), `renderNextActionable` (the next ready ticket in order), and `nowClock`.
 - `live.ts` — one-line live event rendering during a run.
 - `transcript.ts` — full phase transcript for `railhead log`.
 - `diagnose.ts` — `railhead diagnose screenshots` probe.

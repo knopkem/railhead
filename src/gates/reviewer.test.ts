@@ -713,8 +713,41 @@ node -e 'console.log(JSON.stringify({type:"text",part:{type:"text",text:process.
     return { cwd: base, ledgerDir, restorePath };
   }
 
-  it("forwards the contracts slice into the executed reviewer prompt", async () => {
-    const env = await makeFakeOpencodeEcho();
+  /** A fake `opencode` that exits non-zero without emitting a verdict — the
+   * "invocation did not complete" shape that used to be logged as a pass. */
+  async function makeFakeOpencodeExit(code: number): Promise<{ cwd: string; ledgerDir: string; restorePath: string }> {
+    const base = await mkdtemp(join(tmpdir(), "rv-exec-"));
+    const binDir = join(base, "bin");
+    const ledgerDir = join(base, "ledger");
+    await mkdir(binDir, { recursive: true });
+    await mkdir(join(ledgerDir, "events"), { recursive: true });
+    const script = join(binDir, "opencode");
+    await writeFile(script, `#!/bin/sh\nexit ${code}\n`, "utf8");
+    await chmod(script, 0o755);
+    const restorePath = process.env.PATH ?? "";
+    process.env.PATH = binDir + ":" + restorePath;
+    return { cwd: base, ledgerDir, restorePath };
+  }
+
+  it("throws (infra) when the reviewer exits non-ok — a pass is impossible without a transcript (v2 issue 01, ADR 0050)", async () => {
+    const env = await makeFakeOpencodeExit(1);
+    try {
+      await expect(review({
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "01-01-review",
+        model: null,
+        ticketFile: "01-a.md",
+        ticketBody: "work",
+        criteria: ["c1"],
+        diff: "diff --git a/x b/x",
+      })).rejects.toThrow(/reviewer/i);
+    } finally {
+      process.env.PATH = env.restorePath;
+    }
+  });
+
+  it("forwards the contracts slice into the executed reviewer prompt", async () => {    const env = await makeFakeOpencodeEcho();
     try {
       const outcome = await review({
         cwd: env.cwd,
@@ -732,47 +765,6 @@ node -e 'console.log(JSON.stringify({type:"text",part:{type:"text",text:process.
       });
       expect(outcome.transcript).toContain("EXISTING PUBLIC CONTRACTS");
       expect(outcome.transcript).toContain("greet(name)");
-    } finally {
-      process.env.PATH = env.restorePath;
-    }
-  });
-
-  it("forwards the testable red/green evidence check into the reviewer prompt when testable is true (#45)", async () => {
-    const env = await makeFakeOpencodeEcho();
-    try {
-      const outcome = await review({
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "01-01-review",
-        model: null,
-        ticketFile: "01-a.md",
-        ticketBody: "work",
-        criteria: ["c1"],
-        diff: "diff --git a/x b/x",
-        testable: true,
-      });
-      expect(outcome.transcript).toMatch(/red.*green.*evidence/i);
-      expect(outcome.transcript).toMatch(/missing.*implausible/i);
-    } finally {
-      process.env.PATH = env.restorePath;
-    }
-  });
-
-  it("omits the testable red/green evidence check from the reviewer prompt when testable is false (#45)", async () => {
-    const env = await makeFakeOpencodeEcho();
-    try {
-      const outcome = await review({
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "01-01-review",
-        model: null,
-        ticketFile: "01-config.md",
-        ticketBody: "tweak a config file",
-        criteria: ["config has the new key"],
-        diff: "diff --git a/x b/x",
-        testable: false,
-      });
-      expect(outcome.transcript).not.toMatch(/red.*green.*evidence/i);
     } finally {
       process.env.PATH = env.restorePath;
     }

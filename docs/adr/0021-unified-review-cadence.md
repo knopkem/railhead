@@ -2,7 +2,8 @@
 
 > Amended by ADR 0046: the per-ticket visual review is serialized inside
 > `committedTicket`; the cadence modes and dispatch below are otherwise
-> unchanged.
+> unchanged. Amended by ADR 0047: the TDD test phase is retired (the durable
+> builder is the only implementer).
 
 ## Status
 

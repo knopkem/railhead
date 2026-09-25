@@ -259,7 +259,7 @@ export async function visualReviewLoop(
 
   const maxRounds = cfg.max_rounds ?? state.config.max_attempts ?? (state.config.max_retries * 3);
   const allTickets = await loadTickets(state.tickets_dir);
-  const mission = allTickets[0]?.mission ?? "(no mission declared)";
+  const mission = state.original_prompt ?? "(no mission declared)";
   const aggregatedCriteria = Array.from(
     new Set(allTickets.flatMap((t) => t.criteria)),
   );
@@ -359,8 +359,6 @@ export async function visualReviewLoop(
     const outcome = await processCorrectiveFindings(state, ledger, verdict.findings, {
       kind: "visual",
       label: "visual review",
-      mission,
-      blockUncommitted: false,
       runTicket,
     });
     if (outcome === "none") {
@@ -432,11 +430,6 @@ export function kickoffPerTicketVisualReview(
     return null;
   }
 
-  if (parsed.testable === false) {
-    console.log(`[${nowClock()}]   ${ticket.number} visual review (per-ticket): skipped (ticket has no testable seam — corrective or config ticket)`);
-    return null;
-  }
-
   // gh: persist the owed marker BEFORE the review runs. The promise cannot
   // survive the process; the marker lets a stop in this window make resume
   // re-run the gate instead of silently skipping it. Cleared by
@@ -447,7 +440,7 @@ export function kickoffPerTicketVisualReview(
       ? `[${nowClock()}]   ${ticket.number} visual review (per-ticket) — replaying the review the prior run stopped before joining`
       : `[${nowClock()}]   ${ticket.number} visual review (per-ticket) — kicked off (post-commit, serialized; ADR 0046)`,
   );
-  const mission = parsed.mission ?? "(no mission declared)";
+  const mission = state.original_prompt ?? "(no mission declared)";
   const criteria = parsed.criteria;
   const runHint = runCommandFromVerify(state.config.verify, [parsed]);
   // Issue #99 (ADR 0028): a per-ticket visual review of a surface ticket
@@ -542,12 +535,10 @@ export async function joinPendingVisualReview(
   const result = await pending as PendingVisualOutcome;
   if (result.outcome !== "blockers") return "pass";
 
-  const { ticket, mission, findings } = result;
+  const { ticket, findings } = result;
   const outcome = await processCorrectiveFindings(state, ledger, findings, {
     kind: "visual",
     label: `${ticket.number} visual review`,
-    mission,
-    blockUncommitted: false,
     runTicket,
   });
   if (outcome === "halted") {

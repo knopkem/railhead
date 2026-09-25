@@ -1,5 +1,5 @@
-import { goalCheckpointActionFor, presetGateModes, presetRunsTdd, updateConfig } from "./config.ts";
-import type { GateMode, GatePreset, RailheadConfig, PresetGateModes } from "./config.ts";
+import { goalCheckpointActionFor, presetGateModes, updateConfig } from "./config.ts";
+import type { GateMode, GatePreset, GoalCheckpointAction, RailheadConfig, PresetGateModes } from "./config.ts";
 import type { GateOverrides } from "./args.ts";
 
 /**
@@ -116,39 +116,6 @@ export function resolveGateModes(input: ResolveGateModesInput): PresetGateModes 
 }
 
 // ---------------------------------------------------------------------------
-// resolveTdd — the TDD test-phase decision
-// ---------------------------------------------------------------------------
-
-export interface ResolveTddInput {
-  /** `--tdd` / `--no-tdd` flag value; `null` = not given. */
-  flag: boolean | null;
-  /** Plan mode — `fix` forces the test phase off. Run passes `"build"`. */
-  mode: "build" | "fix";
-  /** The plan preset; `null` in a standalone run. */
-  preset: GatePreset | null;
-  /** Whether this is a non-interactive (`-a`/`--auto`) invocation. */
-  auto: boolean;
-  /** The empty-input default for the interactive prompt. Plan: `false`;
-   * standalone run: the persisted config. The two defaults are encoded by the
-   * caller, never unified here. */
-  askDefault: boolean;
-  /** The interactive answer, when cmdBuild/cmdRun asked. */
-  answer?: boolean;
-}
-
-/**
- * Resolve the TDD test-phase decision: flag → fix-mode-off → interactive
- * answer → the preset's default (only `--full` runs it). The caller decides
- * when a prompt is needed and passes `answer` back in.
- */
-export function resolveTdd(input: ResolveTddInput): boolean {
-  if (input.flag !== null) return input.flag;
-  if (input.mode === "fix") return false;
-  if (!input.auto && input.preset === null) return input.answer ?? input.askDefault;
-  return presetRunsTdd(input.preset ?? "light");
-}
-
-// ---------------------------------------------------------------------------
 // resolveYolo — the yolo permission decision (plan-side only)
 // ---------------------------------------------------------------------------
 
@@ -177,8 +144,6 @@ export interface PolicyDecisions {
   yolo?: boolean;
   /** Persist `fix_mode` to this value (plan-only; always true). */
   fixMode?: boolean;
-  /** Persist `test_phase` to this value. */
-  testPhase?: boolean;
   /** Desired per-gate cadence; only the listed gates are considered. */
   gateModes?: Partial<Record<GateName, GateMode>>;
 }
@@ -186,8 +151,6 @@ export interface PolicyDecisions {
 export interface PersistReport {
   /** Gates whose persisted mode actually changed. */
   gatesChanged: GateName[];
-  /** Whether the persisted test phase changed. */
-  testPhaseChanged: boolean;
 }
 
 /**
@@ -201,7 +164,7 @@ export async function persistPolicy(
   config: RailheadConfig,
   decisions: PolicyDecisions,
 ): Promise<PersistReport> {
-  const report: PersistReport = { gatesChanged: [], testPhaseChanged: false };
+  const report: PersistReport = { gatesChanged: [] };
   // Decide what would change against the value already on the in-memory
   // config; only differences are written, in one updateConfig pass. The
   // in-memory config is kept in sync so callers (cmdRun passes it into
@@ -219,13 +182,6 @@ export async function persistPolicy(
       cfg.fix_mode = decisions.fixMode;
     });
     config.fix_mode = decisions.fixMode;
-  }
-  if (decisions.testPhase !== undefined && (config.test_phase ?? true) !== decisions.testPhase) {
-    actions.push((cfg) => {
-      cfg.test_phase = decisions.testPhase;
-    });
-    config.test_phase = decisions.testPhase;
-    report.testPhaseChanged = true;
   }
   if (decisions.gateModes) {
     for (const [gate, key] of GATES) {
@@ -249,7 +205,7 @@ export async function persistPolicy(
     // Derived from the same rule as presetGateModes so plan and run agree.
     if (decisions.gateModes.goal !== undefined) {
       const wantAction = goalCheckpointActionFor(decisions.gateModes.goal);
-      const currentAction = (config.goal_review?.checkpoint_action ?? null) as "advisory" | null;
+      const currentAction = (config.goal_review?.checkpoint_action ?? null) as GoalCheckpointAction | null;
       if (currentAction !== wantAction) {
         if (wantAction === null) {
           actions.push((cfg) => {

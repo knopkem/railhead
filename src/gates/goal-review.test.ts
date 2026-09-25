@@ -2,7 +2,90 @@ import { describe, it, expect } from "vitest";
 import { joinPhaseMessages, type PhaseMessages } from "../context/preamble.ts";
 const promptText = (m: PhaseMessages): string => joinPhaseMessages(m);
 const goalPrompt = (o: Parameters<typeof buildGoalReviewPrompt>[0]): string => promptText(buildGoalReviewPrompt(o));
-import { parseGoalVerdict, buildGoalReviewPrompt, parseReplanRequested, extractFindingFiles, extractFindingReferences, extractScreenshotPaths, splitAnchoredBlockers, parseCorrectiveTickets, normalizeFinding, findingsEchoLastRound, remainingPlanGroups } from "./goal-review.ts";
+import { parseGoalVerdict, buildGoalReviewPrompt, parseReplanRequested, extractFindingFiles, extractScreenshotPaths, splitAnchoredBlockers, parseCorrectiveTickets, parseProbeBlock, dropClosedFindings, normalizeFinding, findingsEchoLastRound, remainingPlanGroups } from "./goal-review.ts";
+
+describe("dropClosedFindings (v2 issue 01)", () => {
+  it("drops a finding that quotes the closed probe's behavior, keeping the rest", () => {
+    const { findings, dropped } = dropClosedFindings(
+      ["[BLOCKER] the snake eats food (src/index.js)", "[MAJOR] palette is flat"],
+      ["the snake eats food"],
+    );
+    expect(dropped).toHaveLength(1);
+    expect(findings).toEqual(["[MAJOR] palette is flat"]);
+  });
+
+  it("conservatively keeps findings when nothing matches, or the behavior is empty", () => {
+    const all = ["[BLOCKER] a real blocker", "[MAJOR] a real major"];
+    expect(dropClosedFindings(all, []).findings).toEqual(all);
+    expect(dropClosedFindings(all, ["   "]).findings).toEqual(all);
+    expect(dropClosedFindings(all, ["something unrelated entirely"]).findings).toEqual(all);
+    // A negated paraphrase is not a containment match — the finding survives.
+    expect(dropClosedFindings(["[BLOCKER] the clock does not pause"], ["the button stops the clock"]).findings).toHaveLength(1);
+  });
+});
+
+describe("parseProbeBlock (v2 issue 01)", () => {
+  it("parses one JSON probe per finding between $PROBE and $END", () => {
+    const text = `$GOAL_FAIL
+[BLOCKER] the pause button does nothing (src/clock.ts)
+$END
+$PROBE
+{"behavior":"the pause button stops the clock","command":"node .railhead/probes/pause.mjs","expect":"paused=true"}
+{"behavior":"the grid renders nine cells","command":"node .railhead/probes/grid.mjs","expect":"9 cells"}
+$END`;
+    const probes = parseProbeBlock(text);
+    expect(probes).toHaveLength(2);
+    expect(probes![0]).toEqual({
+      behavior: "the pause button stops the clock",
+      command: "node .railhead/probes/pause.mjs",
+      expect: "paused=true",
+    });
+  });
+
+  it("returns null when the block is absent, unparseable, or lacks behavior/command", () => {
+    expect(parseProbeBlock("$GOAL_FAIL\n[BLOCKER] gap\n$END")).toBeNull();
+    expect(parseProbeBlock("")).toBeNull();
+    expect(parseProbeBlock("$PROBE\nnot json\n$END")).toBeNull();
+    expect(parseProbeBlock('$PROBE\n{"behavior":"b"}\n$END')).toBeNull();
+    expect(parseProbeBlock('$PROBE\n{"command":"c"}\n$END')).toBeNull();
+  });
+
+  it("ignores a $PROBE example quoted inside a code fence", () => {
+    expect(parseProbeBlock("```\n$PROBE\n{\"behavior\":\"b\",\"command\":\"c\"}\n$END\n```")).toBeNull();
+  });
+});
+
+describe("goal prompt — registered probes (v2 issue 01)", () => {
+  const base = {
+    originalPrompt: "build a clock app",
+    verifyCommands: ["npm test"],
+    runCommandHint: "npm run dev",
+    group: "core",
+    completedGroups: [],
+    priorFindings: [],
+  };
+
+  it("renders the deterministic probe results and closes PASSing behaviors", () => {
+    const text = goalPrompt({
+      ...base,
+      registeredProbes: [
+        { behavior: "the pause button stops the clock", command: "node .railhead/probes/p1.mjs", expect: "paused=true", status: "pass" },
+        { behavior: "the grid shows nine cells", command: "node .railhead/probes/p2.mjs", expect: "9 cells", status: "fail", output: "render threw" },
+      ],
+    });
+    expect(text).toContain("Registered probes");
+    expect(text).toContain("the pause button stops the clock");
+    expect(text).toMatch(/\[PASS\].*CLOSED/i);
+    expect(text).toContain("render threw");
+  });
+
+  it("asks the seat to materialize a probe per finding in the $PROBE block", () => {
+    const text = goalPrompt(base);
+    expect(text).toMatch(/\$PROBE/);
+    expect(text).toMatch(/command plus an expected predicate/i);
+    expect(text).toMatch(/never name a test framework/i);
+  });
+});
 
 describe("parseGoalVerdict", () => {
   it("parses $GOAL_PASS", () => {
@@ -101,15 +184,13 @@ $CORRECTIVE
 {"title":"Add parallax depth bands","what":"Add >=3 scroll-factor layers.","files":["src/ui/ParallaxBackground.ts"],"references":["ParallaxBackground"],"introduces":[],"testable":false}
 $END`;
 
-  it("parses the $CORRECTIVE block into PlanTickets with files/references", () => {
+  it("parses the $CORRECTIVE block into PlanTickets", () => {
     const tickets = parseCorrectiveTickets(BLOCK);
     expect(tickets).not.toBeNull();
     expect(tickets!.length).toBe(2);
     expect(tickets![0].title).toContain("sprite textures");
-    expect(tickets![0].files).toEqual(["src/scenes/GameScene.ts"]);
-    expect(tickets![0].references).toEqual(["GameScene", "BIOME_1_CONFIG"]);
-    expect(tickets![0].testable).toBe(false);
-    expect(tickets![1].files).toEqual(["src/ui/ParallaxBackground.ts"]);
+    expect(tickets![0].what).toContain("this.add.sprite()");
+    expect(tickets![1].title).toContain("parallax depth bands");
   });
 
   it("returns null when no $CORRECTIVE block is present (mechanical fallback)", () => {
@@ -126,7 +207,6 @@ $END`;
     const tickets = parseCorrectiveTickets(text);
     expect(tickets).not.toBeNull();
     expect(tickets![0].what).toBe("Fix it"); // falls back to the title
-    expect(tickets![0].files).toEqual([]);
   });
 
   it("ignores a fenced $CORRECTIVE example and still parses a real one (#108)", () => {
@@ -146,7 +226,6 @@ $END`;
     const tickets = parseCorrectiveTickets(text);
     expect(tickets).not.toBeNull();
     expect(tickets![0].title).toBe("fenced json");
-    expect(tickets![0].files).toEqual(["src/x.ts"]);
   });
 });
 
@@ -155,7 +234,7 @@ describe("splitAnchoredBlockers (ADR 0043)", () => {
   it("keeps a blocker anchored by an existing file", () => {
     const r = splitAnchoredBlockers(
       ["[BLOCKER] the HUD overlaps the world (src/ui/hud.ts)"],
-      { exists: exists(["src/ui/hud.ts"]), pendingFiles: new Set() },
+      { exists: exists(["src/ui/hud.ts"]) },
     );
     expect(r.unanchored).toEqual([]);
     expect(r.findings).toHaveLength(1);
@@ -164,7 +243,7 @@ describe("splitAnchoredBlockers (ADR 0043)", () => {
   it("keeps a blocker anchored by an existing screenshot", () => {
     const r = splitAnchoredBlockers(
       ["[BLOCKER] the title screen never appears (.railhead/goal-01-title.png)"],
-      { exists: exists([".railhead/goal-01-title.png"]), pendingFiles: new Set() },
+      { exists: exists([".railhead/goal-01-title.png"]) },
     );
     expect(r.unanchored).toEqual([]);
     expect(r.findings).toHaveLength(1);
@@ -173,26 +252,17 @@ describe("splitAnchoredBlockers (ADR 0043)", () => {
   it("types a blocker citing no existing artifact as steering-only", () => {
     const r = splitAnchoredBlockers(
       ["[BLOCKER] there is no boss fight yet"],
-      { exists: () => false, pendingFiles: new Set() },
+      { exists: () => false },
     );
     expect(r.findings).toEqual([]);
     expect(r.unanchored).toHaveLength(1);
     expect(r.unanchored[0].reason).toMatch(/no artifact that exists/i);
   });
 
-  it("types a blocker naming only pending-owned files as steering-only (future scope)", () => {
-    const r = splitAnchoredBlockers(
-      ["[BLOCKER] no sprite atlas is built (src/core/assets.ts)"],
-      { exists: exists(["src/core/assets.ts"]), pendingFiles: new Set(["src/core/assets.ts"]) },
-    );
-    expect(r.findings).toEqual([]);
-    expect(r.unanchored[0].reason).toMatch(/unbuilt tickets/i);
-  });
-
   it("passes non-blockers through untouched and keeps multiple anchors per finding", () => {
     const r = splitAnchoredBlockers(
       ["[MAJOR] camera feels stiff", "[BLOCKER] HUD overlaps world (src/ui/hud.ts, .railhead/goal-02.png)"],
-      { exists: exists(["src/ui/hud.ts", ".railhead/goal-02.png"]), pendingFiles: new Set(["src/ui/hud.ts"]) },
+      { exists: exists(["src/ui/hud.ts", ".railhead/goal-02.png"]) },
     );
     expect(r.unanchored).toEqual([]);
     expect(r.findings).toHaveLength(2);
@@ -698,25 +768,6 @@ describe("extractFindingFiles / extractFindingReferences (#66)", () => {
     expect(extractFindingFiles(finding)).toEqual(["src/scenes/GameScene.ts"]);
   });
 
-  it("extracts SCREAMING_SNAKE constants and PascalCase multi-word identifiers", () => {
-    const finding = "wire BIOME_2_CONFIG into GameScene and apply ParallaxBackground's NEAR_FACTOR";
-    const refs = extractFindingReferences(finding);
-    expect(refs).toContain("BIOME_2_CONFIG");
-    expect(refs).toContain("NEAR_FACTOR");
-    expect(refs).toContain("GameScene");
-    expect(refs).toContain("ParallaxBackground");
-  });
-
-  it("extracts backtick-quoted symbols like camelCase functions", () => {
-    const finding = "call `applyHazard` from the tick loop";
-    expect(extractFindingReferences(finding)).toContain("applyHazard");
-  });
-
-  it("does not treat sentence-initial prose words as references", () => {
-    const finding = "The renderer draws flat rectangles; the design doc says desaturated palette";
-    const refs = extractFindingReferences(finding);
-    expect(refs).not.toContain("The");
-  });
 });
 
 describe("goal-loop convergence guard (run-20260907-1340)", () => {

@@ -5,7 +5,6 @@ import { describe, it, expect } from "vitest";
 import {
   fixModeForcesVisual,
   resolveGateModes,
-  resolveTdd,
   resolveYolo,
   persistPolicy,
   GATES,
@@ -66,7 +65,7 @@ describe("resolveGateModes", () => {
     });
     expect(modes.visual).toBe("full");
     expect(modes.structural).toBe("off");
-    expect(modes.code).toBe("light");
+    expect(modes.code).toBe("off");
   });
 
   it("forces visual full in fix mode when visual is enabled and a vision model exists", () => {
@@ -120,13 +119,13 @@ describe("resolveGateModes", () => {
     expect(modes).toEqual({ ...presetGateModes("none"), visual: "full" });
   });
 
-  it("goal mode light resolves the advisory checkpoint action (ADR 0029)", () => {
+  it("goal mode light resolves the corrective checkpoint action (v2 issue 01)", () => {
     const modes = resolveGateModes({ preset: "light", overrides: emptyOverrides, fixMode: false, hasVisionModel: true, visualEnabled: true });
     expect(modes.goal).toBe("light");
-    expect(modes.goalCheckpointAction).toBe("advisory");
+    expect(modes.goalCheckpointAction).toBe("corrective");
   });
 
-  it("an override off goal light drops the advisory action (no stale knob under medium)", () => {
+  it("an override off goal light drops the checkpoint action (no stale knob under medium)", () => {
     const modes = resolveGateModes({
       preset: "light",
       overrides: { code: null, visual: null, goal: "medium", structural: null },
@@ -136,50 +135,9 @@ describe("resolveGateModes", () => {
     expect(modes.goalCheckpointAction).toBeUndefined();
   });
 
-  it("medium/full presets never set the advisory action", () => {
+  it("medium/full presets never set the checkpoint action", () => {
     expect(resolveGateModes({ preset: "medium", overrides: emptyOverrides, fixMode: false, hasVisionModel: true, visualEnabled: true }).goalCheckpointAction).toBeUndefined();
     expect(resolveGateModes({ preset: "full", overrides: emptyOverrides, fixMode: false, hasVisionModel: true, visualEnabled: true }).goalCheckpointAction).toBeUndefined();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// resolveTdd — decision table + both ask-defaults
-// ---------------------------------------------------------------------------
-
-describe("resolveTdd", () => {
-  it("the --tdd/--no-tdd flag wins over everything", () => {
-    expect(resolveTdd({ flag: true, mode: "fix", preset: "light", auto: false, askDefault: false })).toBe(true);
-    expect(resolveTdd({ flag: false, mode: "build", preset: "full", auto: false, askDefault: false })).toBe(false);
-  });
-
-  it("fix mode forces the test phase off", () => {
-    expect(resolveTdd({ flag: null, mode: "fix", preset: "full", auto: false, askDefault: false })).toBe(false);
-  });
-
-  it("a preset decides when not interactive", () => {
-    expect(resolveTdd({ flag: null, mode: "build", preset: "full", auto: false, askDefault: false })).toBe(true);
-    expect(resolveTdd({ flag: null, mode: "build", preset: "light", auto: true, askDefault: false })).toBe(false);
-    // auto with no preset = the light preset's off
-    expect(resolveTdd({ flag: null, mode: "build", preset: null, auto: true, askDefault: false })).toBe(false);
-  });
-
-  it("interactive (no flag, no preset, not auto) returns the answer", () => {
-    expect(resolveTdd({ flag: null, mode: "build", preset: null, auto: false, askDefault: false, answer: true })).toBe(true);
-    expect(resolveTdd({ flag: null, mode: "build", preset: null, auto: false, askDefault: false, answer: false })).toBe(false);
-  });
-
-  it("the plan ask-default is encoded as false (not the persisted config)", () => {
-    // Empty input on the plan-time prompt keeps the test phase off even when
-    // the persisted config has it on — the plan default is false.
-    expect(resolveTdd({ flag: null, mode: "build", preset: null, auto: false, askDefault: false })).toBe(false);
-    expect(resolveTdd({ flag: null, mode: "build", preset: null, auto: false, askDefault: true })).toBe(true);
-  });
-
-  it("the standalone-run ask-default is the persisted config, not false", () => {
-    // A standalone `railhead run` that leaves the prompt empty keeps whatever
-    // test_phase the persisted config already carries.
-    expect(resolveTdd({ flag: null, mode: "build", preset: null, auto: false, askDefault: true })).toBe(true);
-    expect(resolveTdd({ flag: null, mode: "build", preset: null, auto: false, askDefault: false })).toBe(false);
   });
 });
 
@@ -232,19 +190,6 @@ describe("persistPolicy", () => {
     expect(raw.visual_review).toEqual({ mode: "light", max_rounds: 2, custom: "keep" });
   });
 
-  it("persists test_phase only when it differs (undefined counts as on)", async () => {
-    const cwd = await makeCwd(JSON.stringify({ test_phase: false }));
-    const config = await loadConfig(cwd);
-
-    const same = await persistPolicy(cwd, config, { testPhase: false });
-    expect(same.testPhaseChanged).toBe(false);
-    expect((await readRaw(cwd)).test_phase).toBe(false);
-
-    const on = await persistPolicy(cwd, config, { testPhase: true });
-    expect(on.testPhaseChanged).toBe(true);
-    expect(config.test_phase).toBe(true);
-  });
-
   it("persists yolo_permissions / fix_mode only when they change", async () => {
     const cwd = await makeCwd(JSON.stringify({}));
     const config = await loadConfig(cwd);
@@ -269,17 +214,17 @@ describe("persistPolicy", () => {
     expect(raw.code_review).toEqual({ mode: "light" });
   });
 
-  describe("goal checkpoint action (ADR 0029, #102)", () => {
-    it("a goal gate resolved to light persists goal_review.checkpoint_action: advisory", async () => {
+  describe("goal checkpoint action (v2 issue 01, ADR 0029)", () => {
+    it("a goal gate resolved to light persists goal_review.checkpoint_action: corrective", async () => {
       const cwd = await makeCwd(JSON.stringify({ goal_review: { mode: "light" } }));
       const config = await loadConfig(cwd);
       await persistPolicy(cwd, config, { gateModes: { goal: "light" } });
       const raw = await readRaw(cwd);
-      expect(raw.goal_review).toEqual({ mode: "light", checkpoint_action: "advisory" });
-      expect(config.goal_review?.checkpoint_action).toBe("advisory");
+      expect(raw.goal_review).toEqual({ mode: "light", checkpoint_action: "corrective" });
+      expect(config.goal_review?.checkpoint_action).toBe("corrective");
     });
 
-    it("moving the goal gate off light clears a stale advisory knob (replan to medium/full)", async () => {
+    it("moving the goal gate off light clears a stale checkpoint-action knob (replan to medium/full)", async () => {
       const cwd = await makeCwd(JSON.stringify({ goal_review: { mode: "light", checkpoint_action: "advisory" } }));
       const config = await loadConfig(cwd);
       await persistPolicy(cwd, config, { gateModes: { goal: "medium" } });
@@ -301,7 +246,7 @@ describe("persistPolicy", () => {
       const config = await loadConfig(cwd);
       await persistPolicy(cwd, config, { gateModes: { goal: "light" } });
       const raw = await readRaw(cwd);
-      expect(raw.goal_review).toEqual({ mode: "light", checkpoint_action: "advisory", max_rounds: 5 });
+      expect(raw.goal_review).toEqual({ mode: "light", checkpoint_action: "corrective", max_rounds: 5 });
     });
   });
 });

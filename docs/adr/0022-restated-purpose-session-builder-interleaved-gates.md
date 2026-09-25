@@ -1,5 +1,9 @@
 # Restated purpose: unattended verified builds — durable session builder, interleaved gates
 
+> Amended by ADR 0047 (the durable builder is the only engine; the
+> `session_builder` flag and the TDD test phase are removed) and by ADR 0048
+> (tickets are ordered checkpoints — no DAG, no file/contract declarations).
+
 Amends ADR 0001 (fresh subprocess per phase) and re-scopes ADR 0014 (context
 budget disciplines). Records the evidence that invalidated the original
 thesis and the architecture that follows from the restated purpose.

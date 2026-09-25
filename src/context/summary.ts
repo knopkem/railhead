@@ -1,4 +1,3 @@
-import { HANDOFF_START, HANDOFF_END } from "./handoff.ts";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describeExecFailure, executeOpendCode } from "../execute/executor.ts";
@@ -175,7 +174,3 @@ export async function writeRunSummary(state: RunState, ledger: string): Promise<
   if (!transcript.trim()) return;
   await writeFile(join(ledger, "..", "run-summary.md"), transcript.trim() + "\n", "utf8").catch(() => {});
 }
-
-// Re-export the handoff markers so summary.ts is the single import site for
-// prompt modules that also need them — avoids a circular import on handoff.ts.
-export { HANDOFF_START, HANDOFF_END };

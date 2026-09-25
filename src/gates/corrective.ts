@@ -2,13 +2,9 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { RunState, TicketState } from "../core/state.ts";
 import { appendEvent, writeState } from "../core/ledger.ts";
-import { loadTickets, renderTicket, toTicketState, type Ticket } from "../core/ticket.ts";
-import { assessRuntimeExtension, extendBlockedBy, type PlanTicket } from "../core/ticket-dag.ts";
-import { extractFindingFiles, extractFindingReferences } from "./goal-review.ts";
+import { numberTickets, renderTicket, toTicketState, type PlanTicket } from "../core/ticket.ts";
 import { classifySeverity, promoteUnlabelledSeverity, reviewSummary, stripSeverityLabel, truncateFindingBody } from "./reviewer.ts";
 import { nowClock } from "../cli/overview.ts";
-import { appendPlanRulings } from "../plan/plan-identity.ts";
-import { loadContracts, knownContractSymbols } from "../core/contracts.ts";
 
 /**
  * The corrective-ticket pipeline (issue #88). A review gate (visual, goal,
@@ -35,14 +31,8 @@ export type RunTicket = (state: RunState, ledger: string, ticket: TicketState) =
 
 export interface ProcessCorrectiveOptions {
   kind: CorrectiveKind;
-  /** Mission stamped on mechanically-generated corrective tickets. */
-  mission: string;
   /** Progress-line label (e.g. "visual review", `goal review (checkpoint "core")`). */
   label: string;
-  /** Wire every remaining uncommitted planned ticket's blocked_by to the
-   *  corrective tickets (goal/structural preserve group coherence). False for
-   *  visual — its run is already integrated and fixes nothing planned. */
-  blockUncommitted: boolean;
   /** run.ts's processTicket, injected so this module never imports run.ts
    *  (which imports this module) and stays testable through a stub runner. */
   runTicket: RunTicket;
@@ -68,9 +58,6 @@ interface CorrectiveSpec {
   majorIntro: string;
   screenshots: { re: RegExp; header: string; fallback: string } | null;
   criteria: string[] | ((body: string) => string[]);
-  files: (body: string) => string[];
-  references: (body: string) => string[];
-  testable: boolean;
   truncate: (body: string) => string;
 }
 
@@ -90,9 +77,6 @@ const CORRECTIVE_SPECS: Record<CorrectiveKind, CorrectiveSpec> = {
       "Run the app and confirm the finding no longer reproduces",
       "Existing verify commands still pass",
     ],
-    files: () => [],
-    references: () => [],
-    testable: false,
     truncate: (body) => truncateFindingBody(body, 500, "\n\n(full finding is in the run's visual_findings — run `railhead log` to see the complete review transcript)"),
   },
   goal: {
@@ -110,9 +94,6 @@ const CORRECTIVE_SPECS: Record<CorrectiveKind, CorrectiveSpec> = {
       "Run the app and confirm the quality gap is addressed",
       "Existing verify commands still pass",
     ],
-    files: extractFindingFiles,
-    references: extractFindingReferences,
-    testable: false,
     truncate: (body) => truncateFindingBody(body, 500, "\n\n(full finding is in the run's goal_review findings — run `railhead log` to see the complete review transcript)"),
   },
   structural: {
@@ -127,9 +108,6 @@ const CORRECTIVE_SPECS: Record<CorrectiveKind, CorrectiveSpec> = {
       "Existing verify commands still pass",
       "No new duplicated abstractions introduced",
     ],
-    files: () => [],
-    references: () => [],
-    testable: true,
     truncate: (body) => truncateFindingBody(body, 300, "…"),
   },
 };
@@ -138,15 +116,12 @@ const CORRECTIVE_SPECS: Record<CorrectiveKind, CorrectiveSpec> = {
  * Generate corrective tickets from a failed review gate's findings. Each
  * [BLOCKER] finding becomes its own ticket so the implementer can target it in
  * isolation; [MAJOR] findings ride along as advisory context, matching the
- * per-ticket soft-pass rule (ADR 0005). Tickets continue the existing number
- * sequence and carry empty blocked_by — the caller wires the dependency edges
- * (`extendBlockedBy`) when uncommitted tickets must wait on the corrections.
- * Returns [] when there is nothing to fix (no [BLOCKER] findings).
+ * per-ticket soft-pass rule (ADR 0005). Returns [] when there is nothing to
+ * fix (no [BLOCKER] findings).
  */
 export function generateCorrectiveTickets(
   kind: CorrectiveKind,
   findings: string[],
-  mission: string,
 ): PlanTicket[] {
   const spec = CORRECTIVE_SPECS[kind];
   const blockers = findings.filter(isBlockerFinding);
@@ -167,14 +142,8 @@ export function generateCorrectiveTickets(
     const criteria = typeof spec.criteria === "function" ? spec.criteria(body) : spec.criteria;
     return {
       title: `${spec.titlePrefix}${body.slice(0, 60)}`,
-      mission,
       what: `${spec.intro}${body}${spec.outro}${screenshotBlock}${majorContext}`,
       criteria,
-      blocked_by: [],
-      files: spec.files(body),
-      references: spec.references(body),
-      introduces: [],
-      testable: spec.testable,
     };
   });
 }
@@ -184,27 +153,7 @@ async function writeCorrectiveTickets(
   state: RunState,
   planTickets: PlanTicket[],
 ): Promise<TicketState[]> {
-  const nextNumber = nextTicketNumber(state);
-  const tickets: Ticket[] = planTickets.map((pt, i) => {
-    const num = String(nextNumber + i).padStart(2, "0");
-    const slug = pt.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "").slice(0, 40) || "fix";
-    const file = `${num}-${slug}.md`;
-    return {
-      file,
-      number: num,
-      slug,
-      title: pt.title,
-      what: pt.what,
-      mission: pt.mission ?? "",
-      blocked_by: [],
-      criteria: pt.criteria,
-      files: pt.files ?? [],
-      references: pt.references ?? [],
-      introduces: pt.introduces ?? [],
-      testable: pt.testable,
-      group: pt.group,
-    };
-  });
+  const tickets = numberTickets(planTickets, nextTicketNumber(state));
   // Write corrective ticket files WITHOUT clearing the existing planned
   // tickets — writeTickets would purge the dir (it clears stale .md files
   // before writing, which is correct at plan time but catastrophic mid-run:
@@ -226,58 +175,13 @@ export function nextTicketNumber(state: RunState): number {
 }
 
 /**
- * Issue #63 + #86: after corrective/refactor tickets are written and their
- * blocked_by edges applied, re-scan the extended ticket set with the SAME
- * policy the plan gate enforces. The scan loads the full ticket set from disk
- * (committed tickets included as passive counterparties — a corrective that
- * re-introduces a committed ticket's symbol must be visible), runs AFTER the
- * extendBlockedBy edges are applied so corrective-connected pairs are already
- * ordered, and resolves each class-A finding deterministically:
- *
- *   - covered by a plan-time ruling → inert;
- *   - involves a corrective/refactor ticket → auto-ruled and RECORDED
- *     (state.rulings + a ledger `rulings` event): corrective-first precedence
- *     and mergeContracts' update-as-redefinition make the pair recoverable by
- *     construction (Cases A/B);
- *   - two non-corrective tickets → a railhead defect: the plan gate should have
- *     repaired or ruled it, so abort loudly naming the pair (Case C).
- *
- * Cycles / dangling refs abort as before.
- */
-async function enforceRuntimePlan(state: RunState, ledger: string, correctiveFiles: string[], phase: string): Promise<void> {
-  const all = await loadTickets(state.tickets_dir);
-  const committedFiles = state.tickets
-    .filter((t) => t.status === "committed" || t.status === "skipped")
-    .map((t) => t.file);
-  const { fatal, rulings } = assessRuntimeExtension(all, {
-    correctiveFiles,
-    committedFiles,
-    planRulings: state.plan_rulings ?? [],
-    // Issue #103: a corrective's references are advisory seams on committed
-    // code — the index universe keeps them from scanning as dangling.
-    existingSymbols: knownContractSymbols(await loadContracts(state.cwd)),
-  });
-  if (fatal.length > 0) {
-    throw new Error(`${phase}: ${fatal.join("; ")}`);
-  }
-  if (rulings.length > 0) {
-    state.rulings = [...(state.rulings ?? []), ...rulings];
-    await appendPlanRulings(join(state.tickets_dir, ".."), rulings);
-    for (const r of rulings) {
-      console.log(`[${nowClock()}] ${phase}: ${r.reason}`);
-      await appendEvent(ledger, "rulings", JSON.stringify(r));
-    }
-    await writeState(ledger, state);
-  }
-}
-
-/**
  * The corrective-ticket seam every review gate funnels through. Given a FAIL
  * verdict's findings, it filters the [BLOCKER]s, generates corrective tickets
- * (or uses the reviewer's $CORRECTIVE suggestions), writes the ticket files,
- * optionally blocks uncommitted planned tickets on them, re-scans the extended
- * set under the plan-gate policy, registers the tickets in state, and runs
- * each through the injected runTicket — stopping on the first failure.
+ * (or uses the reviewer's $CORRECTIVE suggestions), writes the ticket files
+ * INSIDE the remaining frontier (before the first uncommitted planned ticket,
+ * so a resume picks them up before continuing the plan), registers them in
+ * state, and runs each through the injected runTicket — stopping on the first
+ * failure.
  *
  * Returns:
  *   - "none" — the beforeCorrectives hook replanned, OR no [BLOCKER] findings
@@ -312,7 +216,7 @@ export async function processCorrectiveFindings(
 
   const spec = CORRECTIVE_SPECS[options.kind];
   const suggested = options.suggested && options.suggested.length > 0 ? options.suggested : null;
-  const plan = suggested ?? generateCorrectiveTickets(options.kind, effectiveFindings, options.mission);
+  const plan = suggested ?? generateCorrectiveTickets(options.kind, effectiveFindings);
   if (plan.length === 0) return "none";
 
   if (suggested) {
@@ -321,23 +225,13 @@ export async function processCorrectiveFindings(
   console.log(`[${nowClock()}] ${options.label}: ⛔ FAIL ${reviewSummary(effectiveFindings)} — generating ${plan.length} ${spec.noun} ticket(s)`);
 
   const written = await writeCorrectiveTickets(state, plan);
-  const files = written.map((t) => t.file);
 
-  // Issue #63: wire every uncommitted PLANNED ticket's blocked_by with the
-  // corrective files, never inter-corrective edges — the corrective tickets
-  // run inline in dependency order below, so each other's files as blocked_by
-  // would create mutual cycles that make no corrective frontier-ready.
-  if (options.blockUncommitted) {
-    const done = new Set(
-      state.tickets
-        .filter((t) => t.status === "committed" || t.status === "skipped")
-        .map((t) => t.file),
-    );
-    state.tickets = extendBlockedBy(state.tickets, files, (file) => done.has(file));
-  }
-
-  for (const ts of written) state.tickets.push(ts);
-  await enforceRuntimePlan(state, ledger, files, options.label);
+  // Correctives run inline immediately, but a crash mid-corrective must not
+  // let the run resume past them: insert them BEFORE the remaining planned
+  // frontier so the next ready ticket is the corrective.
+  const insertAt = state.tickets.findIndex((t) => t.status === "ready" || t.status === "in_progress");
+  const at = insertAt === -1 ? state.tickets.length : insertAt;
+  state.tickets.splice(at, 0, ...written);
   await writeState(ledger, state);
 
   for (const ts of written) {

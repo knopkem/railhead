@@ -1,5 +1,9 @@
 # PLAN.md and the interactive plan review loop
 
+> Amended by ADR 0049: the `$PLAN` block is removed. `PLAN.md` is composed from
+> `$DESIGN` + `$ARCHITECTURE` + the ticket breakdown; the interactive review and
+> its revision loop are unchanged.
+
 Recorded after the staged-planning change (ADR 0039). Planning now emits a
 design and an architecture, but both are deliberately distilled — terse
 gate/reviewer inputs. The human who asked for the build never saw the full

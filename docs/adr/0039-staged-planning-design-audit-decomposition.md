@@ -1,5 +1,8 @@
 # Staged planning: design, adversarial goal-coverage audit, decomposition
 
+> Superseded by ADR 0049: build planning is two calls (design → tickets).
+> The adversarial coverage audit and its revision loop are removed.
+
 Recorded after the spriteforge run `run-20260917-0110`. Planning was one model
 call that had to interpret the goal, judge its own interpretation, and
 decompose it into tickets. It did the first and third and skipped the second:
@@ -105,3 +108,12 @@ place interaction shape is allowed to influence prompts and gates.
 - Tests pin the new prompt split: `plan.test.ts` covers the stage prompts and
   the coverage verdict parser; `planner.test.ts` drives the three-stage flow
   through phase-aware mocks.
+
+> Amended by ADR 0049 and v2 issue 01: the adversarial model coverage audit is
+> gone (ADR 0049). The coverage check's new home is the PLAN GATE: one
+> goal-seat call after decomposition that walks the original goal's demands
+> against the ticket ownership map (and the spine-first ordering rule), then
+> either passes, regenerates the frontier through the mid-run replan prompt
+> (bounded by `max_replans`), or rejects the plan before any build starts.
+> Interactive runs skip the gate — the human reviewing PLAN.md is the
+> coverage check.

@@ -284,20 +284,6 @@ describe("buildBuilderPrompt (issue #84)", () => {
     expect(findings).toContain("tickets/02-bye.md");
     expect(findings).toContain("surfaces tickets ONE AT A TIME");
   });
-  it("injects the ticket's test-phase handoff into the prompt that first asks for it (issue #95)", () => {
-    const p = builderPrompt({
-      ...fresh,
-      tickets: [
-        {
-          ...ticket01,
-          handoff: "tests/greet.test.ts expects greet('bo') to return 'Hello, bo!' — it currently fails (module not found).",
-        },
-      ],
-    });
-    expect(p).toContain("TESTS FOR THIS TICKET");
-    expect(p).toContain("tests/greet.test.ts expects greet('bo')");
-    expect(p).toContain("make them pass");
-  });
 
   it("omits the handoff block when the test phase produced none", () => {
     const p = builderPrompt(fresh);
@@ -427,7 +413,7 @@ describe("design + architecture intent in the builder (issue #34 gap under sessi
       feedback: { source: "visual", findings: ["[BLOCKER] the scene does not match the intended identity"] },
       design,
     });
-    expect(p).toContain("Design intent (the planner's vision for this build)");
+    expect(p).toContain("Design intent (verbatim");
     expect(p).toContain("A crisp pixel-art descent with one palette.");
   });
 
@@ -500,5 +486,68 @@ describe("builder vision capability injection (ADR 0036)", () => {
       visionCapability: { readsImages: true, verifiedAt: "2026-01-01T00:00:00.000Z" },
     });
     expect(p).not.toContain("Vision capability (railhead-verified)");
+  });
+});
+
+describe("surface cadence for visual tickets (v2 issue 01)", () => {
+  const surfaceTicket: BuilderTicket = {
+    file: "tickets/02-hud.md",
+    number: "02",
+    title: "Draw the HUD",
+    body: "Render the score and timer chrome.",
+    criteria: ["the HUD shows the score after a point is scored"],
+  };
+  const capable = { readsImages: true, verifiedAt: "2026-01-01T00:00:00.000Z" } as const;
+  const blind = { readsImages: false, verifiedAt: "2026-01-01T00:00:00.000Z" } as const;
+
+  it("generalizes the screenshot loop to every visual-surface ticket when vision is verified", () => {
+    const p = builderPrompt({ ...fresh, tickets: [surfaceTicket], visionCapability: capable });
+    expect(p).toMatch(/verify this ticket with your own eyes/i);
+    expect(p).toMatch(/READ the screenshot back/i);
+    expect(p).toMatch(/visibly wrong is NOT green/i);
+  });
+
+  it("gives a blind seat the DOM/state self-check instead of pretending to look", () => {
+    const p = builderPrompt({ ...fresh, tickets: [surfaceTicket], visionCapability: blind });
+    expect(p).toMatch(/unable to read image pixels/i);
+    expect(p).not.toMatch(/READ the screenshot back/i);
+  });
+
+  it("leaves a purely structural ticket on the ordinary cadence", () => {
+    const structural: BuilderTicket = {
+      file: "tickets/03-config.md",
+      number: "03",
+      title: "Config parser",
+      body: "Parse the manifest.",
+      criteria: ["the parser rejects a malformed manifest"],
+    };
+    const p = builderPrompt({ ...fresh, tickets: [structural], visionCapability: capable });
+    expect(p).not.toMatch(/verify this ticket with your own eyes/i);
+  });
+
+  it("re-injects the design doc verbatim on a warm surface resume (cheap models do not re-read)", () => {
+    const p = builderPrompt({
+      ...fresh,
+      tickets: [surfaceTicket],
+      designDoc: "## Identity\nA neon descent.",
+      reinjectDesign: true,
+      contextPointers: { design: "docs/design.md" },
+      visionCapability: capable,
+    });
+    expect(p).toContain("Design intent (verbatim");
+    expect(p).toContain("A neon descent.");
+  });
+
+  it("carries the full design into a surface findings resume", () => {
+    const p = builderFindings({
+      ...fresh,
+      tickets: [surfaceTicket],
+      feedback: { source: "visual", findings: ["[BLOCKER] HUD is invisible"] },
+      design: "## Identity\nA neon descent.",
+      visionCapability: capable,
+    });
+    expect(p).toContain("Design intent (verbatim");
+    expect(p).toContain("A neon descent.");
+    expect(p).toMatch(/verify this ticket with your own eyes/i);
   });
 });

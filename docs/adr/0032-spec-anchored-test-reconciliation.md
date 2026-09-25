@@ -1,5 +1,8 @@
 # Spec-anchored test reconciliation
 
+> Amended by ADR 0047: the TDD test-author phase is retired with the fresh
+> implementer; the reconciliation arbiter itself is unchanged.
+
 Issue #105. The human plan origin prompt (`origin.json`'s `prompt`) is the only
 artifact no model phase in a run authored, so when verify fails on a file a
 phase itself wrote, a fresh arbiter reconciles that file against the spec —

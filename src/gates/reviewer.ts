@@ -72,8 +72,6 @@ export interface ReviewArgs {
   coherenceDoc?: string | null;
   /** Issue #41: linter output to inject into the reviewer prompt. */
   lintOutput?: string | null;
-  /** Issue #45: gate the RED/GREEN evidence finding on "test phase ran." */
-  testable?: boolean;
   /** Issue #46: when set, the caller has decided the diff is too large to
    * inline and the railhead should write it to this ledger file path, then
    * hand the reviewer the path + `diffStat` so it reads the diff on demand
@@ -315,7 +313,6 @@ export async function review(options: ReviewArgs): Promise<ReviewOutcome> {
         surface: options.surface,
         coherenceDoc: options.coherenceDoc,
         lintOutput: options.lintOutput,
-        testable: options.testable,
       })
     : await buildReviewerPrompt({
         ticketFile: options.ticketFile,
@@ -335,7 +332,6 @@ export async function review(options: ReviewArgs): Promise<ReviewOutcome> {
         surface: options.surface,
         coherenceDoc: options.coherenceDoc,
         lintOutput: options.lintOutput,
-        testable: options.testable,
       });
 
   const result = await runReviewAgent({
@@ -359,14 +355,13 @@ export async function review(options: ReviewArgs): Promise<ReviewOutcome> {
   });
 
   if (result.status !== "ok") {
-    const detail = `reviewer ${result.detail}`;
-    return {
-      blocking: "Reviewer invocation did not complete; treat as blocking.",
-      mustFix: [],
-      nits: [],
-      ok: detail,
-      transcript: result.transcript,
-    };
+    // v2 issue 01: a reviewer invocation that exits non-ok is INFRA, never a
+    // verdict. Returning an outcome here let an empty findings set classify as
+    // "minor only" and log a green pass with no review transcript — the log
+    // line "review passed (minor only)" must be impossible without a
+    // transcript. Throwing routes the failure into the caller's failure
+    // ladder (transient/incomplete retries, then a hard ticket failure).
+    throw new Error(`reviewer ${result.detail}`);
   }
 
   const transcript = result.transcript;

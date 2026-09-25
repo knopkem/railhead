@@ -240,20 +240,6 @@ export interface RailheadConfig {
    */
   sharpen_max_rounds?: number | null;
   /**
-   * TDD as a railhead phase (issue #5). When true, a `test`
-   * phase runs before each implement attempt on testable tickets: a fresh
-   * opencode subprocess writes one failing test per acceptance criterion at
-   * the seams the ticket names, runs them, confirms they fail for the right
-   * reasons, and emits a `$HANDOFF` block the implementer receives as
-   * `prevHandoff`. The test is the external oracle a small-context model
-   * cannot provide for itself (ADR 0014) — it substitutes judgment with a
-   * check the implementer must satisfy. The presets default it off
-   * (`--light`/`--medium`/`--none`); `--tdd`/`--no-tdd` override per plan or
-   * run (issue #73). Default-off in `railhead fix` mode, where the
-   * bug-reproducer is already the test (#6).
-   */
-   test_phase?: boolean;
-   /**
     * Fix mode (issue #6): when true, the implementer prompt injects the
     * diagnosing-bugs discipline — build a reproducer before hypothesizing,
     * minimize, rank 3-5 falsifiable hypotheses, change one variable at a time,
@@ -299,27 +285,20 @@ export interface RailheadConfig {
    * runs spawn a fresh subprocess per phase (ADR 0001 baseline). */
   persistent_worker?: boolean;
   /**
-   * ADR 0022 / issue #84: when true, the run's builder is ONE durable opencode
-   * session resumed across ticket boundaries (`opencode run --session <id>`,
-   * compaction permitted) with fresh diff-scoped gates interleaved between
-   * invocations, instead of ADR 0001's fresh subprocess per implement phase.
-   * Default true since the #83 head-to-head settled the default; set false to
-   * keep the ADR 0001 fresh-subprocess-per-ticket shape.
-   */
-  session_builder?: boolean;
-  /**
    * ADR 0022 / issue #84: how many tickets the durable builder burns through
    * before expecting a `$CHECKPOINT` marker (`ticket` | `group` | `product`).
-   * Routed into the builder prompt; only meaningful while `session_builder`
-   * is true. Default `product` — one session for the whole remaining build,
-   * with per-ticket gates and commits unchanged. Set `ticket` to checkpoint
-   * after every ticket, `group` to gate whole planner groups at once.
+   * Routed into the builder prompt. Default `product` — one session for the
+   * whole remaining build, with per-ticket gates and commits unchanged. Set
+   * `ticket` to checkpoint after every ticket, `group` to gate whole planner
+   * groups at once.
    */
   checkpoint_granularity?: CheckpointGranularity;
   model: ModelConfig;
-  /** Per-ticket code review + end-of-run final pass (issue #73). Cadence is
-   * `code_review.mode`; absent = `mode: "light"` (end-of-run only — the new
-   * default run shape). */
+  /** Per-ticket code review (v2 issue 01). Only `code_review.mode: "full"`
+   * schedules a per-ticket diff review; the `light`/`medium` presets resolve
+   * this to `"off"` — judged diffs from a same-tier judge caught nothing, and
+   * the goal probes plus the structural review carry the signal. Cadence is
+   * `code_review.mode`; the config default is `"off"`. */
   code_review?: CodeReviewConfig | null;
   /**
    * Visual review (ADR 0009/0011, issue #73). Cadence is `visual_review.mode`
@@ -348,16 +327,17 @@ export interface RailheadConfig {
     * tickets. Defaults to off — existing runs unaffected. */
   structural_review?: StructuralReviewConfig | null;
   /**
-   * Per-ticket interaction smoke: when true, a fresh opencode agent launches the
-   * running app after verify+smoke and drives ONE real user interaction (press a
-   * button, advance one turn, submit a form) to prove the app is OPERABLE, not
-   * merely startable. A FAIL feeds its findings back to the implementer before
-   * review — the earliest gate that closes the "compiles + tests green but the
-   * core loop is unwired" failure class (a pure-logic verify suite cannot see a
-   * missing UI caller). No vision required: the agent asserts via DOM text
-   * (a11y snapshot) or read state. Defaults off. Only meaningful for
-   * interactive projects (`interface` ≠ "none"); skipped silently when no model
-   * resolves or the interface is non-interactive.
+   * Interaction smoke (v2 issue 01): when on, a fresh opencode agent launches
+   * the running app once per committed GROUP boundary and drives ONE real user
+   * interaction with a render-delta assertion plus a zero-console-errors check
+   * — an HTTP 200 or a listening port is not evidence. A FAIL feeds its
+   * findings back to the builder before the boundary ticket commits; a PASS
+   * without input+render evidence in the ledger downgrades to inconclusive.
+   * No vision required: the agent asserts through DOM/a11y text, state reads,
+   * or a pixel sample. Unset = derived by `interactionSmokeEnabled` (ON for a
+   * declared `browser-ui`/`canvas` interface); an explicit boolean always
+   * wins. Skipped silently when no model resolves or the declared interface is
+   * `none`.
    */
   interaction_smoke?: boolean;
 }
@@ -410,30 +390,28 @@ export interface PresetGateModes {
   goalCheckpointAction?: GoalCheckpointAction;
 }
 
-/** Per-gate modes for a preset. `--medium` is the distinctive one: per-ticket
- * code review + checkpoint goal/structural (catch problems at group
- * boundaries) but no end-of-run goal/structural pass and no per-ticket visual
- * (issue #73's table). `--light` is see-early/steer-early/correct-once: its
- * goal gate runs the judge at group boundaries advisory-only (ADR 0029) and
- * corrects in one bounded batch at run end. */
+/** Per-gate modes for a preset. `--medium` is the distinctive one: checkpoint
+ * goal/structural (catch problems at group boundaries) but no end-of-run
+ * goal/structural pass, no per-ticket visual, and — since v2 issue 01 — no
+ * per-ticket code review (only `--full` schedules one; the group probes and
+ * the structural review carry the code-quality signal). `--light` is the
+ * default run shape: same cadence plus a run-end goal pass, with the goal
+ * judge firing corrective-anchored checkpoints at group boundaries. */
 export function presetGateModes(preset: GatePreset): PresetGateModes {
   switch (preset) {
     case "full":
       return { code: "full", visual: "full", goal: "full", structural: "full" };
     case "medium":
-      return { code: "medium", visual: "light", goal: "medium", structural: "medium" };
+      return { code: "off", visual: "light", goal: "medium", structural: "medium" };
     case "light":
       return {
-        code: "light", visual: "light", goal: "light", structural: "light",
+        code: "off", visual: "light", goal: "light", structural: "light",
         goalCheckpointAction: goalCheckpointActionFor("light") ?? undefined,
       };
     case "none":
       return { code: "off", visual: "off", goal: "off", structural: "off" };
   }
 }
-
-/** Whether the preset keeps the TDD test phase on (only `--full` does). */
-export const presetRunsTdd = (preset: GatePreset): boolean => preset === "full";
 
 /** Whether the preset runs the planning sharpening interview (`--medium` and
  * `--full` do; `--light`/`--none` skip it — the fast default skips the
@@ -474,23 +452,31 @@ export interface VisualReviewConfig {
   interaction_hints?: string | null;
 }
 
-/** The value `GoalReviewConfig.checkpoint_action` can hold (ADR 0029): the
- * goal judge fires at group checkpoints advisory-only instead of inline-
- * corrective. See the field's doc for the full contract. */
-export type GoalCheckpointAction = "advisory";
+/** The value `GoalReviewConfig.checkpoint_action` can hold. `"advisory"` is
+ * the legacy ADR 0029 shape: the goal judge fires at group checkpoints
+ * advisory-only (findings recorded + steering; correction deferred to the
+ * run-end batch). `"corrective"` is the v2 default for `light` (v2 issue 01):
+ * the judge fires at group checkpoints and ANCHORED [BLOCKER] findings splice
+ * corrective tickets inline through the ordinary corrective pipeline — the
+ * unanchored ones stay steering-only, and replans stay max_replans-capped. See
+ * the field's doc for the full contract. */
+export type GoalCheckpointAction = "advisory" | "corrective";
 
 /** Parse a goal checkpoint-action token; null when absent or unrecognized
  * (callers treat null as "mode decides"). Mirrors `parseGateMode`. */
 export function parseGoalCheckpointAction(s: string | null | undefined): GoalCheckpointAction | null {
-  return s?.trim().toLowerCase() === "advisory" ? "advisory" : null;
+  const v = s?.trim().toLowerCase();
+  if (v === "advisory" || v === "corrective") return v;
+  return null;
 }
 
 /** The preset-application rule for the goal checkpoint action: goal mode
- * `light` is the run-end-corrective + advisory-checkpoints identity (ADR
- * 0029); `medium`/`full` keep inline corrective checkpoints. Pure so the
- * preset layer and the persist path cannot disagree. */
+ * `light` is corrective-anchored at group boundaries as of v2 issue 01 — the
+ * judge sees early, and its anchored blockers splice corrective tickets ahead
+ * of the frontier while unanchored findings stay advisory. `medium`/`full`
+ * already fire inline-corrective checkpoints (null = mode decides). */
 export function goalCheckpointActionFor(mode: GateMode): GoalCheckpointAction | null {
-  return mode === "light" ? "advisory" : null;
+  return mode === "light" ? "corrective" : null;
 }
 
 /** Issue #19: goal-level evaluation. Cadence is `mode` (issue #73) —
@@ -499,16 +485,18 @@ export function goalCheckpointActionFor(mode: GateMode): GoalCheckpointAction | 
  * seat is null. */
 export interface GoalReviewConfig {
   mode: GateMode;
-  /** ADR 0029 (#102): `"advisory"` fires the goal judge at group checkpoints
-    * (and the fallback cadence) even under a mode that defers mid-run firing
-    * (`light`), and processes them advisory-only — findings recorded,
-    * `CHARTER:`/`LEARNED:`/`DIGEST:` steering applied, ZERO corrective
-    * tickets, correction deferred to the gate's run-end batch. Absent (the
-    * pre-#102 default) = mode decides: `full`/`medium` fire mid-run with
-    * inline corrective tickets; `light` is run-end only. The knob only takes
-    * effect when the gate owns a run-end seat (`light`/`full`); under
-    * `medium` (no run-end pass) mode decides so findings can never be
-    * recorded-without-correction. */
+  /** v2 issue 01 / ADR 0029: the mid-run checkpoint's action.
+   * - `"corrective"` (the light-preset default): the goal judge fires at group
+   *   checkpoints (and the fallback cadence); anchored [BLOCKER] findings
+   *   generate corrective tickets inline through the ordinary pipeline, while
+   *   unanchored findings stay recorded steering; `$REPLAN` remains
+   *   max_replans-capped.
+   * - `"advisory"` (legacy): findings recorded + `CHARTER:`/`LEARNED:`/`DIGEST:`
+   *   steering applied, ZERO corrective tickets, correction deferred to the
+   *   gate's run-end batch.
+   * - Absent: mode decides — `full`/`medium` fire mid-run with inline
+   *   corrective tickets; `light` also fires corrective checkpoints (v2
+   *   default). */
   checkpoint_action?: GoalCheckpointAction;
   /** When the planner does not emit group labels, run a goal review every N
     * committed tickets (the fallback cadence). Defaults to 4. */
@@ -529,12 +517,14 @@ export interface GoalReviewConfig {
 }
 
 /** Whether the goal gate fires its mid-run group checkpoints. `full`/`medium`
- * always do; `light` (and `off`) defer to run end UNLESS ADR 0029's
- * `checkpoint_action: "advisory"` is set — then the judge fires advisory at
- * group boundaries even though the mode's corrective cadence stays at run end. */
+ * always do; `light` now does too (v2 issue 01: corrective-anchored — anchored
+ * blockers splice corrective tickets, unanchored findings stay steering), and
+ * a persisted legacy `checkpoint_action: "advisory"` keeps the advisory
+ * processing. `off` never fires. */
 export function goalFiresCheckpointsMidRun(cfg: GoalReviewConfig | null | undefined): boolean {
   if (!cfg || cfg.mode === "off") return false;
-  return firesMidRun(cfg.mode) || cfg.checkpoint_action === "advisory";
+  if (cfg.mode === "light") return true;
+  return firesMidRun(cfg.mode);
 }
 
 /** Whether a goal-review invocation is the advisory variant (ADR 0029): a
@@ -557,18 +547,14 @@ export interface StructuralReviewConfig {
   mode: GateMode;
 }
 
-/** Per-ticket code review (issue #73). In all modes except `off`, the railhead
- * reviews each ticket's working diff after verify passes and before commit.
- * `mode` controls which finding severities trigger retry:
- * - `light` (default): `[BLOCKER]` findings trigger retry with the full budget;
- *   `[MAJOR]` findings get exactly ONE corrective attempt per ticket, then
- *   soft-pass if still unresolved (issue #96 — a real-but-not-blocking gap
- *   deserves one fix shot without stalling the run); minor are noted. A fast
- *   baseline that catches must-fix issues and gives high-value majors a shot.
- * - `medium`: `[BLOCKER]` and `[MAJOR]` trigger retry; minor are noted.
- * - `full`: same as `medium` for code review (the distinction from `medium` is
- *   in the other gates' cadence, not here).
- * - `off`: no code review.
+/** Per-ticket code review (issue #73; v2 issue 01). Only `full` schedules it
+ * mid-run: the code review reviews each ticket's working diff after verify
+ * passes and before commit. `mode` controls which finding severities trigger
+ * retry:
+ * - `full`: `[BLOCKER]` and `[MAJOR]` trigger retry; minor are noted.
+ * - `medium`/`light`: not scheduled per-ticket by the presets (the mode only
+ *   selects the severity policy if a hand-written `railhead.json` schedules it).
+ * - `off` (the default): no code review.
  *
  * The end-of-run advisory pass (`finalReviewPass`) was removed — it was
  * redundant with per-ticket review and its findings had no teeth. */
@@ -597,6 +583,20 @@ export const severityTriggersRetry = (
  * skips per-ticket review — `light` runs per-ticket review too (BLOCKERs get
  * the full retry budget; MAJORs get one corrective attempt, issue #96). */
 export const codeReviewRunsMidRun = (mode: GateMode): boolean => mode !== "off";
+
+/** v2 issue 01: whether the interaction smoke is on. An explicit
+ * `interaction_smoke` value (true OR false) always wins; when unset it
+ * defaults ON for a project whose declared interface is a browser page the
+ * seat can drive (`browser-ui` / `canvas` — not `native`: the smoke drives a
+ * browser, and a native window has none). The default is derived, not seeded
+ * by the planner, so it holds for hand-written `railhead.json` files and for
+ * projects planned before the interface was declared. */
+export function interactionSmokeEnabled(
+  config: Pick<RailheadConfig, "interaction_smoke" | "projectInterface">,
+): boolean {
+  if (typeof config.interaction_smoke === "boolean") return config.interaction_smoke;
+  return config.projectInterface === "browser-ui" || config.projectInterface === "canvas";
+}
 
 /** Whether the end-of-run visual whole-app pass should fire. Issue #97: it
  * fires under `full`/`light` UNLESS the goal review owns the same run-end
@@ -739,17 +739,14 @@ export const DEFAULT_CONFIG: RailheadConfig = {
   yolo_permissions: false,
   dependency_source_deny: [],
   persistent_worker: false,
-  session_builder: true,
   checkpoint_granularity: "product",
-  test_phase: true,
   fix_mode: false,
   art_direction: true,
   model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: DEFAULT_MODEL, visual: null, extract: null, goal: null },
-  code_review: { mode: "light" },
+  code_review: { mode: "off" },
   visual_review: { mode: "off", max_rounds: null, round_wall_sec: null, interaction_hints: null },
   goal_review: { mode: "off", fallback_cadence: 4, max_rounds: null, max_replans: DEFAULT_MAX_REPLANS, interaction_hints: null },
   structural_review: { mode: "off" },
-  interaction_smoke: false,
   provider: null,
 };
 
@@ -828,9 +825,7 @@ export async function loadConfig(cwd: string): Promise<RailheadConfig> {
         ? j.dependency_source_deny.filter((g: unknown): g is string => typeof g === "string")
         : DEFAULT_CONFIG.dependency_source_deny,
       persistent_worker: j.persistent_worker ?? DEFAULT_CONFIG.persistent_worker,
-      session_builder: j.session_builder == null ? DEFAULT_CONFIG.session_builder : j.session_builder === true,
       checkpoint_granularity: parseCheckpointGranularity(j.checkpoint_granularity) ?? DEFAULT_CONFIG.checkpoint_granularity,
-      test_phase: j.test_phase ?? DEFAULT_CONFIG.test_phase,
       fix_mode: j.fix_mode ?? DEFAULT_CONFIG.fix_mode,
       art_direction: j.art_direction === undefined ? DEFAULT_CONFIG.art_direction : j.art_direction === true,
       model: {
@@ -873,7 +868,7 @@ export async function loadConfig(cwd: string): Promise<RailheadConfig> {
             mode: modeOf(structuralReview, DEFAULT_CONFIG.structural_review!.mode, (o) => legacyStructuralMode(o.enabled, o.at_run_end)),
           }
         : DEFAULT_CONFIG.structural_review,
-      interaction_smoke: j.interaction_smoke === true,
+      interaction_smoke: typeof j.interaction_smoke === "boolean" ? j.interaction_smoke : undefined,
     };
   } catch {
     return { ...DEFAULT_CONFIG, model: { ...DEFAULT_CONFIG.model } };

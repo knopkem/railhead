@@ -35,7 +35,6 @@ import { parsePlanArgs, parseRunArgs, argValue, type PlanArgs } from "../config/
 import {
   GATES,
   resolveGateModes,
-  resolveTdd,
   resolveYolo,
   persistPolicy,
   fixModeForcesVisual,
@@ -135,7 +134,7 @@ function usage() {
 
   build "<what to build>" [--model M] [-a] [-c] [--full|--medium|--light|--none]
        [--review M|full|light|off] [--vision full|light|off] [--goal full|light|off]
-       [--structural full|light|off] [--tdd|--no-tdd] [--sharpen|--no-sharpen] [--yolo] [--verbose]
+       [--structural full|light|off] [--sharpen|--no-sharpen] [--yolo] [--verbose]
        turn a description into dependency-ordered tickets, then run them (issue #73)
         each gate (code/visual/goal/structural review) has a cadence mode:
           full   = mid-run triggers + end-of-run pass
@@ -150,20 +149,20 @@ function usage() {
                   --none   plan -> implement -> verify -> commit, no reviews
        -a/--auto: no human prompts (light preset unless another is given); auto-start
        -c:        ask all questions, then auto-start the run
-       --tdd/--no-tdd / --sharpen/--no-sharpen: boolean overrides (presets default
-       TDD and the sharpening interview off under --light/--none)
+       --sharpen/--no-sharpen: boolean override (presets default the sharpening
+       interview off under --light/--none)
        a clarifying interview runs when a preset runs sharpen (--medium/--full) unless
        --no-sharpen; under -a the model auto-answers (terms/ADRs still resolve).
   fix  "<bug report>" [--model M] [-a] [-c] [--full|--medium|--light|--none]
        [--review ...] [--vision ...] [--goal ...] [--structural ...]
-       [--tdd|--no-tdd] [--sharpen|--no-sharpen] [--yolo] [--verbose]
+       [--sharpen|--no-sharpen] [--yolo] [--verbose]
        turn a bug report into a fix ticket, then run it
-       fix mode forces visual_review.mode: full and TDD off (bug reproducer is the test, #6)
+       fix mode forces visual_review.mode: full (bug reproducer is the test, #6)
        flags: same as build above
    init [--free] [-y]                     scaffold a default railhead.json in the current directory
         all five model seats (plan/implement/review/visual/goal) are asked up front and default to
         the opencode default; each is probed once for availability, context limit, vision and reasoning.
-        review cadence and the test phase are written OFF here (code=light, run-end only) — presets and
+        review cadence is written OFF here (code=light, run-end only) — presets and
         per-gate flags set them per run at plan time (issue #73)
         --free:   auto-discover free models (cost=0) from \`opencode models\` and assign the
                   best-scoring model to each of the five seats, then run the same capability probe
@@ -171,7 +170,7 @@ function usage() {
   run <tickets-dir> [--pause-on-failure] [-m N] [--quiet] [--verbose] [--fresh]
        [--review full|medium|light|off] [--vision full|medium|light|off]
        [--goal full|medium|light|off] [--structural full|medium|light|off]
-       [--tdd|--no-tdd] [--plan M] [--exec M] [--review M] [--visual M]
+       [--plan M] [--exec M] [--review M] [--visual M]
        [--extract M] [--goal-model M]                                      run the ticket queue
        (auto-resumes an interrupted run; --fresh starts new)
        per-gate flags override the cadence persisted in railhead.json (issue #73);
@@ -242,17 +241,15 @@ export interface InitSeatProbe {
  * Issue #74: init captures infrastructure only — the five seat models plus the
  * context budget. Cadence and enablement are plan-time concerns (issue #73):
  * gates are written with their defaults (code_review light — the end-of-run
- * pass; visual/goal/structural off), the TDD test phase is off, and presets
- * raise any of them per run. `visual`/`goal` seats hold a model (never null)
- * even though their gates are off so the seat is ready to be raised; only
- * `extract` stays null.
+ * pass; visual/goal/structural off). `visual`/`goal` seats hold a model (never
+ * null) even though their gates are off so the seat is ready to be raised;
+ * only `extract` stays null.
  */
 export function initRailheadConfig(seats: InitSeatModels, contextBudget: number): RailheadConfig {
   return {
     ...DEFAULT_CONFIG,
     max_context_tokens: contextBudget,
     max_phase_steps: resolveStepBudget(contextBudget),
-    test_phase: false,
     model: { ...seats, extract: null },
   };
 }
@@ -614,7 +611,6 @@ async function cmdInit(cwd: string, yes: boolean = false, free: boolean = false)
   console.log(`models: plan=${describeModel(cfg.model.plan)} implement=${describeModel(cfg.model.implement)} review=${describeModel(cfg.model.review)} visual=${describeModel(cfg.model.visual)} goal=${describeModel(cfg.model.goal)}`);
   console.log(`context budget: ${Math.round(contextBudget / 1000)}k tokens`);
   console.log(`review cadence: code=light (run-end); visual/goal/structural=off — raise gates at plan time with --full/--medium/--light/--none or per-gate flags`);
-  console.log(`tdd test phase: off — presets default it off; enable with --tdd/--full`);
   console.log(`edit ${target} to change these, then run \`railhead build -a "<what to build>"\`.`);
 }
 
@@ -691,7 +687,7 @@ async function ensureVisionGates<M extends { visual: GateMode; goal: GateMode }>
 }
 
 async function cmdBuild(cwd: string, prefs: PlanArgs): Promise<void> {
-  const { prompt, auto, cont, yolo: yoloFlag, verbose, modelOverride, mode, overrides, tdd, sharpen } = prefs;
+  const { prompt, auto, cont, yolo: yoloFlag, verbose, modelOverride, mode, overrides, sharpen } = prefs;
   // Planner/interview mode vocabulary is `build` | `fix`; the CLI's build/fix
   // commands map onto it (sharpen/planner prompts differ in fix mode).
   // Issue #73: run cadence. A preset flag wins; otherwise `-a` and
@@ -799,23 +795,11 @@ async function cmdBuild(cwd: string, prefs: PlanArgs): Promise<void> {
   // from build re-reads railhead.json), so `persists` is set.
   modes = await ensureVisionGates(cwd, modes, models, config, { canAsk: !auto, persists: true });
 
-  // TDD test phase (issue #5): presets default it off (`--full` keeps it on);
-  // `--tdd`/`--no-tdd` override; fix mode forces it off — the bug reproducer
-  // IS the test. Interactive mode asks, defaulting to the light preset's off.
-  const askTdd = tdd === null && mode !== "fix" && !auto && prefs.preset === null;
-  const tddAnswer = askTdd
-    ? await askYesNo(
-        "Enable the TDD test phase (writes a failing test before each implement attempt)?",
-        false,
-      )
-    : undefined;
-  const runTdd = resolveTdd({ flag: tdd, mode, preset: prefs.preset, auto, askDefault: false, answer: tddAnswer });
-
   // Persist the resolved cadence so a resume / later `railhead run` honors it
-  // without re-passing the flags (same pattern as test_phase / yolo before).
-  await persistPolicy(cwd, config, { gateModes: modes, testPhase: runTdd });
+  // without re-passing the flags.
+  await persistPolicy(cwd, config, { gateModes: modes });
   console.log(
-    `review cadence: code=${modes.code} visual=${modes.visual} goal=${modes.goal} structural=${modes.structural}; test phase: ${runTdd ? "on" : "off"}${fixForcesVisual ? " (fix mode forces visual=full)" : ""}`,
+    `review cadence: code=${modes.code} visual=${modes.visual} goal=${modes.goal} structural=${modes.structural}${fixForcesVisual ? " (fix mode forces visual=full)" : ""}`,
   );
 
   // Planning interview (ADR 0010, amended by ADR 0042 — gated by the run
@@ -920,6 +904,11 @@ async function cmdBuild(cwd: string, prefs: PlanArgs): Promise<void> {
     // replaces the goal-coverage audit. Auto runs keep the audit and skip
     // this loop.
     interviewPlan,
+    // v2 issue 01: the goal seat judges the finished plan against the goal
+    // before any build starts; interactive runs skip it (the human review IS
+    // the coverage check).
+    goalModel: models.goal,
+    maxReplans: config.goal_review?.max_replans ?? undefined,
     reviewPlan: auto || mode === "fix"
       ? undefined
       : async ({ planPath }) => {
@@ -1049,11 +1038,10 @@ async function askGateCadence(): Promise<{ modes: PresetGateModes; skipAll: bool
   return { modes: { code: code as GateMode, visual: visual as GateMode, goal: goal as GateMode, structural: structural as GateMode }, skipAll: false };
 }
 
-/** Gate-override flags whose value is a cadence mode, plus the paired TDD
- * flags, are dropped from the args handed to applyModelOverrides so a
- * `--review off` never lands in the review seat model slot (issue #73). A
- * `--review <model-name>` stays (not a gate mode) and selects the review seat
- * model as before. */
+/** Gate-override flags whose value is a cadence mode are dropped from the args
+ * handed to applyModelOverrides so a `--review off` never lands in the review
+ * seat model slot (issue #73). A `--review <model-name>` stays (not a gate
+ * mode) and selects the review seat model as before. */
 function modelSeatFlags(argv: string[]): string[] {
   const consumed = new Set<string>();
   for (const flag of ["--review", "--vision", "--goal", "--structural"]) {
@@ -1065,8 +1053,6 @@ function modelSeatFlags(argv: string[]): string[] {
       consumed.add(val);
     }
   }
-  consumed.add("--tdd");
-  consumed.add("--no-tdd");
   return argv.filter((a) => !consumed.has(a));
 }
 
@@ -1089,7 +1075,7 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } 
   // #73). --review with a gate-mode value is a code-review override; with a
   // model name it is the review-seat model override (legacy) — the model-seat
   // filter below drops only the gate-mode uses so both keep working.
-  const { overrides, tdd } = args;
+  const { overrides } = args;
   applyModelOverrides(config.model, modelSeatFlags(rest));
 
   const gateModes = {} as Partial<Record<GateName, GateMode>>;
@@ -1124,23 +1110,6 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } 
   if (isRenderedSurface(config.projectInterface)) {
     const probed = new Set(visionGateRequests(visionModes, visionModels).map((r) => r.model).filter((m): m is string => m !== null));
     await ensureImplementerVision({ cwd, model: visionModels.implement, skip: probed, maxContextTokens: config.max_context_tokens });
-  }
-
-  if (tdd !== null || (opts.fromPlan === undefined && tdd === null)) {
-    // Standalone `railhead run` (not auto-started from plan): ask the TDD
-    // question interactively, same as plan-time does. Plan-time already asked —
-    // `fromPlan` is the signal. `--tdd`/`--no-tdd` override without asking.
-    const answer = opts.fromPlan === undefined && tdd === null
-      ? await askYesNo(
-          "Enable TDD test phase (writes failing tests before each implement attempt)?",
-          config.test_phase !== false,
-        )
-      : undefined;
-    const runTdd = resolveTdd({ flag: tdd, mode: "build", preset: null, auto: false, askDefault: config.test_phase !== false, answer });
-    const tddReport = await persistPolicy(cwd, config, { testPhase: runTdd });
-    if (tddReport.testPhaseChanged && tdd !== null) {
-      console.log(tdd ? "test phase: enabled via --tdd" : "test phase: disabled via --no-tdd");
-    }
   }
 
   const branch = assembleBranch(cwd, ticketsDir);

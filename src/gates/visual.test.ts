@@ -286,18 +286,12 @@ describe("shouldRunVisualReview", () => {
       slug: "scaffold",
       title: "Scaffold: build, config, project structure",
       what: "A buildable project with a config module pinning every shared number.",
-      mission: "a retro-neon browser snake with smooth gliding movement",
-      blocked_by: [],
       criteria: [
         "npm run typecheck, npm run test, and npm run build all pass",
         "tsconfig.json has strict mode enabled",
         "src/constants.ts exports: BOARD_SIZE=24, CELL_SIZE=24, CANVAS_SIZE=576",
         "Origin convention documented in constants.ts: cell (0,0) is top-left",
-      ],
-      files: [],
-      references: [],
-      introduces: [],
-    };
+      ]};
     expect(shouldRunVisualReview(ticket)).toBe(false);
   });
 
@@ -308,18 +302,12 @@ describe("shouldRunVisualReview", () => {
       slug: "render",
       title: "Playable render loop: Glide, input, neon snake, HUD",
       what: "The game plays in the browser: an rAF loop feeds keyboard input into the Input Buffer and paints every frame in retro-neon style.",
-      mission: "a retro-neon browser snake",
-      blocked_by: [],
       criteria: [
         "Arrows and WASD steer the snake on the canvas",
         "the snake visibly glides between cells (no discrete cell-jump visible at 60fps)",
         "HUD inside the canvas shows score and level, both updating live",
         "Neon style: glow via canvas shadowBlur with the NEON palette on #050510 background",
-      ],
-      files: [],
-      references: [],
-      introduces: [],
-    };
+      ]};
     expect(shouldRunVisualReview(ticket)).toBe(true);
   });
 
@@ -330,16 +318,10 @@ describe("shouldRunVisualReview", () => {
       slug: "input",
       title: "Input handling",
       what: "Wire keyboard input to the game.",
-      mission: "a pong game",
-      blocked_by: [],
       criteria: [
         "paddles respond to keyboard input",
         "the ball moves at a constant speed",
-      ],
-      files: [],
-      references: [],
-      introduces: [],
-    };
+      ]};
     expect(shouldRunVisualReview(ticket)).toBe(true);
   });
 
@@ -350,17 +332,11 @@ describe("shouldRunVisualReview", () => {
       slug: "init",
       title: "Initialize project",
       what: "Set up the project structure.",
-      mission: "a CLI tool",
-      blocked_by: [],
       criteria: [
         "npm run build passes",
         "tsconfig.json has strict mode enabled",
         "package.json has the run script defined",
-      ],
-      files: [],
-      references: [],
-      introduces: [],
-    };
+      ]};
     expect(shouldRunVisualReview(ticket)).toBe(false);
   });
 
@@ -371,13 +347,7 @@ describe("shouldRunVisualReview", () => {
       slug: "gameplay",
       title: "Gameplay logic",
       what: "Implement the core gameplay.",
-      mission: "a platformer",
-      blocked_by: [],
-      criteria: [],
-      files: [],
-      references: [],
-      introduces: [],
-    };
+      criteria: []};
     expect(shouldRunVisualReview(ticket)).toBe(true);
   });
 
@@ -388,16 +358,10 @@ describe("shouldRunVisualReview", () => {
       slug: "fix",
       title: "Fix visual review finding: no food rendered",
       what: "The visual reviewer found this BLOCKER: no food rendered on the board.",
-      mission: "a snake game",
-      blocked_by: [],
       criteria: [
         "Run the app and confirm the finding no longer reproduces",
         "Existing verify commands still pass",
-      ],
-      files: [],
-      references: [],
-      introduces: [],
-    };
+      ]};
     expect(shouldRunVisualReview(ticket)).toBe(true);
   });
 });
@@ -474,13 +438,7 @@ describe("runCommandFromVerify", () => {
     slug: "x",
     title: "x",
     what: "w",
-    mission: "m",
-    blocked_by: [],
-    criteria: [],
-    files: [],
-    references: [],
-    introduces: [],
-  });
+    criteria: []});
 
   it("returns the first verify command as the run hint", () => {
     expect(runCommandFromVerify(["cargo build", "cargo test"], [t("01-x.md")])).toContain("cargo build");
@@ -527,9 +485,7 @@ describe("browser hygiene in visual review prompts (#72)", () => {
 
 describe("touchesVisualSurface (issue #99 — one shared surface gate)", () => {
   const ticket = (criteria: string[]): Ticket => ({
-    file: "01-x.md", number: "01", slug: "x", title: "x", what: "x", mission: "a build",
-    blocked_by: [], criteria, files: [], references: [], introduces: [],
-  });
+    file: "01-x.md", number: "01", slug: "x", title: "x", what: "x", criteria});
 
   it("is the same gate shouldRunVisualReview uses (they can never disagree)", () => {
     const surface = ticket(["the snake visibly glides on the canvas", "HUD shows score"]);

@@ -1,5 +1,5 @@
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import type { TicketState } from "./state.ts";
 
 /**
@@ -7,6 +7,18 @@ import type { TicketState } from "./state.ts";
  * render Tickets through `writeTickets`, consumers (run) parse them back
  * through `parseTicket`; both speak the same `Ticket` shape so the format
  * cannot drift between writer and reader.
+ *
+ * A ticket is a checkpoint and a unit of work: `what` names the behaviour and
+ * the files it touches in prose, `criteria` are the checkable bullets the
+ * builder must satisfy. The execution order is the array order the planner
+ * emitted (strictly sequential); there is no dependency graph.
+ *
+ * A criterion is an observable behaviour sentence, optionally followed by an
+ * indented `probe:` recipe line the judging seats can materialize into a
+ * deterministic script (see {@link criterionProbe}). The probe is part of the
+ * criterion's string (`behaviour\n  probe: launch; act; assert`) so the format
+ * round-trips through one field and legacy criteria without probes parse
+ * unchanged.
  */
 export interface Ticket {
   file: string;
@@ -14,54 +26,103 @@ export interface Ticket {
   slug: string;
   title: string;
   what: string;
-  /** One-line goal of the whole build, so a single-ticket worker sees where this fits. */
-  mission: string;
-  /** File refs of Tickets that must be Committed first, e.g. "01-add-greet.md". */
-  blocked_by: string[];
   criteria: string[];
-  files: string[];
-  references: string[];
-  introduces: string[];
-  /**
-   * Plan-time gate (issue #5): whether a `test` phase should run before this
-   * ticket's implement attempts. The planner sets `testable: false` for
-   * pure-config / manifest / docs tickets (no testable seam); `true`
-   * otherwise. Defaults to `true` when the planner omits the field — a
-   * ticket that didn't think about it probably is testable.
-   */
-  testable?: boolean;
+  /** Issue #19: group label for checkpoint-level goal review. Optional. */
+  group?: string;
   /** Open-ended craft ticket: no structural acceptance criteria; the builder
    * iterates on screenshots until it judges the rendered artifact meets the
    * goal, and the per-ticket review is skipped. */
   open_ended?: boolean;
-  /** Issue #19: group label for checkpoint-level goal review. Optional. */
-  group?: string;
 }
 
-export function readBlockedBy(raw: string): string[] {
-  const line = raw
-    .split("\n")
-    .find((l) => l.trim().toLowerCase().startsWith("**blocked by"));
-  if (!line) return [];
-  const rest = line
-    .slice(line.indexOf(":") + 1)
-    .replace(/\*\*/g, "")
-    .trim();
-  if (!rest || /^none\b/i.test(rest)) return [];
-  return rest
-    .split(/[,\n]/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((s) => {
-      // Normalize any reference form to a ticket file name (e.g. 01-favor.md)
-      const m = s.match(/(\d{2})[\s:.)-]*(.*)/);
-      if (m) {
-        const num = m[1];
-        const slug = m[2].trim().replace(/\s+/g, "-").replace(/\.md$/, "").toLowerCase();
-        return slug ? `${num}-${slug}.md` : `${num}.md`;
-      }
-      return s.toLowerCase().replace(/\.md$/, "") + ".md";
-    });
+/** The planner-model draft of a ticket, before the railhead numbers it. */
+export interface PlanTicket {
+  title: string;
+  what: string;
+  criteria?: string[];
+  /** Issue #19: group label for checkpoint-level goal review. Optional. */
+  group?: string;
+  /** The one open-ended craft ticket that owns a rendered surface's look. */
+  open_ended?: boolean;
+}
+
+/** The title-derived slug every file name and finding key is built on. */
+export function titleSlug(title: string): string {
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "").slice(0, 50) || "ticket";
+}
+
+/** The indented marker that introduces a criterion's probe recipe line. */
+export const PROBE_PREFIX = "probe:";
+
+/** The observable-behaviour sentence of a criterion, with any probe line
+ * stripped. Legacy criteria (including ones ending in "(test)") are returned
+ * unchanged — the grammar treats them as plain behaviours. */
+export function criterionBehavior(criterion: string): string {
+  const idx = criterion.search(/\n[ \t]*probe[ \t]*:/i);
+  return (idx < 0 ? criterion : criterion.slice(0, idx)).trim();
+}
+
+/** The probe recipe of a criterion, or null when it carries none. A probe is
+ * a deterministic command sequence ("launch; act; assert") a cheap judging
+ * seat can materialize into a script — never a test framework name. */
+export function criterionProbe(criterion: string): string | null {
+  const m = criterion.match(/(?:^|\n)[ \t]*probe[ \t]*:[ \t]*([^\n]+)/i);
+  return m ? m[1].trim() : null;
+}
+
+/** Attach a probe recipe to a behaviour sentence in the one-field criterion
+ * shape `behaviour\n  probe: recipe` — the inverse of {@link criterionProbe}. */
+export function withProbe(behavior: string, probe: string): string {
+  return `${behavior.trim()}\n  ${PROBE_PREFIX} ${probe.trim()}`;
+}
+
+/** Parse the acceptance-criteria bullets out of a rendered ticket body. A
+ * criterion may be followed by one indented probe line; the two are folded
+ * into one criterion string so render → parse round-trips exactly. */
+function parseCriteria(raw: string): string[] {
+  const criteria: string[] = [];
+  const lines = raw.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^-\s+\[\s*\]\s+(.+)$/);
+    if (!m) continue;
+    const behavior = m[1].trim();
+    const probe = lines[i + 1]?.match(/^[ \t]+probe[ \t]*:[ \t]*(.+)$/i);
+    if (probe) {
+      criteria.push(withProbe(behavior, probe[1]));
+      i++;
+    } else {
+      criteria.push(behavior);
+    }
+  }
+  return criteria;
+}
+
+/** Number a plan's ticket drafts in emission order, assigning each a unique
+ * file name (`01-slug.md`). Array order IS execution order — the railhead runs
+ * tickets strictly in sequence, one commit per checkpoint. `startNumber`
+ * continues an existing run's global sequence (replans). Pure. */
+export function numberTickets(tickets: PlanTicket[], startNumber = 1): Ticket[] {
+  const usedSlugs = new Set<string>();
+  return tickets.map((t, i) => {
+    let slug = titleSlug(t.title);
+    if (usedSlugs.has(slug)) {
+      let n = 2;
+      while (usedSlugs.has(`${slug}-${n}`)) n++;
+      slug = `${slug}-${n}`;
+    }
+    usedSlugs.add(slug);
+    const number = String(startNumber + i).padStart(2, "0");
+    return {
+      file: `${number}-${slug}.md`,
+      number,
+      slug,
+      title: t.title,
+      what: t.what,
+      criteria: t.criteria ?? [],
+      group: t.group,
+      open_ended: t.open_ended,
+    };
+  });
 }
 
 export async function listTicketFiles(
@@ -79,26 +140,17 @@ export async function parseTicket(
   const num = file.slice(0, 2);
   const titleMatch = raw.match(/^#\s*\d+\s*[:.)-]\s*(.+)$/m);
   const title = titleMatch ? titleMatch[1].trim() : file.replace(/\.md$/, "");
-  const missionMatch = raw.match(/\*\*Mission:\*\*\s*(.+)/);
-  const whatMatch = raw.match(/\*\*What to build:\*\*\s*([\s\S]*?)(?=\n\*\*Blocked by:\*\*)/);
+  const whatMatch = raw.match(/\*\*What to build:\*\*[ \t]*([\s\S]*?)(?=\n\s*\n|\n\*\*|\n-\s+\[|$)/);
   const what = whatMatch ? whatMatch[1].trim() : "";
-  const criteria = (raw.match(/^-\s+\[\s*\]\s+(.+)$/gm) ?? []).map((c) =>
-    c.replace(/^-\s+\[\s*\]\s+/, "").trim(),
-  );
-  validateTicketShape(file, raw, what);
+  const criteria = parseCriteria(raw);
+  validateTicketShape(file, what);
   return {
     file,
     number: num,
     slug: file.replace(/\.md$/, "").replace(/^\d{2}-/, "") || "ticket",
     title,
-    mission: missionMatch ? missionMatch[1].trim() : "",
     what,
-    blocked_by: readBlockedBy(raw),
     criteria,
-    files: readItemList(raw, "Files to read/use"),
-    references: readItemList(raw, "Existing contracts to honor"),
-    introduces: readItemList(raw, "Expected new contracts"),
-    testable: readTestable(raw),
     open_ended: readOpenEnded(raw),
     group: readGroup(raw),
   };
@@ -109,54 +161,16 @@ export async function parseTicket(
  * parser reads falls back to `""`/`[]` on a regex miss — exactly the failure
  * class ADR 0007 already hit once for `blocked_by` (a missing-colon heading
  * silently defeated dependency ordering, with no error, until a human
- * noticed). That fix made the *known* heading tolerant; it did not stop a
- * ticket from reaching this parser with a DIFFERENT heading missing or
- * misspelled — which happens whenever a ticket comes from outside
- * `writeTickets` (a hand-edited file, where the writer's
- * exact shape cannot be assumed). Throwing here trades a silently-degenerate ticket (which would
- * otherwise burn a whole implement/review/retry cycle on blank content) for
- * an immediate, actionable error at load time — before any run starts.
+ * noticed). A ticket that reaches this parser with its body heading missing or
+ * misspelled (a hand-edited file, where the writer's exact shape cannot be
+ * assumed) would otherwise burn a whole implement/review/retry cycle on blank
+ * content. Throwing here trades that for an immediate, actionable error at
+ * load time — before any run starts.
  */
-function validateTicketShape(file: string, raw: string, what: string): void {
-  const problems: string[] = [];
-  if (!/\*\*blocked by/i.test(raw)) {
-    problems.push('missing a "**Blocked by:**" heading (write "**Blocked by:** None" if there truly are no blockers)');
-  }
+function validateTicketShape(file: string, what: string): void {
   if (!what) {
-    problems.push('missing or empty "**What to build:**" content');
+    throw new Error(`ticket ${file} is malformed: missing or empty "**What to build:**" content`);
   }
-  if (problems.length) {
-    throw new Error(`ticket ${file} is malformed: ${problems.join("; ")}`);
-  }
-}
-
-/** Read backtick or comma items under a `**Label:**` heading. */
-function readItemList(raw: string, label: string): string[] {
-  const re = new RegExp(`\\*\\*${label}:\\*\\*([\\s\\S]*?)(?=\\n\\*\\*[^*]+:\\*\\*|\\nStatus:|$)`, "");
-  const m = raw.match(re);
-  if (!m) return [];
-  return m[1]
-    .split("\n")
-    .map((l) => l.replace(/^[-*]\s*/, "").replace(/`/g, "").trim())
-    .filter((l) => l.length > 0 && l !== "None");
-}
-
-/**
- * Read the plan-time `**Testable:**` gate (issue #5). Returns `true` when the
- * heading reads `yes`/`true` (case-insensitive), `false` when `no`/`false`,
- * and `undefined` when the heading is absent — the caller (`parseTicket`)
- * leaves that undefined for `runTestPhase` to default to `true` (a ticket the
- * planner didn't mark probably is testable). A heading the model emits in
- * prose form ("yes — it introduces new contracts") still parses because the
- * first word is what's matched.
- */
-function readTestable(raw: string): boolean | undefined {
-  const m = raw.match(/\*\*Testable:\*\*\s*(\w+)/i);
-  if (!m) return undefined;
-  const v = m[1].toLowerCase();
-  if (v === "yes" || v === "true") return true;
-  if (v === "no" || v === "false") return false;
-  return undefined;
 }
 
 /** Read the `**Open-ended:**` marker from a rendered ticket. Returns `true`
@@ -189,22 +203,11 @@ export async function loadTickets(
   return tickets;
 }
 
-/** Issue #45: whether the test phase runs for this ticket — the fuse of the
- * planner's per-ticket `testable` gate (issue #5; `false` opts out a
- * pure-config / manifest / docs ticket) and the project-level `test_phase`
- * config (issue #5; `false` opts the whole project out). Used to gate both
- * the implementer's RED/GREEN evidence requirement (#45) and the
- * reviewer's missing-evidence finding (#45), so the two stay in sync. */
-export function testPhaseRan(testPhaseConfig: boolean | undefined, ticketTestable: boolean | undefined): boolean {
-  return testPhaseConfig !== false && ticketTestable !== false;
-}
-
 export function toTicketState(t: Ticket): TicketState {
   return {
     file: t.file,
     title: t.title,
     number: t.number,
-    blocked_by: t.blocked_by,
     status: "ready",
     attempts: 0,
     start_commit: null,
@@ -217,10 +220,6 @@ export function toTicketState(t: Ticket): TicketState {
     group: t.group,
     logs: [],
   };
-}
-
-export function resolveTicketsDir(cwd: string, given: string): string {
-  return isAbsolute(given) ? given : join(cwd, given);
 }
 
 export async function writeTickets(
@@ -247,30 +246,13 @@ export function renderTicket(t: Ticket): string {
   const criteria = t.criteria.length
     ? t.criteria.map((c) => `- [ ] ${c}`).join("\n")
     : "- [ ] (no acceptance criteria listed)";
-  const blockedBy = t.blocked_by.length
-    ? t.blocked_by.map((f) => f.replace(/\.md$/, "")).join(", ")
-    : "None (can start immediately)";
-  const filesBlock = t.files.length
-    ? `\n**Files to read/use:**\n${t.files.map((f) => `- \`${f}\``).join("\n")}`
-    : "";
-  const refBlock = t.references.length
-    ? `\n**Existing contracts to honor:**\n${t.references.map((r) => `- \`${r}\``).join("\n")}`
-    : "";
-  const introBlock = t.introduces.length
-    ? `\n**Expected new contracts:**\n${t.introduces.map((r) => `- \`${r}\``).join("\n")}`
-    : "";
-  const testableBlock = t.testable === undefined
-    ? ""
-    : `\n**Testable:** ${t.testable ? "yes" : "no"}`;
   const openEndedBlock = t.open_ended ? "\n**Open-ended:** yes" : "";
   const groupBlock = t.group ? `\n**Group:** ${t.group}` : "";
   return `# ${t.number}: ${t.title}
 
-${t.mission ? `**Mission:** ${t.mission}\n\n` : ""}**What to build:** ${t.what}
+**What to build:** ${t.what}
 
-**Blocked by:** ${blockedBy}${filesBlock}${refBlock}${introBlock}${testableBlock}${openEndedBlock}${groupBlock}
-
-**Status:** ready-for-agent
+**Status:** ready-for-agent${openEndedBlock}${groupBlock}
 
 ${criteria}
 `;

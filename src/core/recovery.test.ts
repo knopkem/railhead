@@ -7,7 +7,6 @@ import {
   nextRunStatus,
   shouldResume,
   checkTicketInvariants,
-  repairBlockedByReferences,
 } from "./recovery.ts";
 import type { RunState, TicketState } from "./state.ts";
 import type { RailheadConfig } from "../config/config.ts";
@@ -26,7 +25,6 @@ function ticket(over: Partial<TicketState>): TicketState {
     file: "01-a.md",
     title: "a",
     number: "01",
-    blocked_by: [],
     status: "ready",
     attempts: 0,
     start_commit: null,
@@ -37,8 +35,7 @@ function ticket(over: Partial<TicketState>): TicketState {
     reviews: [],
     duration_ms: 0,
     logs: [],
-    ...over,
-  };
+    ...over};
 }
 
 function state(tickets: TicketState[]): RunState {
@@ -222,36 +219,6 @@ describe("shouldResume", () => {
 
   it("returns false when priorState is null", () => {
     expect(shouldResume("run/x", null)).toBe(false);
-  });
-});
-
-describe("repairBlockedByReferences (ADR 0045)", () => {
-  const mkState = (tickets: TicketState[]): RunState => ({
-    schema_version: 1, cwd: "/repo", branch: "b", status: "stopped", tickets_dir: "/repo/tickets",
-    config: cfg, pause_on_failure: false, verbose: false, quiet: false,
-    tickets, started_at: "", updated_at: "",
-  });
-
-  it("remaps a stale replan-local blocker to the unique globally numbered file", () => {
-    const state = mkState([
-      ticket({ file: "23-camera-renderer.md", number: "23", status: "committed" }),
-      ticket({ file: "24-debug-overlay.md", number: "24", blocked_by: ["01-camera-renderer.md"] }),
-    ]);
-    const r = repairBlockedByReferences(state);
-    expect(r.remapped).toEqual([{ ticket: "24-debug-overlay.md", from: "01-camera-renderer.md", to: "23-camera-renderer.md" }]);
-    expect(state.tickets[1].blocked_by).toEqual(["23-camera-renderer.md"]);
-    // The repaired frontier is now non-empty (the ticket is ready).
-    expect(state.tickets[1].blocked_by.every((b) => state.tickets.some((t) => t.file === b))).toBe(true);
-  });
-
-  it("leaves an unknown or ambiguous blocker untouched and reports it", () => {
-    const state = mkState([
-      ticket({ file: "24-debug-overlay.md", number: "24", blocked_by: ["01-ghost.md"] }),
-    ]);
-    const r = repairBlockedByReferences(state);
-    expect(r.remapped).toEqual([]);
-    expect(r.unresolved).toEqual([{ ticket: "24-debug-overlay.md", entry: "01-ghost.md" }]);
-    expect(state.tickets[0].blocked_by).toEqual(["01-ghost.md"]);
   });
 });
 

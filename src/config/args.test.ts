@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parseRunArgs, parsePlanArgs } from "./args.ts";
-import { parseGateMode, presetGateModes, presetRunsTdd, presetRunsSharpen, firesMidRun, firesAtRunEnd, severityTriggersRetry, codeReviewRunsMidRun, visualFiresAtRunEnd } from "./config.ts";
+import { parseGateMode, presetGateModes, presetRunsSharpen, firesMidRun, firesAtRunEnd, severityTriggersRetry, codeReviewRunsMidRun, visualFiresAtRunEnd } from "./config.ts";
 
 describe("parseRunArgs", () => {
   it("extracts the non-dash positional as the tickets dir", () => {
@@ -26,7 +26,6 @@ describe("parseRunArgs", () => {
       quiet: false,
       maxRetriesRaw: null,
       fresh: false,
-      tdd: null,
     });
     expect(a.overrides).toEqual({ code: null, visual: null, goal: null, structural: null });
   });
@@ -37,12 +36,6 @@ describe("parseRunArgs", () => {
 
   it("parses --fresh flag", () => {
     expect(parseRunArgs(["issues", "--fresh"]).fresh).toBe(true);
-  });
-
-  it("parses --tdd and --no-tdd (issue #73), rejecting both", () => {
-    expect(parseRunArgs(["issues", "--tdd"]).tdd).toBe(true);
-    expect(parseRunArgs(["issues", "--no-tdd"]).tdd).toBe(false);
-    expect(() => parseRunArgs(["issues", "--tdd", "--no-tdd"])).toThrow(/mutually exclusive/);
   });
 
   it("parses per-gate cadence overrides (--review/--vision/--goal/--structural)", () => {
@@ -76,14 +69,13 @@ describe("parsePlanArgs", () => {
   });
 
   it("parses per-gate overrides and boolean overrides", () => {
-    const a = parsePlanArgs(["build", "--review", "off", "--goal", "light", "--tdd", "--no-sharpen"], "build");
+    const a = parsePlanArgs(["build", "--review", "off", "--goal", "light", "--no-sharpen"], "build");
     expect(a.overrides).toEqual({ code: "off", visual: null, goal: "light", structural: null });
-    expect(a.tdd).toBe(true);
     expect(a.sharpen).toBe(false);
   });
 
   it("rejects contradictory boolean overrides", () => {
-    expect(() => parsePlanArgs(["build", "--tdd", "--no-tdd"], "build")).toThrow(/mutually exclusive/);
+    expect(() => parsePlanArgs(["build", "--sharpen", "--no-sharpen"], "build")).toThrow(/mutually exclusive/);
   });
 
   it("keeps the description clean of flag values (e.g. --model)", () => {
@@ -124,23 +116,19 @@ describe("preset gate modes (issue #73)", () => {
     expect(presetGateModes("full")).toEqual({ code: "full", visual: "full", goal: "full", structural: "full" });
   });
 
-  it("--medium: per-ticket code review, end-of-run visual, checkpoint-only goal/structural", () => {
-    expect(presetGateModes("medium")).toEqual({ code: "medium", visual: "light", goal: "medium", structural: "medium" });
+  it("--medium: no per-ticket code review (v2 issue 01), end-of-run visual, checkpoint-only goal/structural", () => {
+    expect(presetGateModes("medium")).toEqual({ code: "off", visual: "light", goal: "medium", structural: "medium" });
   });
 
-  it("--light: light cadence for all gates (code runs per-ticket: BLOCKER full retry + MAJOR one attempt; goal checkpoints advisory — ADR 0029)", () => {
-    expect(presetGateModes("light")).toEqual({ code: "light", visual: "light", goal: "light", structural: "light", goalCheckpointAction: "advisory" });
+  it("--light: light cadence for all gates (no per-ticket code review — v2 issue 01; goal checkpoints corrective)", () => {
+    expect(presetGateModes("light")).toEqual({ code: "off", visual: "light", goal: "light", structural: "light", goalCheckpointAction: "corrective" });
   });
 
   it("--none turns every gate off", () => {
     expect(presetGateModes("none")).toEqual({ code: "off", visual: "off", goal: "off", structural: "off" });
   });
 
-  it("preset booleans: only --full keeps TDD; --medium/--full run sharpen", () => {
-    expect(presetRunsTdd("full")).toBe(true);
-    expect(presetRunsTdd("medium")).toBe(false);
-    expect(presetRunsTdd("light")).toBe(false);
-    expect(presetRunsTdd("none")).toBe(false);
+  it("preset booleans: --medium/--full run sharpen", () => {
     expect(presetRunsSharpen("full")).toBe(true);
     expect(presetRunsSharpen("medium")).toBe(true);
     expect(presetRunsSharpen("light")).toBe(false);

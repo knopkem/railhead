@@ -230,6 +230,42 @@ export function hasInteractionEvidence(
   return { ok: true, missing: null };
 }
 
+/** v2 issue 01: whether the phase observed rendered output — a screenshot tool
+ * call or reading an image back. A startup logged as HTTP 200 is not an
+ * observation; the render-delta assertion needs pixels (or a pixel sample read
+ * as an image). */
+export function hasRenderObservation(calls: ToolCall[]): boolean {
+  return calls.some((c) => {
+    if (c.tool.endsWith("_screenshot") || c.tool.endsWith("_take_screenshot")) return true;
+    if (c.tool === "read") {
+      const fp = typeof c.input.filePath === "string"
+        ? c.input.filePath
+        : typeof c.input.path === "string"
+          ? c.input.path
+          : "";
+      return /\.(png|jpe?g|webp)$/i.test(fp);
+    }
+    return false;
+  });
+}
+
+/** The interaction-smoke PASS evidence rule (v2 issue 01): a browser-ui PASS
+ * must show BOTH a real user input and a render observation, or it is
+ * downgraded to inconclusive (never a failure — an unevidenced pass is not a
+ * lie the railhead may record). Returns the missing-evidence reason or null. */
+export function interactionSmokePassGap(
+  calls: ToolCall[],
+  projectInterface: ProjectInterface | null | undefined,
+): string | null {
+  if (projectInterface !== "browser-ui") return null;
+  const input = hasInteractionEvidence(calls, projectInterface);
+  if (!input.ok) return input.missing;
+  if (!hasRenderObservation(calls)) {
+    return "no render observation (a screenshot or an image read) — a pass needs a sampled visual delta after the real action, not a 200 response";
+  }
+  return null;
+}
+
 /**
  * Evidence that a visual review captured visual output. The prompt says:
  * "Save screenshots under .railhead/visual/". An agent that followed the

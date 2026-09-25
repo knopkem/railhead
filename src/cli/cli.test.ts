@@ -268,16 +268,15 @@ describe("initRailheadConfig", () => {
     expect(cfg.model.goal).not.toBeNull();
   });
 
-  it("writes infra-only cadence/test defaults: code light, others off, test phase off", () => {
+  it("writes infra-only cadence defaults: every review gate off (v2 issue 01)", () => {
     const cfg = initRailheadConfig(
       { plan: "default", implement: "default", review: "default", visual: "default", goal: "default" },
       230000,
     );
-    expect(cfg.code_review?.mode).toBe("light");
+    expect(cfg.code_review?.mode).toBe("off");
     expect(cfg.visual_review?.mode).toBe("off");
     expect(cfg.goal_review?.mode).toBe("off");
     expect(cfg.structural_review?.mode).toBe("off");
-    expect(cfg.test_phase).toBe(false);
   });
 });
 

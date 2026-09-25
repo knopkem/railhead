@@ -114,8 +114,6 @@ interface PlanMetrics {
   project: string;
   wallMs: number;
   ticketCount: number;
-  planCheckRounds: number;
-  danglingBlockedBy: string[];
   cache: { cold: number; cached: number };
   planDir: string | null;
   error: string | null;
@@ -123,9 +121,7 @@ interface PlanMetrics {
 
 async function collectPlanMetrics(args: Args, wallMs: number, error: string | null): Promise<PlanMetrics> {
   const planLedger = join(args.project, ".railhead", "plan-latest", "events");
-  let planCheckRounds = 0;
   if (existsSync(planLedger)) {
-    planCheckRounds = (await readdir(planLedger)).filter((f) => /^plan-check-\d+\.jsonl$/.test(f)).length;
   }
 
   const scratch = join(args.project, ".scratch");
@@ -139,11 +135,6 @@ async function collectPlanMetrics(args: Args, wallMs: number, error: string | nu
       tickets = await loadTickets(issues).catch(() => []);
     }
   }
-  const files = new Set(tickets.map((t) => t.file));
-  const danglingBlockedBy = tickets.flatMap((t) =>
-    t.blocked_by.filter((b) => !files.has(b)).map((b) => `${t.file} -> ${b}`),
-  );
-
   const cache = existsSync(planLedger)
     ? await collectCacheStats(join(args.project, ".railhead", "plan-latest")).catch(() => ({ cold: 0, cached: 0 }))
     : { cold: 0, cached: 0 };
@@ -155,8 +146,6 @@ async function collectPlanMetrics(args: Args, wallMs: number, error: string | nu
     project: args.project,
     wallMs,
     ticketCount: tickets.length,
-    planCheckRounds,
-    danglingBlockedBy,
     cache: { cold: cache.cold, cached: cache.cached },
     planDir,
     error,
@@ -347,7 +336,7 @@ async function main(): Promise<void> {
   console.log(`\nbench ${args.mode} [${args.engine}] — ${hours}h wall`);
   let detail: string;
   if (result.mode === "plan") {
-    detail = `${result.ticketCount} tickets · ${result.planCheckRounds} plan-check rounds · ${result.danglingBlockedBy.length} dangling blocked_by · cache ${result.cache.cached}/${result.cache.cold + result.cache.cached}`;
+    detail = `${result.ticketCount} tickets · cache ${result.cache.cached}/${result.cache.cold + result.cache.cached}`;
     console.log(`  ${detail}`);
     if (result.error) console.log(`  FAILED: ${result.error}`);
   } else {

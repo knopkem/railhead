@@ -1,5 +1,9 @@
 # The planning interview refines the plan (post-plan, plan-aware)
 
+> Amended by ADR 0049: the `$PLAN` block is removed; the interview revises the
+> `$VERIFY`/`$INTERFACE`/`$SMOKE`/`$DESIGN`/`$ARCHITECTURE` output, and the
+> sequence below still holds otherwise.
+
 Amends ADR 0010 (plan-time sharpening). Recorded after ADR 0041 made the plan
 reviewable. The interview used to run before the planner, with the raw prompt
 as its only source, and its Q&A transcript was folded into the planner's user

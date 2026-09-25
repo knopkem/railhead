@@ -43,4 +43,19 @@ describe("buildInteractionSmokePrompt", () => {
     const p = smokePrompt({ runCommandHint: "x", verifyCommands: [], projectInterface: "browser-ui" });
     expect(p).toContain("chrome-devtools_click");
   });
+
+  it("requires a render-delta assertion and zero console errors (v2 issue 01)", () => {
+    const p = smokePrompt({ runCommandHint: "npm run dev", verifyCommands: [], projectInterface: "browser-ui" });
+    expect(p).toMatch(/RENDER DELTA/);
+    expect(p).toMatch(/Capture the SAME output again and assert it CHANGED/);
+    expect(p).toMatch(/ZERO errors/);
+    expect(p).toMatch(/ANY logged error/);
+  });
+
+  it("states that a curl-style 200 / startup alone is not smoke evidence", () => {
+    const p = smokePrompt({ runCommandHint: "npm run dev", verifyCommands: [], projectInterface: "browser-ui" });
+    expect(p).toMatch(/HTTP 200.*NOT evidence/is);
+    expect(p).toMatch(/unwired rectangle/);
+    expect(p).toMatch(/must never be your basis for a pass/i);
+  });
 });

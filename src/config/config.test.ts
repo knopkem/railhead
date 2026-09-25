@@ -2,7 +2,7 @@ import { mkdtemp, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, expect } from "vitest";
-import { applyModelOverrides, DEFAULT_CONFIG, DEFAULT_CONTEXT_TOKENS, DEFAULT_INFRA_BACKOFF_SEC, DEFAULT_MAX_STEP_MODEL_SEC, DEFAULT_MODEL, DEFAULT_STALL_TIMEOUT_SEC, effectiveContextTokens, goalCheckpointActionFor, goalCheckpointIsAdvisory, goalFiresCheckpointsMidRun, loadConfig, parseCheckpointGranularity, parseGoalCheckpointAction, presetGateModes, resolveModels, parseModelContextLimit, updateConfig, warnIfOversightModelIsLocal } from "./config.ts";
+import { applyModelOverrides, DEFAULT_CONFIG, DEFAULT_CONTEXT_TOKENS, DEFAULT_INFRA_BACKOFF_SEC, DEFAULT_MAX_STEP_MODEL_SEC, DEFAULT_MODEL, DEFAULT_STALL_TIMEOUT_SEC, effectiveContextTokens, goalCheckpointActionFor, goalCheckpointIsAdvisory, goalFiresCheckpointsMidRun, interactionSmokeEnabled, loadConfig, parseCheckpointGranularity, parseGoalCheckpointAction, presetGateModes, resolveModels, parseModelContextLimit, updateConfig, warnIfOversightModelIsLocal } from "./config.ts";
 
 async function makeCwd(body: string | null): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "cfg-"));
@@ -108,16 +108,6 @@ describe("loadConfig", () => {
 
   it("throws on an unknown declared interface rather than silently coercing (#97)", async () => {
     await expect(loadConfig(await makeCwd('{"interface":"desktop"}'))).rejects.toThrow(/unknown value "desktop"/);
-  });
-
-  it("defaults test_phase to true (#5)", async () => {
-    const cfg = await loadConfig(await makeCwd(null));
-    expect(cfg.test_phase).toBe(true);
-  });
-
-  it("reads test_phase: false from railhead.json (#5)", async () => {
-    const cfg = await loadConfig(await makeCwd('{"test_phase":false}'));
-    expect(cfg.test_phase).toBe(false);
   });
 
   it("defaults fix_mode to false (#6)", async () => {
@@ -282,9 +272,9 @@ describe("loadConfig", () => {
     expect(cfg).toEqual(DEFAULT_CONFIG);
   });
 
-  it("defaults code_review to light (issue #73 — the default run defers code review to run end)", async () => {
+  it("defaults code_review to off (v2 issue 01 — light/medium presets stop scheduling per-ticket review)", async () => {
     const cfg = await loadConfig(await makeCwd(null));
-    expect(cfg.code_review?.mode).toBe("light");
+    expect(cfg.code_review?.mode).toBe("off");
     expect(cfg.visual_review?.mode).toBe("off");
     expect(cfg.goal_review?.mode).toBe("off");
     expect(cfg.structural_review?.mode).toBe("off");
@@ -307,7 +297,7 @@ describe("loadConfig", () => {
 
   it("falls back to the default mode for an unrecognised gate-mode token (#73)", async () => {
     const cfg = await loadConfig(await makeCwd(JSON.stringify({ code_review: { mode: "advisory" }, visual_review: { mode: "bogus" } })));
-    expect(cfg.code_review?.mode).toBe("light");
+    expect(cfg.code_review?.mode).toBe("off");
     expect(cfg.visual_review?.mode).toBe("off");
   });
 
@@ -370,9 +360,21 @@ describe("loadConfig", () => {
     expect(cfg.model.goal).toBe("strong-reasoner");
   });
 
-  it("defaults interaction_smoke to false and reads true from railhead.json", async () => {
-    expect((await loadConfig(await makeCwd(JSON.stringify({})))).interaction_smoke).toBe(false);
+  it("leaves interaction_smoke unset by default and preserves an explicit value", async () => {
+    expect((await loadConfig(await makeCwd(JSON.stringify({})))).interaction_smoke).toBeUndefined();
     expect((await loadConfig(await makeCwd(JSON.stringify({ interaction_smoke: true })))).interaction_smoke).toBe(true);
+    expect((await loadConfig(await makeCwd(JSON.stringify({ interaction_smoke: false })))).interaction_smoke).toBe(false);
+  });
+
+  it("interactionSmokeEnabled derives the default from the declared interface (v2 issue 01)", async () => {
+    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({ interface: "browser-ui" }))))).toBe(true);
+    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({ interface: "canvas" }))))).toBe(true);
+    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({ interface: "terminal" }))))).toBe(false);
+    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({ interface: "native" }))))).toBe(false);
+    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({}))))).toBe(false);
+    // A human's explicit value always wins — even off for a browser-ui project.
+    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({ interface: "browser-ui", interaction_smoke: false }))))).toBe(false);
+    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({ interface: "terminal", interaction_smoke: true }))))).toBe(true);
   });
 });
 
@@ -388,15 +390,17 @@ describe("goal_review.checkpoint_action (ADR 0029, #102)", () => {
     expect(cfg.goal_review?.checkpoint_action).toBeUndefined();
   });
 
-  it("defaults checkpoint_action to absent (pre-#102 behavior preserved)", async () => {
+  it("defaults checkpoint_action to absent (the v2 light default fires corrective checkpoints)", async () => {
     const cfg = await loadConfig(await makeCwd(JSON.stringify({ goal_review: { mode: "light" } })));
     expect(cfg.goal_review?.checkpoint_action).toBeUndefined();
-    expect(goalFiresCheckpointsMidRun(cfg.goal_review)).toBe(false);
+    expect(goalFiresCheckpointsMidRun(cfg.goal_review)).toBe(true);
   });
 
-  it("parseGoalCheckpointAction accepts advisory only, case-insensitive", () => {
+  it("parseGoalCheckpointAction accepts advisory and corrective, case-insensitive", () => {
     expect(parseGoalCheckpointAction("advisory")).toBe("advisory");
     expect(parseGoalCheckpointAction("ADVISORY")).toBe("advisory");
+    expect(parseGoalCheckpointAction("corrective")).toBe("corrective");
+    expect(parseGoalCheckpointAction("CORRECTIVE")).toBe("corrective");
     expect(parseGoalCheckpointAction("inline")).toBeNull();
     expect(parseGoalCheckpointAction(undefined)).toBeNull();
   });
@@ -408,11 +412,11 @@ describe("goalFiresCheckpointsMidRun (ADR 0029, #102)", () => {
     expect(goalFiresCheckpointsMidRun({ mode: "medium" })).toBe(true);
   });
 
-  it("light alone defers to run end (no mid-run checkpoints)", () => {
-    expect(goalFiresCheckpointsMidRun({ mode: "light" })).toBe(false);
+  it("light fires corrective group checkpoints mid-run (v2 issue 01 default)", () => {
+    expect(goalFiresCheckpointsMidRun({ mode: "light" })).toBe(true);
   });
 
-  it("light + advisory fires the group checkpoints mid-run (ADR 0029)", () => {
+  it("light + a persisted advisory knob still fires, and stays advisory", () => {
     expect(goalFiresCheckpointsMidRun({ mode: "light", checkpoint_action: "advisory" })).toBe(true);
   });
 
@@ -443,18 +447,18 @@ describe("goalCheckpointIsAdvisory (ADR 0029, #102)", () => {
   });
 });
 
-describe("goalCheckpointActionFor (ADR 0029, #102)", () => {
-  it("goal light is the advisory identity; medium/full are inline corrective", () => {
-    expect(goalCheckpointActionFor("light")).toBe("advisory");
+describe("goalCheckpointActionFor (v2 issue 01, ADR 0029)", () => {
+  it("goal light is corrective-anchored; medium/full already fire inline corrective (mode decides)", () => {
+    expect(goalCheckpointActionFor("light")).toBe("corrective");
     expect(goalCheckpointActionFor("medium")).toBeNull();
     expect(goalCheckpointActionFor("full")).toBeNull();
     expect(goalCheckpointActionFor("off")).toBeNull();
   });
 });
 
-describe("preset goal checkpoint action (ADR 0029, #102)", () => {
-  it("only the light preset carries the advisory goal checkpoint action", () => {
-    expect(presetGateModes("light").goalCheckpointAction).toBe("advisory");
+describe("preset goal checkpoint action (v2 issue 01, ADR 0029)", () => {
+  it("only the light preset carries the corrective goal checkpoint action", () => {
+    expect(presetGateModes("light").goalCheckpointAction).toBe("corrective");
     expect(presetGateModes("full").goalCheckpointAction).toBeUndefined();
     expect(presetGateModes("medium").goalCheckpointAction).toBeUndefined();
     expect(presetGateModes("none").goalCheckpointAction).toBeUndefined();
@@ -789,21 +793,10 @@ describe("parseCheckpointGranularity (ADR 0022, #84)", () => {
   });
 });
 
-describe("session_builder + checkpoint_granularity (ADR 0022, #84)", () => {
-  it("defaults the session builder ON at product granularity (the #83 default flip)", async () => {
+describe("checkpoint_granularity (ADR 0022, #84)", () => {
+  it("defaults to product granularity", async () => {
     const cfg = await loadConfig(await makeCwd(null));
-    expect(cfg.session_builder).toBe(true);
     expect(cfg.checkpoint_granularity).toBe("product");
-  });
-
-  it("reads session_builder: false from railhead.json to stay on the ADR 0001 shape", async () => {
-    const cfg = await loadConfig(await makeCwd('{"session_builder":false}'));
-    expect(cfg.session_builder).toBe(false);
-  });
-
-  it("reads session_builder: true from railhead.json explicitly", async () => {
-    const cfg = await loadConfig(await makeCwd('{"session_builder":true}'));
-    expect(cfg.session_builder).toBe(true);
   });
 
   it("reads checkpoint_granularity and falls back to the product default on a bad value", async () => {

@@ -1,5 +1,8 @@
 # A clean no-DONE exit with a non-empty worktree is gated, not wiped
 
+> Amended by ADR 0047: the `session_builder` flag is removed; the durable
+> builder is the only engine, so its exemption below is the only path.
+
 The DONE marker is a protocol signal, not the quality oracle. The quality
 oracle is the Gate — verify, then smoke/review. A no-DONE exit is ambiguous
 between two shapes that only the worktree can tell apart, and the reaction

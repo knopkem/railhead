@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { checkPlanOrigin, writePlanOrigin, readPlanOrigin, writePlanRulings, readPlanRulings, appendPlanRulings, readPlanWallMs, type PlanOrigin } from "./plan-identity.ts";
+import { checkPlanOrigin, writePlanOrigin, readPlanOrigin, readPlanWallMs, type PlanOrigin } from "./plan-identity.ts";
 
 describe("checkPlanOrigin (#47)", () => {
   const mkOrigin = (over: Partial<PlanOrigin> = {}): PlanOrigin => ({
@@ -118,81 +118,6 @@ describe("writePlanOrigin / readPlanOrigin (#47)", () => {
     try {
       await writeFile(join(dir, "origin.json"), JSON.stringify({ slug: "test" }), "utf8");
       await expect(readPlanOrigin(dir)).rejects.toThrow(/missing required fields/i);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("plan rulings sidecar (#86)", () => {
-  async function makeDir(): Promise<string> {
-    return mkdtemp(join(tmpdir(), "plan-id-"));
-  }
-
-  const SAMPLE = {
-    key: "dup-introduce:greet:a:b",
-    finding: "duplicate introduces: symbol \"greet\" is introduced by tickets 01-a.md and 04-b.md",
-    reason: "intentional — same symbol reused as a local in a separate module",
-    source: "plan" as const,
-    tickets: ["01-a.md", "04-b.md"],
-  };
-
-  it("round-trips rulings next to the plan's origin.json", async () => {
-    const dir = await makeDir();
-    try {
-      await writePlanRulings(dir, [SAMPLE]);
-      expect(await readPlanRulings(dir)).toEqual([SAMPLE]);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("returns [] when no rulings file exists (a pre-#86 plan)", async () => {
-    const dir = await makeDir();
-    try {
-      expect(await readPlanRulings(dir)).toEqual([]);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("throws on malformed JSON or a malformed ruling instead of silently treating it as empty", async () => {
-    const dir = await makeDir();
-    try {
-      await writeFile(join(dir, "rulings.json"), "{ not json", "utf8");
-      await expect(readPlanRulings(dir)).rejects.toThrow(/not valid JSON/);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-
-    const dir2 = await makeDir();
-    try {
-      await writeFile(join(dir2, "rulings.json"), JSON.stringify([{ key: 42 }]), "utf8");
-      await expect(readPlanRulings(dir2)).rejects.toThrow(/malformed ruling/);
-    } finally {
-      await rm(dir2, { recursive: true, force: true });
-    }
-  });
-
-  it("does not write a rulings file for an empty set", async () => {
-    const dir = await makeDir();
-    try {
-      await writePlanRulings(dir, []);
-      expect(await readPlanRulings(dir)).toEqual([]);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("appendPlanRulings merges corrective auto-rulings into the sidecar, deduping by key", async () => {
-    const dir = await makeDir();
-    try {
-      await writePlanRulings(dir, [SAMPLE]);
-      const corrective = { ...SAMPLE, key: "dup-introduce:greet:a:fix", source: "runtime" as const };
-      await appendPlanRulings(dir, [corrective, corrective, { ...SAMPLE, key: SAMPLE.key }]);
-      const all = await readPlanRulings(dir);
-      expect(all).toHaveLength(2);
-      expect(all.map((r) => r.key)).toEqual([SAMPLE.key, corrective.key]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

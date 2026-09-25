@@ -74,3 +74,16 @@ is no longer the mechanism for avoiding out-of-scope blockers.
 - Tests pin both: playthrough scope, the evidence rule in the prompt, the
   splitter's typing, and an end-to-end run where an unanchored blocker
   generates no corrective ticket while remaining recorded.
+
+## Amendment (v2 issue 01): the probe registry is the blocker fast-recheck
+
+A checkpoint's concrete findings are materialized once per group as probe
+scripts under `.railhead/probes/` — the goal seat emits a `$PROBE` block of
+`{behavior, command, expect}` objects, the railhead registers them in
+`state.probes` (resume-safe) and writes the scripts. Before a re-review, the
+railhead runs the registered probes deterministically and injects their
+results into the prompt; a PASS closes the behavior, and findings it matches
+are dropped before recording (`dropClosedFindings`). The seat re-derives only
+genuinely new behaviors, so the observed waste — four goal rounds re-probing
+the same blockers by hand — cannot recur. Probes stay language-agnostic: a
+command plus an expected predicate, never a test framework.

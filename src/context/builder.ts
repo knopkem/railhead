@@ -2,6 +2,7 @@ import { CHECKPOINT_START } from "../core/checkpoint.ts";
 import type { CheckpointGranularity } from "../config/config.ts";
 import { CHARTER_DOC } from "./coherence.ts";
 import { LEARNED_MARKER, RETRACTED_MARKER } from "./learnings.ts";
+import { touchesVisualSurface } from "./surface.ts";
 import { visionCapabilityBlock, type VisionCapabilityFact } from "../execute/vision-probe.ts";
 import { renderPreamble, renderTask, type PhaseMessages } from "./preamble.ts";
 
@@ -36,12 +37,6 @@ export interface BuilderTicket {
   /** The ticket body (what to build). */
   body: string;
   criteria: string[];
-  /** The ticket's test-phase `$HANDOFF` (issue #5 / #95 stage 1): an
-   * independent author wrote failing tests at the named seams before the
-   * builder was asked; this tells the builder what they are and where. Rendered
-   * with the ticket so it rides into the resume input exactly when the ticket
-   * becomes the builder's current work. */
-  handoff?: string;
   /** An open-ended craft ticket: no structural acceptance criteria; the
    * builder iterates on screenshots until it judges the artifact meets the
    * goal. Switches the directive to the craft loop and relaxes output
@@ -83,12 +78,41 @@ const OPEN_ENDED_CADENCE = `You stop when you judge the artifact genuinely meets
 4. Improve the weakest thing. Re-run, re-capture, re-read.
 Do NOT stop at the first version that builds and runs. Keep iterating until the artifact is genuinely good, then checkpoint. The artifact is the product: token thrift is NOT a concern on this ticket — re-read files and take as many screenshots as the work needs.`;
 
+/** v2 issue 01: the surface-ticket self-check. Any ticket whose criteria touch
+ * the rendered surface gets the same screenshot loop discipline the open-ended
+ * craft ticket always had — capture, read back, judge, improve — but it still
+ * checkpoints when the criteria are met; the loop is how it verifies them, not
+ * an endless craft brief. Gated on the railhead's measured vision capability:
+ * a blind seat is told to verify through DOM/state evidence instead of
+ * pretending to look. */
+const SURFACE_CADENCE = `Before checkpointing, verify this ticket with your own eyes — its criteria touch the rendered surface:
+1. Build and run the app, capture a screenshot of the affected surface to a named path.
+2. READ the screenshot back (the railhead measured this seat's model as vision-capable; a read returning no pixels is a tool failure to report, never an accepted limitation).
+3. Judge what you see against this ticket's criteria and the Design intent injected below. Name the weakest thing.
+4. Fix the weakest thing and repeat until the criteria genuinely hold on the running artifact.
+A ticket whose criteria pass on paper but whose render is visibly wrong is NOT green — do not checkpoint it. Token thrift yields to this check on surface tickets: take the screenshots the work needs.`;
+
+const SURFACE_CADENCE_BLIND = `Before checkpointing, verify this ticket against the running artifact — its criteria touch the rendered surface, and the railhead measured this seat's model as unable to read image pixels:
+1. Build and run the app, drive the surface through the real input path, and assert the visible state through the DOM/a11y tree, programmatic state reads, or console output — not by claiming to have looked.
+2. Label any purely visual property you cannot check as unverified in your closing note rather than asserting it.
+Do not checkpoint a surface ticket whose observable behaviour you could not confirm through those channels.`;
+
+/** The directive options that turn a ticket batch's cadence into the surface
+ * self-check. `surface` is the classifier's verdict over the batch; `visionCapable`
+ * is the railhead's measurement (null = unknown → treated as blind, the honest
+ * default). */
+export interface CadenceOptions {
+  surface: boolean;
+  visionCapable: boolean;
+}
+
 /** Text shared by every builder message: the boundary-kill discipline that
  * makes a checkpoint detectable. The marker grammar is the S0.2 contract —
  * one line, own line, `$CHECKPOINT ticket=<number>`, nothing after it. */
 export function checkpointDirective(
   granularity: CheckpointGranularity,
   tickets: BuilderTicket[],
+  cadenceOptions: CadenceOptions = { surface: false, visionCapable: false },
 ): string {
   const names = tickets.map((t) => `\`${t.number}\``).join(", ");
   const openEnded = tickets.some((t) => t.openEnded === true);
@@ -116,6 +140,13 @@ export function checkpointDirective(
     // except the marker.
     cadence = `Product mode: the whole build is this one session, but the railhead surfaces tickets ONE AT A TIME. Implement the current ticket above; checkpoint the moment it is individually green. The railhead gates and commits it, then surfaces the next ticket. Never start work the railhead has not surfaced.`;
     marker = `${CHECKPOINT_START} ticket=<number of the ticket just completed>`;
+  }
+  // v2 issue 01: the screenshot self-check generalizes from the one craft
+  // ticket to EVERY ticket whose criteria touch the rendered surface, gated by
+  // the railhead's measured vision capability. The open-ended craft ticket
+  // already carries the stronger loop via OPEN_ENDED_CADENCE.
+  if (!openEnded && cadenceOptions.surface) {
+    cadence = `${cadence}\n\n${cadenceOptions.visionCapable ? SURFACE_CADENCE : SURFACE_CADENCE_BLIND}`;
   }
   const doneCondition = openEnded
     ? "When you judge the artifact meets the goal AND the build/tests below pass on disk,"
@@ -162,9 +193,6 @@ export function renderBuilderTicket(ticket: BuilderTicket, index: number): strin
     ? ticket.criteria.map((c) => `- [ ] ${c}`).join("\n")
     : "- (no acceptance criteria listed)";
   const mission = ticket.mission ? `\nMISSION: ${ticket.mission}` : "";
-  const handoff = ticket.handoff
-    ? `\n\nTESTS FOR THIS TICKET (written by an independent test phase — they already exist in the tree; find them and make them pass as part of the work, do not delete or weaken them):\n${ticket.handoff.trim()}`
-    : "";
   const openEnded = ticket.openEnded
     ? `\n\nOPEN-ENDED CRAFT TICKET: this ticket has NO structural acceptance criteria — the rendered artifact IS the deliverable, judged by looking at it. Work the screenshot loop in the Checkpointing section and keep improving until it genuinely meets the goal.`
     : "";
@@ -175,7 +203,7 @@ TICKET FILE: ${ticket.file}
 ${ticket.body}
 
 ACCEPTANCE CRITERIA:
-${criteria}${handoff}${openEnded}`;
+${criteria}${openEnded}`;
 }
 
 function continuityBlock(session: BuilderSession): string {
@@ -228,6 +256,17 @@ function designRequestBlock(): string {
 The Design intent section above is the planner's captured vision — the aesthetic, narrative, and quality bar this build is judged against, not only the current ticket's acceptance criteria. Implement toward it; a result that passes the criteria while ignoring it is not done.
 
 If you touch surface code AFTER a compaction, re-read ${DESIGN_DOC} first — after a compaction you no longer hold the vision, and this re-read overrides the "do not re-read files you already hold" output rule.`;
+}
+
+/** v2 issue 01: the verbatim re-injection for a surface-ticket invocation. A
+ * cheap model cannot be trusted to re-read docs/design.md after a compaction,
+ * so the vision rides the task every surface invocation instead of relying on
+ * re-read discipline. */
+function designReinjectBlock(designDoc: string): string {
+  return `## Design intent (verbatim — re-injected on this surface invocation)
+The planner's captured vision, re-sent because a durable session's copy may have been summarized away by a compaction. Implement toward it; a result that passes the criteria while ignoring it is not done.
+
+${designDoc}`;
 }
 
 function architectureRequestBlock(): string {
@@ -361,14 +400,26 @@ export function buildBuilderPrompt(opts: {
   contextBudget?: number;
   /** ADR 0036: the railhead-measured vision capability (implement seat),
    * injected with the charter so a capable implementer self-checks surface
-   * work with pixels. */
+   * work with pixels. Also gates the surface cadence (v2 issue 01): a blind
+   * seat gets the DOM/state self-check instead of a screenshot loop. */
   visionCapability?: VisionCapabilityFact | null;
+  /** v2 issue 01: re-inject the design doc's FULL text into the task instead
+   * of the re-read instruction. The caller sets it on a warm resume whose
+   * session may have compacted the vision away — cheap models are not trusted
+   * to re-read it. */
+  reinjectDesign?: boolean;
 }): PhaseMessages {
   const { session, granularity, tickets, verify } = opts;
   const budget = opts.contextBudget
     ? `\nYour session's request ceiling is budgeted to roughly ${Math.floor(opts.contextBudget / 1000)}k tokens — keep reads small; the railhead treats crossings as telemetry, compaction manages the rest.`
     : "";
   const ticketBlocks = tickets.map(renderBuilderTicket).join("\n\n");
+  // v2 issue 01: every invocation whose tickets touch the rendered surface
+  // gets the surface self-check, not just the one open-ended craft ticket.
+  const cadenceOptions: CadenceOptions = {
+    surface: tickets.some((t) => touchesVisualSurface(t)),
+    visionCapable: opts.visionCapability?.readsImages === true,
+  };
   // gh #105: under product granularity the caller surfaces the CURRENT ticket
   // only (the whole remaining queue used to be pre-listed, which invited
   // checkpoint-jump-ahead). Name the shape so the session knows later tickets
@@ -388,10 +439,14 @@ export function buildBuilderPrompt(opts: {
         surface: !!opts.charter,
         visionCapability: opts.visionCapability,
       });
-  // The stable docs (design/architecture/charter) ride the canonical preamble;
-  // the task carries only the seat instructions that point at them.
+  // The stable docs (design/architecture/charter) ride the canonical preamble
+  // on a fresh seed; a warm surface invocation re-injects the design VERBATIM
+  // in the task (v2 issue 01) because a compacted cheap model will not re-read
+  // it, and the instruction block otherwise just points at the file.
   const requestBlocks = renderTask([
-    opts.designDoc ? designRequestBlock() : "",
+    opts.designDoc
+      ? (opts.reinjectDesign && cadenceOptions.surface ? designReinjectBlock(opts.designDoc) : designRequestBlock())
+      : "",
     opts.architectureDoc ? architectureRequestBlock() : "",
     opts.charter ? charterRequestBlock() : "",
   ]);
@@ -413,7 +468,7 @@ ${ticketBlocks}`,
       opts.contextPointers ? "" : CONTEXT_ECONOMY,
       stateBlock,
       requestBlocks,
-      checkpointDirective(granularity, tickets),
+      checkpointDirective(granularity, tickets, cadenceOptions),
       outputDisciplineFor(tickets) + budget,
     ]),
   };
@@ -444,11 +499,18 @@ export function buildBuilderFindingsPrompt(opts: {
    * see, so the charter rides the canonical preamble and its re-read line
    * rides this task explicitly. */
   coherence?: string | null;
+  /** v2 issue 01: the measured vision capability, so a corrected surface
+   * ticket gets the screenshot self-check when the seat can actually see. */
+  visionCapability?: VisionCapabilityFact | null;
 }): PhaseMessages {
   const { session, granularity, tickets, verify, feedback, design, coherence } = opts;
   const findingsBlock = feedback.findings.length
     ? feedback.findings.map((f, i) => `${i + 1}. ${f}`).join("\n")
     : "(no findings listed)";
+  const cadenceOptions: CadenceOptions = {
+    surface: tickets.some((t) => touchesVisualSurface(t)),
+    visionCapable: opts.visionCapability?.readsImages === true,
+  };
   return {
     preamble: renderPreamble({ design: design ?? null, coherence: coherence ?? null }),
     task: renderTask([
@@ -460,9 +522,9 @@ A fresh ${feedback.source} gate ran against the diff you just produced and it di
 ${findingsBlock}`,
       tickets.map(renderBuilderTicket).join("\n\n"),
       verifyBlock(verify),
-      design ? designRequestBlock() : "",
+      design ? designReinjectBlock(design) : "",
       coherence ? charterRequestBlock() : "",
-      checkpointDirective(granularity, tickets),
+      checkpointDirective(granularity, tickets, cadenceOptions),
       outputDisciplineFor(tickets),
     ]),
   };

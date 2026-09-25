@@ -3,13 +3,9 @@ import {
   classifyFindings,
   buildReplanPrompt,
   meldReplannedTickets,
-  normalizeReplanBlockedBy,
-  globalizeReplanTickets,
-  backfillMission,
   drainFrontier,
   type ReplanClassification,
 } from "./replan.ts";
-import { orderTickets, TICKET_FIELD_SEMANTICS, type PlanTicket } from "../core/ticket-dag.ts";
 import type { TicketState, RunState } from "../core/state.ts";
 
 function ts(file: string, number: string, status: TicketState["status"]): TicketState {
@@ -17,7 +13,6 @@ function ts(file: string, number: string, status: TicketState["status"]): Ticket
     file,
     title: `ticket ${number}`,
     number,
-    blocked_by: [],
     status,
     attempts: 0,
     start_commit: null,
@@ -39,7 +34,6 @@ function stateWith(tickets: TicketState[]): RunState {
     status: "running",
     tickets_dir: "/project/.scratch/test/issues",
     config: {} as never,
-
     pause_on_failure: false,
     verbose: false,
     quiet: false,
@@ -123,244 +117,55 @@ describe("classifyFindings (#51)", () => {
   });
 });
 
+
 describe("buildReplanPrompt (#51)", () => {
-  it("includes the original prompt", () => {
-    const prompt = buildReplanPrompt({
-      originalPrompt: "Build a task tracker app",
-      findings: ["[BLOCKER] plan assumption was wrong"],
-      contractsSummary: "TaskRepo (interface) @ src/repo.ts :: create, read, update",
-      digest: "Module structure: repository pattern established",
-      committedTickets: [
-        { number: "01", title: "Set up project scaffold", file: "01-scaffold.md" },
-        { number: "02", title: "Build data layer", file: "02-data-layer.md" },
-      ],
-      uncommittedTickets: [
-        { number: "03", title: "Build API endpoints", file: "03-api.md" },
-        { number: "04", title: "Build UI", file: "04-ui.md" },
-      ],
-    });
+  const base = {
+    originalPrompt: "Build a task tracker app",
+    findings: ["[BLOCKER] plan assumption was wrong"],
+    contractsSummary: "TaskRepo (interface) @ src/repo.ts :: create, read, update",
+    digest: "Module structure: repository pattern established",
+    committedTickets: [{ number: "01", title: "Set up project scaffold", file: "01-scaffold.md" }],
+    uncommittedTickets: [{ number: "03", title: "Build API endpoints", file: "03-api.md" }],
+  };
+
+  it("includes the original prompt, findings, contracts, and digest", () => {
+    const prompt = buildReplanPrompt(base);
     expect(prompt).toContain("Build a task tracker app");
+    expect(prompt).toContain("[BLOCKER] plan assumption was wrong");
+    expect(prompt).toContain("TaskRepo (interface) @ src/repo.ts :: create, read, update");
+    expect(prompt).toContain("Module structure: repository pattern established");
   });
 
-  it("includes the findings", () => {
-    const prompt = buildReplanPrompt({
-      originalPrompt: "Build something",
-      findings: ["[BLOCKER] The plan assumption about REST was wrong"],
-      contractsSummary: "",
-      digest: null,
-      committedTickets: [],
-      uncommittedTickets: [],
-    });
-    expect(prompt).toContain("[BLOCKER] The plan assumption about REST was wrong");
-  });
-
-  it("includes the contracts summary", () => {
-    const prompt = buildReplanPrompt({
-      originalPrompt: "Build something",
-      findings: ["[BLOCKER] replan needed"],
-      contractsSummary: "TaskRepo (interface) @ src/repo.ts :: create()",
-      digest: null,
-      committedTickets: [],
-      uncommittedTickets: [],
-    });
-    expect(prompt).toContain("TaskRepo (interface) @ src/repo.ts :: create()");
-  });
-
-  it("includes the digest", () => {
-    const prompt = buildReplanPrompt({
-      originalPrompt: "Build something",
-      findings: ["[BLOCKER] replan needed"],
-      contractsSummary: "",
-      digest: "Repository pattern established for data layer",
-      committedTickets: [],
-      uncommittedTickets: [],
-    });
-    expect(prompt).toContain("Repository pattern established for data layer");
-  });
-
-  it("lists committed tickets as fixed context", () => {
-    const prompt = buildReplanPrompt({
-      originalPrompt: "Build something",
-      findings: ["[BLOCKER] replan"],
-      contractsSummary: "",
-      digest: null,
-      committedTickets: [
-        { number: "01", title: "Scaffold", file: "01-scaffold.md" },
-      ],
-      uncommittedTickets: [],
-    });
+  it("lists committed tickets as fixed context and the uncommitted frontier to replace", () => {
+    const prompt = buildReplanPrompt(base);
     expect(prompt).toContain("01-scaffold.md");
-    expect(prompt).toContain("Scaffold");
+    expect(prompt).toContain("Set up project scaffold");
     expect(prompt).toMatch(/committed.*fixed/i);
-  });
-
-  it("lists uncommitted tickets to be replaced", () => {
-    const prompt = buildReplanPrompt({
-      originalPrompt: "Build something",
-      findings: ["[BLOCKER] replan"],
-      contractsSummary: "",
-      digest: null,
-      committedTickets: [],
-      uncommittedTickets: [
-        { number: "03", title: "Build API", file: "03-api.md" },
-      ],
-    });
+    expect(prompt).toMatch(/replace.*uncommitted/i);
     expect(prompt).toContain("03-api.md");
-    expect(prompt).toContain("Build API");
-    expect(prompt).toMatch(/replace.*regenerate/i);
-  });
-
-  it("instructs to preserve committed work and regenerate uncommitted", () => {
-    const prompt = buildReplanPrompt({
-      originalPrompt: "Build something",
-      findings: ["[BLOCKER] replan"],
-      contractsSummary: "",
-      digest: null,
-      committedTickets: [
-        { number: "01", title: "Scaffold", file: "01-scaffold.md" },
-      ],
-      uncommittedTickets: [
-        { number: "02", title: "Build API", file: "02-api.md" },
-      ],
-    });
-    expect(prompt).toMatch(/preserve.*committed/i);
-    expect(prompt).toMatch(/regenerate.*uncommitted/i);
   });
 
   it("tells the planner to generate ADDITIONAL tickets when there is no uncommitted frontier (run-end)", () => {
-    const prompt = buildReplanPrompt({
-      originalPrompt: "Build something",
-      findings: ["[BLOCKER] the plan was incomplete"],
-      contractsSummary: "",
-      digest: null,
-      committedTickets: [
-        { number: "01", title: "Scaffold", file: "01-scaffold.md" },
-      ],
-      uncommittedTickets: [],
-    });
+    const prompt = buildReplanPrompt({ ...base, uncommittedTickets: [] });
     expect(prompt).toMatch(/incomplete/i);
     expect(prompt).toMatch(/additional tickets/i);
     expect(prompt).not.toMatch(/Tickets to replace/);
   });
 
-  it("defines blocked_by as 0-based positions in the emitted array, never absolute numbers", () => {
-    const prompt = buildReplanPrompt({
-      originalPrompt: "Build something",
-      findings: ["[BLOCKER] replan"],
-      contractsSummary: "",
-      digest: null,
-      committedTickets: [
-        { number: "05", title: "State store", file: "05-state-store.md" },
-      ],
-      uncommittedTickets: [],
-    });
-    expect(prompt).toMatch(/0-based positions/i);
-    expect(prompt).not.toMatch(/1-indexed/i);
-    expect(prompt).toMatch(/NOT an absolute ticket number/i);
-    expect(prompt).toMatch(/Do NOT list committed tickets/i);
+  it("asks for the small ticket schema and strict emission order, with no retired fields", () => {
+    const prompt = buildReplanPrompt(base);
+    expect(prompt).toContain('"what"');
+    expect(prompt).toContain('"criteria"');
+    expect(prompt).toContain('"open_ended"');
+    expect(prompt).not.toMatch(/"blocked_by"\s*:/);
+    expect(prompt).not.toMatch(/"files"\s*:/);
+    expect(prompt).not.toMatch(/"references"\s*:/);
+    expect(prompt).toMatch(/order emitted/i);
   });
 
-  it("interpolates the shared field-semantics block (issue #118)", () => {
-    const prompt = buildReplanPrompt({
-      originalPrompt: "Build something",
-      findings: ["[BLOCKER] replan"],
-      contractsSummary: "",
-      digest: null,
-      committedTickets: [
-        { number: "05", title: "State store", file: "05-state-store.md" },
-      ],
-      uncommittedTickets: [],
-    });
-    expect(prompt).toContain(TICKET_FIELD_SEMANTICS);
-    expect(prompt).not.toMatch(/1-indexed/i);
-    expect(prompt).not.toMatch(/committed tickets[^\n]*by position in your emitted array/i);
-  });
-});
-
-describe("normalizeReplanBlockedBy (absolute-numbered replan)", () => {
-  const ticket = (title: string, blocked_by: number[]): PlanTicket => ({
-    title,
-    what: "do the thing",
-    criteria: ["it works"],
-    blocked_by,
-  });
-
-  it("translates absolute ticket numbers to array positions, dropping committed edges", () => {
-    // The observed failure: committed 01–05, new tickets numbered 06–15, and
-    // blocked_by carrying absolute numbers (05 = committed store, 06 = palette).
-    const tickets = [
-      ticket("Palette", [2]),
-      ticket("History", [2]),
-      ticket("Playback", [2]),
-      ticket("Store seam", [5, 6, 7, 8]),
-      ticket("Canvas", [9]),
-      ticket("Palette panel", [9]),
-      ticket("Layers", [9]),
-      ticket("Filmstrip", [9]),
-      ticket("Shell", [10, 11, 12, 13]),
-      ticket("Docs", [14]),
-    ];
-    const normalized = normalizeReplanBlockedBy(tickets, 6, new Set([1, 2, 3, 4, 5]));
-    expect(normalized[0].blocked_by).toEqual([]); // committed 02 dropped
-    expect(normalized[3].blocked_by).toEqual([0, 1, 2]); // 05 dropped, 06/07/08 → 0/1/2
-    expect(normalized[8].blocked_by).toEqual([4, 5, 6, 7]); // 10/11/12/13 → 4/5/6/7
-    expect(normalized[9].blocked_by).toEqual([8]); // 14 → 8
-  });
-
-  it("produces a set orderTickets accepts", async () => {
-    const tickets = [
-      ticket("Palette", [2]),
-      ticket("History", [2]),
-      ticket("Playback", [2]),
-      ticket("Store seam", [5, 6, 7, 8]),
-      ticket("Canvas", [9]),
-      ticket("Palette panel", [9]),
-      ticket("Layers", [9]),
-      ticket("Filmstrip", [9]),
-      ticket("Shell", [10, 11, 12, 13]),
-      ticket("Docs", [14]),
-    ];
-    const normalized = normalizeReplanBlockedBy(tickets, 6, new Set([1, 2, 3, 4, 5]));
-    const ordered = await orderTickets(normalized);
-    expect(ordered).toHaveLength(10);
-    const indexBySlug = new Map(ordered.map((t, i) => [t.slug, i]));
-    expect(indexBySlug.get("docs")!).toBeGreaterThan(indexBySlug.get("shell")!);
-    expect(indexBySlug.get("shell")!).toBeGreaterThan(indexBySlug.get("canvas")!);
-  });
-
-  it("returns the input array unchanged when blocked_by is already 0-based", () => {
-    const tickets = [ticket("A", []), ticket("B", [0]), ticket("C", [1])];
-    const normalized = normalizeReplanBlockedBy(tickets, 6, new Set());
-    expect(normalized).toBe(tickets);
-  });
-});
-
-describe("globalizeReplanTickets (ADR 0045)", () => {
-  it("renumbers the ordered replan into the global range AND remaps blocked_by to the global files", async () => {
-    // The platformer failure: orderTickets numbers the replan 01.. and its
-    // blocked_by lists those local names; the run's frontier is global (23..),
-    // so ticket 24 ended up blocked on a file that did not exist.
-    const plan: PlanTicket[] = [
-      { title: "Camera", what: "camera", criteria: ["c"], blocked_by: [] },
-      { title: "Debug overlay", what: "debug", criteria: ["d"], blocked_by: [0] },
-      { title: "Atlas", what: "atlas", criteria: ["a"], blocked_by: [1] },
-    ];
-    const ordered = await orderTickets(plan);
-    expect(ordered[1].blocked_by).toEqual([ordered[0].file]); // local name
-    const globalized = globalizeReplanTickets(ordered, 23);
-    expect(globalized.map((t) => t.file)).toEqual([
-      "23-camera.md",
-      "24-debug-overlay.md",
-      "25-atlas.md",
-    ]);
-    expect(globalized[1].blocked_by).toEqual(["23-camera.md"]);
-    expect(globalized[2].blocked_by).toEqual(["24-debug-overlay.md"]);
-    // Duplicate edges collapse.
-    const dup = globalizeReplanTickets(
-      [ordered[0], { ...ordered[1], blocked_by: [ordered[0].file, ordered[0].file] }],
-      23,
-    );
-    expect(dup[1].blocked_by).toEqual(["23-camera.md"]);
+  it("does not emit verify/design/architecture blocks again", () => {
+    const prompt = buildReplanPrompt(base);
+    expect(prompt).toMatch(/Do NOT emit \$VERIFY/);
   });
 });
 
@@ -387,7 +192,6 @@ describe("meldReplannedTickets (#51)", () => {
 
   it("preserves committed tickets exactly", () => {
     const committed = ts("01-done.md", "01", "committed");
-    committed.blocked_by = ["00-base.md"];
     committed.attempts = 3;
     committed.review_ok = true;
     const state = stateWith([committed, ts("02-old.md", "02", "ready")]);
@@ -444,12 +248,12 @@ describe("meldReplannedTickets (#51)", () => {
   });
 });
 
+
 describe("drainFrontier (run-end replan)", () => {
   it("drains ready tickets in dependency order", async () => {
     const committed = ts("01-c.md", "01", "committed");
     const t2 = ts("02-a.md", "02", "ready");
     const t3 = ts("03-b.md", "03", "ready");
-    t3.blocked_by = ["02-a.md"];
     const state = stateWith([committed, t2, t3]);
 
     const processed: string[] = [];
@@ -494,39 +298,3 @@ describe("drainFrontier (run-end replan)", () => {
   });
 });
 
-describe("backfillMission (replan dropped the ticket mission)", () => {
-  const ticket = (title: string, mission?: string): PlanTicket => ({
-    title,
-    mission,
-    what: `build ${title}`,
-    criteria: [`${title} works`],
-    blocked_by: [],
-  });
-
-  it("stamps the run mission onto every ticket the replanner left blank", () => {
-    const result = backfillMission(
-      [ticket("Camera"), ticket("Atlas"), ticket("Lighting")],
-      "Ship a polished platformer.",
-    );
-    expect(result.map((t) => t.mission)).toEqual([
-      "Ship a polished platformer.",
-      "Ship a polished platformer.",
-      "Ship a polished platformer.",
-    ]);
-  });
-
-  it("preserves a mission the replanner did provide", () => {
-    const result = backfillMission(
-      [ticket("Camera", "Keep the camera smooth."), ticket("Atlas")],
-      "Ship a polished platformer.",
-    );
-    expect(result[0]!.mission).toBe("Keep the camera smooth.");
-    expect(result[1]!.mission).toBe("Ship a polished platformer.");
-  });
-
-  it("returns the input untouched when no run mission is known", () => {
-    const input = [ticket("Camera"), ticket("Atlas", "")];
-    expect(backfillMission(input, "   ")).toBe(input);
-    expect(backfillMission(input, "")).toBe(input);
-  });
-});

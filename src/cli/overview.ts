@@ -108,10 +108,6 @@ export function buildReport(state: RunState, charterInfo?: CharterReportInfo, ca
   if (state.builder) {
     lines.push(`- Session builder (ADR 0022): granularity=${state.config.checkpoint_granularity ?? "product"} checkpoints=${state.builder.checkpoint_count} committed_through=${state.builder.committed_through ?? "—"} session=${state.builder.session_id ? state.builder.session_id.slice(0, 12) : "—"} restarts=${state.builder.restarts.length}`);
   }
-  const allRulings = [...(state.plan_rulings ?? []), ...(state.rulings ?? [])];
-  if (allRulings.length > 0) {
-    lines.push(`- Rulings (issue #86): ${allRulings.length} (${(state.plan_rulings ?? []).length} plan, ${(state.rulings ?? []).length} runtime)`);
-  }
   if (visualMode !== "off") {
     const rounds = state.visual_rounds ?? -1;
     const verdict = state.visual_ok === null
@@ -166,9 +162,6 @@ export function buildReport(state: RunState, charterInfo?: CharterReportInfo, ca
     if (t.last_failure_class) {
       lines.push(`- Failure ladder: ${t.last_failure_class}${t.ladder_rung ? ` (rung ${t.ladder_rung})` : ""}`);
     }
-    if (t.diagnosis) {
-      lines.push(`- Diagnosis: ${t.diagnosis.text}${t.diagnosis.plan_spent ? " (plan spent on a guided attempt)" : ""}`);
-    }
     if (t.reviews.length) {
       for (const rv of t.reviews) {
         const verdict = rv.blocking ? `blocking (${rv.findings.length} must-fix)` : "pass";
@@ -180,11 +173,8 @@ export function buildReport(state: RunState, charterInfo?: CharterReportInfo, ca
         `- Context: peak ${k(t.context.peakInputTokens)} | final ${k(t.context.finalInputTokens)} | compactions ${t.context.compactions}`,
       );
       if (t.context.compactions > 0) {
-        const builder = state.config.session_builder === true;
         lines.push(
-          builder
-            ? `- Compactions: ${t.context.compactions} (expected — the durable-session builder's context manager; see ADR 0022)`
-            : `- ⚠ ${t.context.compactions} compaction${t.context.compactions > 1 ? "s" : ""} — the budget may be mis-set or the model over-read; check the per-model context window in opencode.json and the max_context_tokens in railhead.json.`,
+          `- Compactions: ${t.context.compactions} (expected — the durable-session builder's context manager; see ADR 0022)`,
         );
       }
       if (t.context.outputTokensPerSec > 0) {
@@ -257,18 +247,6 @@ export function buildReport(state: RunState, charterInfo?: CharterReportInfo, ca
     }
     lines.push(``);
   }
-  if (allRulings.length > 0) {
-    lines.push(`## Rulings`);
-    lines.push(``);
-    lines.push(`Decisions the railhead took on the operator's behalf (plan-time adjudications and runtime corrective auto-rulings), each with its source and the tickets it involved. A ruling that dies with the workspace was a decision made in secret — this section is where an unattended run shows them.`);
-    lines.push(``);
-    for (const r of allRulings) {
-      const src = r.source === "plan" ? "plan" : "runtime";
-      const tickets = r.tickets.length ? ` (${r.tickets.join(", ")})` : "";
-      lines.push(`- [${src}] ${r.finding}${tickets} — ruled: ${r.reason}`);
-    }
-    lines.push(``);
-  }
   const ladderTickets = state.tickets.filter(
     (t) => t.last_failure_class || t.logs.some((l) => l.includes("capacity_limited")),
   );
@@ -286,13 +264,6 @@ export function buildReport(state: RunState, charterInfo?: CharterReportInfo, ca
     const capacityCount = classes.get("capacity") ?? 0;
     if (capacityCount > 0) {
       lines.push(`- ${capacityCount} capacity failure(s) — consider smaller tickets (docs/adr/0014) or a larger context budget`);
-    }
-    // gh #110 / ADR 0033: surface each diagnosis the plan-producing rung spent
-    // — the root cause and whether its plan drove a guided attempt (or, with no
-    // plan, the run stopped at the terminal rung exactly as before).
-    for (const t of ladderTickets) {
-      if (!t.diagnosis) continue;
-      lines.push(`- ${t.number} diagnosis: ${t.diagnosis.text}${t.diagnosis.plan_spent ? " (plan spent)" : " (no plan — terminal)"}`);
     }
     lines.push(``);
   }
@@ -407,10 +378,6 @@ function ticketNumber(t: TicketState): string {
   return t.number;
 }
 
-function titleFinder(state: RunState, file: string): string {
-  return state.tickets.find((t) => t.file === file)?.title ?? file;
-}
-
 /**
  * Render the next actionable ticket(s) from a run state, plus any blocked
  * tickets waiting on them. Pure function — no I/O — so it's unit-testable.
@@ -421,16 +388,9 @@ function titleFinder(state: RunState, file: string): string {
  * blocked on something that isn't committed).
  */
 export function renderNextActionable(state: RunState): string {
-  const committed = new Set(
-    state.tickets.filter((t) => t.status === "committed").map((t) => t.file),
-  );
-
   const ready = frontier(state);
   const inProgress = state.tickets.filter((t) => t.status === "in_progress");
   const failed = state.tickets.filter((t) => t.status === "failed");
-  const blocked = state.tickets.filter(
-    (t) => t.status === "ready" && !t.blocked_by.every((b) => committed.has(b)),
-  );
 
   const lines: string[] = [];
 
@@ -467,21 +427,8 @@ export function renderNextActionable(state: RunState): string {
     lines.push("");
   }
 
-  if (blocked.length > 0) {
-    lines.push("BLOCKED:");
-    for (const t of blocked) {
-      const uncommittedBlockers = t.blocked_by
-        .filter((b) => !committed.has(b))
-        .map((b) => `${b} (${titleFinder(state, b)})`);
-      lines.push(`  · ${ticketNumber(t)} ${t.title}`);
-      for (const b of uncommittedBlockers) {
-        lines.push(`    waiting on: ${b}`);
-      }
-    }
-    lines.push("");
-  }
 
-  if (ready.length === 0 && inProgress.length === 0 && failed.length === 0 && blocked.length === 0) {
+  if (ready.length === 0 && inProgress.length === 0 && failed.length === 0) {
     lines.push("All tickets committed. Nothing to do next.");
   }
 

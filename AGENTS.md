@@ -1,10 +1,10 @@
 # AGENTS.md
 
-Guidance for agents working in this repo. Read `CONTEXT.md` for the domain vocabulary (Railhead, Ticket, Run, Ledger, Gate, Frontier, Committed, Implementer, Reviewer) — use those words exactly.
+Guidance for agents working in this repo. Read `CONTEXT.md` for the domain vocabulary (Railhead, Ticket, Run, Ledger, Gate, Frontier, Committed, Builder, Reviewer) — use those words exactly.
 
 ## What this is
 
-A CLI (`railhead`) that drives `opencode` over dependency-ordered **Tickets** (see `CONTEXT.md`). Each ticket runs implement → verify → smoke → review → commit as a fresh `opencode` process. The `railhead.contracts.json` index keeps per-ticket context O(ticket), not O(project).
+A CLI (`railhead`) that drives `opencode` over an ordered queue of **Tickets** (see `CONTEXT.md`). One durable Builder session writes the code across ticket checkpoints; each ticket runs build → verify → smoke → commit, with the judging phases as fresh processes — a plan gate before any build starts, an interaction smoke at group boundaries, and goal/structural reviews at checkpoints and run end. The auto-extracted `railhead.contracts.json` index keeps judging context O(ticket), not O(project).
 
 ## Project map
 
@@ -12,8 +12,8 @@ A CLI (`railhead`) that drives `opencode` over dependency-ordered **Tickets** (s
 
 - `src/core/` — run/ticket model, ledger, contracts index, ticket parsing, git/model/asset adapters. The foundation; no phase runs here.
 - `src/config/` — `railhead.json` shape and defaults, CLI arg parsing, gate-cadence policy.
-- `src/plan/` — planner stages, plan parsers, sharpen interview, plan identity/rulings.
-- `src/context/` — model-facing text: prompt builders, builder prompt, learnings, digest, coherence, handoff, summaries.
+- `src/plan/` — the two-call planner (design → tickets), plan parsers, sharpen interview, plan identity.
+- `src/context/` — model-facing text: prompt builders, builder prompt, learnings, digest, coherence, summaries.
 - `src/execute/` — run loop, opencode subprocesses, verify/smoke, failure ladder, builder units, vision probe.
 - `src/gates/` — review gates: code/visual/goal/structural, evidence, corrective tickets, replan.
 - `src/cli/` — command dispatch and terminal output.
@@ -32,7 +32,7 @@ A CLI (`railhead`) that drives `opencode` over dependency-ordered **Tickets** (s
 The pure-logic modules carry the risk (parsing, ordering, merging, extracting); they get unit tests first. Real `opencode` subprocess runs are integration and are not part of `npm test`.
 
 - Put each test beside its module: `src/core/foo.ts` → `src/core/foo.test.ts`.
-- Cover the boundaries that actually regress: the lossy parsers (`readBlockedBy`, `parsePlanJson`, `extractContractsBlock`), robustness against malformed model output (mid-array garbage, truncation, prose-wrapped), round-trips (write → parse), and ordering (`orderTickets`, `mergeContracts`).
+- Cover the boundaries that actually regress: the lossy parsers (`parsePlanJson`, `extractContractsBlock`), robustness against malformed model output (mid-array garbage, truncation, prose-wrapped), round-trips (`renderTicket` → `parseTicket`), and ordering (`numberTickets`).
 - A failing test is a bug report; make it assert **why**, not just that a function returns.
 
 ## Commands

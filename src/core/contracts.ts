@@ -140,30 +140,6 @@ export function summarizeContracts(index: ContractsIndex): string {
   return lines.join("\n");
 }
 
-/** Issue #103: the symbols the index already knows — the committed/existing-
- * code universe every gate resolves references against, so a ticket that
- * builds on a committed contract is not misread as a dangling reference. */
-export function knownContractSymbols(index: ContractsIndex): Set<string> {
-  return new Set(index.entries.map((e) => e.symbol));
-}
-
-/** A compact slice limited to a set of files and/or symbols, for prompt injection. */
-export function sliceContracts(
-  index: ContractsIndex,
-  opts: { files?: string[]; symbols?: string[] } = {},
-): ContractsIndex {
-  const files = new Set((opts.files ?? []).map((f) => f.toLowerCase()));
-  const syms = new Set(opts.symbols ?? []);
-  return {
-    schema_version: index.schema_version ?? 1,
-    entries: index.entries.filter(
-      (e) =>
-        (files.size && files.has(e.file.toLowerCase())) ||
-        (syms.size && syms.has(e.symbol)),
-    ),
-  };
-}
-
 export function renderContracts(index: ContractsIndex): string {
   if (!index.entries.length) return "(none)";
   return index.entries

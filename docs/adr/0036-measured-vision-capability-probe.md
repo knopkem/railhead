@@ -1,5 +1,8 @@
 # Vision capability is measured, not declared — and a blind seat refuses before the run spends hours
 
+> Amended by ADR 0047: the TDD question no longer exists (the test phase is
+> retired); the measured-capability probe below is unchanged.
+
 Recorded after the spriteforge run `run-20260915-1449`. Every seat resolved to
 the opencode default, a text-only local model. The `--light` preset raised the
 visual and goal gates, so for 22 hours the goal reviewer judged the build with

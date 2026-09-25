@@ -7,7 +7,6 @@ function ticket(number: string, group?: string): TicketState {
     file: `${number}-t.md`,
     title: `Ticket ${number}`,
     number,
-    blocked_by: [],
     status: "ready",
     attempts: 0,
     start_commit: null,

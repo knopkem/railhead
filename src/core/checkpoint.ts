@@ -29,37 +29,51 @@ export const CHECKPOINT_RE = /\$CHECKPOINT\b/i;
 /** Matches the `ticket=NN` (or `ticket: NN`) argument on a checkpoint line. */
 const TICKET_ARG_RE = /ticket\s*[=:]\s*([A-Za-z0-9_.-]+)/i;
 
+/** Normalize the ticket number a marker names: `1` matches ticket `01`. A
+ * non-numeric token (a slug, a placeholder) is left alone. */
+function normalizeTicketNumber(raw: string): string {
+  return /^\d+$/.test(raw) ? String(Number(raw)).padStart(2, "0") : raw;
+}
+
+/** The ticket named by a line that carries a `$CHECKPOINT` marker — at the
+ * line start or trailing after prose ("all green — $CHECKPOINT ticket=01").
+ * The marker must be followed by a ticket argument; a bare prose mention
+ * ("I will emit a $CHECKPOINT when done") yields null. `normalizeTicketNumber`
+ * makes `ticket=1` match `ticket=01` (the five wasted re-invocations observed
+ * were marker-emission slips, not wrong tickets). */
+function checkpointTicketOn(line: string): string | null {
+  const idx = line.search(CHECKPOINT_RE);
+  if (idx < 0) return null;
+  const m = line.slice(idx).match(TICKET_ARG_RE);
+  return m ? normalizeTicketNumber(m[1]) : null;
+}
+
 /**
  * The ticket named by the LAST `$CHECKPOINT` line in a transcript, or null
  * when no checkpoint line is present. Lossy by design:
  *  - a `$CHECKPOINT` line without a `ticket=` argument is a narration, not a
  *    signal — ignored;
+ *  - the marker may begin the line or trail prose on it (v2 issue 01: a
+ *    cheap model's "all green — $CHECKPOINT ticket=01" is a real signal, and
+ *    rejecting it wasted a whole re-invocation);
+ *  - `ticket=1` is normalized to `01`, so zero-padding drift never fails the
+ *    expected-ticket comparison;
  *  - the LAST matching line wins, so a stressed model that re-emits the marker
- *    mid-ramble still yields the terminal ticket number (matching what
- *    `readHandoffMarker`'s "first complete pair" does for handoffs, inverted
- *    here because a checkpoint is a single terminal line, not a block).
+ *    mid-ramble still yields the terminal ticket number.
  */
 export function readCheckpointTicket(transcript: string): string | null {
   let found: string | null = null;
   for (const line of transcript.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed.toUpperCase().startsWith(CHECKPOINT_START)) continue;
-    const m = trimmed.match(TICKET_ARG_RE);
-    if (m) found = m[1];
+    const ticket = checkpointTicketOn(line);
+    if (ticket) found = ticket;
   }
   return found;
 }
 
-/** True when `text` ENDS with a valid checkpoint line — its last non-empty
- * line starts with `$CHECKPOINT` and names a ticket. This is the terminal
- * marker contract ("the marker on its own line as the LAST line") and it is
- * deliberately NOT the loose `CHECKPOINT_RE` substring match: a model that
- * quotes the format in prose ("Checkpoint format: `$CHECKPOINT ticket=NN` as
- * LAST line", "then emit `$CHECKPOINT ticket=03`") must not arm the executor's
- * boundary kill — those mentions killed productive mid-work generations. It
- * also stays unarmed for a marker written mid-message that the model then
- * keeps talking past. Mirrors what makes a checkpoint real to the gate
- * (`readCheckpointTicket`), anchored to the end of the accumulated text. */
+/** True when `text` ENDS with a checkpoint line — its last non-empty line
+ * carries a `$CHECKPOINT` marker and a ticket argument (leading or trailing on
+ * the line). Anchored to the end of the accumulated text so a model that keeps
+ * talking past a marker never arms the executor's boundary kill. */
 export function endsWithCheckpoint(text: string): boolean {
   let last = -1;
   const lines = text.split("\n");
@@ -67,7 +81,5 @@ export function endsWithCheckpoint(text: string): boolean {
     if (lines[i].trim()) last = i;
   }
   if (last < 0) return false;
-  const line = lines[last].trim();
-  if (!line.toUpperCase().startsWith(CHECKPOINT_START)) return false;
-  return TICKET_ARG_RE.test(line);
+  return checkpointTicketOn(lines[last].trim()) !== null;
 }

@@ -97,41 +97,6 @@ export function rebaseFrontier(state: RunState): RunState {
  * exited without transitioning it and without ever marking the run stopped.
  * Returning `stopped` here surfaces the interrupt instead of hiding it.
  */
-/** ADR 0045 resume repair: a replan written before the globalizer fix left
- * state tickets whose `blocked_by` names the replan-LOCAL files ("01-x.md")
- * while the files in state are globally numbered ("23-x.md"). The frontier
- * then sees no satisfied blockers and the run stops as stuck. On every run
- * loop entry, remap each blocked_by entry that is not a known ticket file to
- * the unique ticket whose slug matches; entries matching no ticket or several
- * are left untouched (and reported) rather than guessed. Pure over state. */
-export function repairBlockedByReferences(state: RunState): {
-  remapped: { ticket: string; from: string; to: string }[];
-  unresolved: { ticket: string; entry: string }[];
-} {
-  const files = new Set(state.tickets.map((t) => t.file));
-  const bySlug = new Map<string, string[]>();
-  for (const t of state.tickets) {
-    const slug = t.file.replace(/^\d+-/, "");
-    bySlug.set(slug, [...(bySlug.get(slug) ?? []), t.file]);
-  }
-  const remapped: { ticket: string; from: string; to: string }[] = [];
-  const unresolved: { ticket: string; entry: string }[] = [];
-  for (const t of state.tickets) {
-    const next = t.blocked_by.map((b) => {
-      if (files.has(b)) return b;
-      const matches = bySlug.get(b.replace(/^\d+-/, "")) ?? [];
-      if (matches.length === 1) {
-        remapped.push({ ticket: t.file, from: b, to: matches[0] });
-        return matches[0];
-      }
-      unresolved.push({ ticket: t.file, entry: b });
-      return b;
-    });
-    t.blocked_by = [...new Set(next)];
-  }
-  return { remapped, unresolved };
-}
-
 export function nextRunStatus(state: RunState): RunStatus {
   const allCommitted = state.tickets.every((t) => t.status === "committed");
   if (allCommitted) return "finished";

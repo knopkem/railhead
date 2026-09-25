@@ -1,15 +1,14 @@
 # Railhead
 
-Drive `opencode` over dependency-ordered tickets, unattended: each ticket is implemented, verified, reviewed, and committed before the next begins. A contracts index keeps every phase's context O(ticket), so a small local model or a cloud model can run an arbitrarily large project without holding it all at once.
+Drive `opencode` over a queue of tickets, unattended: each ticket is implemented, verified, reviewed, and committed before the next begins, in the order the plan emitted. A contracts index keeps every judging phase's context O(ticket), so a small local model or a cloud model can run an arbitrarily large project without holding it all at once.
 
 ## How it works
 
-A plan is sliced into dependency-ordered tickets; only tickets whose blockers are committed may start. Each ticket runs a gate and lands as one commit; optional review gates can add corrective tickets — or replan the remainder — before the run moves on.
+A plan is sliced into an ordered ticket queue; each ticket runs a gate and lands as one commit before the next begins. Optional review gates can add corrective tickets — or replan the remainder — before the run moves on.
 
 ```
-per ticket, in dependency order
-  TEST        optional   fresh phase writes one failing test per acceptance criterion
-  IMPLEMENT              durable opencode session resumed across checkpoints
+per ticket, in plan order
+  BUILD                  durable opencode session resumed across checkpoints
   VERIFY                 your build/test commands; must be green
   SMOKE       optional   launch command stays up (panic / not-found signatures fail)
   REVIEW                 read-only, diff-scoped critique of the change
@@ -23,11 +22,10 @@ at group checkpoints and run end
   RUN END                end-of-run visual/goal/structural passes, then report.md
 ```
 
-- **TEST** runs when the TDD phase is on (`--full` or `--tdd`) and the ticket is testable — the external oracle a small model needs. It is skipped for config-only tickets and in `fix` mode, where the bug reproducer is the test.
 - **SMOKE** runs when the planner emitted a `$SMOKE` launch command and the framework is recognized; a process still running at the timeout passes.
 - **Retries** feed findings back into the same builder session. `[BLOCKER]` findings always retry (then hard-fail); `[MAJOR]` retry per cadence. Any `[BLOCKER]` can become a **corrective ticket** that runs the full gate inline before the originating review passes; a failing goal review can request a **replan** of the remaining tickets.
-- **Tickets** declare what they are *blocked by*; the frontier is the set whose blockers are all committed. Committed tickets never re-open.
-- **The builder** is one durable opencode session resumed across checkpoints, so the author of the code receives review feedback directly. Set `session_builder: false` for a fresh implementer subprocess per attempt instead.
+- **Tickets** run strictly in the order the planner emitted; the frontier is the first ready ticket. Committed tickets never re-open.
+- **The builder** is one durable opencode session resumed across checkpoints, so the author of the code receives review feedback directly (ADR 0047).
 - **Gates are always fresh and diff-scoped** — reviewers never inherit the builder's context — and phases can push `LEARNED:` facts into `.railhead/learnings.md` for later prompts.
 - **The ledger** (`.railhead/<run-id>/`) records state and the raw event stream per phase; a crashed or stopped run resumes where it left off.
 - **Failures** escalate through a three-rung ladder (retry → restart worker → diagnose/fail), with step, stall, and degraded-target guards for unattended runs.
@@ -66,7 +64,7 @@ railhead reset [--hard]                abandon the latest interrupted run (--har
 railhead diagnose screenshots [--model M]  check that a model can take a screenshot and read it back
 ```
 
-`build`/`fix` flags: `[--model M] [-a|--auto] [-c] [--full|--medium|--light|--none] [--verbose] [--yolo]`, plus per-gate overrides (`--review`, `--vision`, `--goal`, `--structural`, `--tdd`, `--sharpen`). `run` accepts `[--plan M] [--exec M] [--review M] [--visual M] [--extract M] [--goal-model M] [-m N] [--pause-on-failure] [--quiet|--verbose] [--fresh]` and the same gate overrides. `-a` alone means `--light`.
+`build`/`fix` flags: `[--model M] [-a|--auto] [-c] [--full|--medium|--light|--none] [--verbose] [--yolo]`, plus per-gate overrides (`--review`, `--vision`, `--goal`, `--structural`, `--sharpen`). `run` accepts `[--plan M] [--exec M] [--review M] [--visual M] [--extract M] [--goal-model M] [-m N] [--pause-on-failure] [--quiet|--verbose] [--fresh]` and the same gate overrides. `-a` alone means `--light`.
 
 ## Configuration
 
@@ -74,7 +72,6 @@ railhead diagnose screenshots [--model M]  check that a model can take a screens
 {
   "verify": ["npm run typecheck", "npm test"],
   "smoke": [],                    // launch commands for the smoke phase (usually seeded by the planner)
-  "test_phase": false,            // TDD: write a failing test per acceptance criterion before implementing
   "max_retries": 3,
   "max_review_retries": 3,
   "max_attempts": null,           // absolute retry cap (null = max_retries * 3)
@@ -105,7 +102,6 @@ railhead diagnose screenshots [--model M]  check that a model can take a screens
       "pass": { "path": "ready", "equals": true }
     }
   },
-  "session_builder": true,                 // one durable session; false = fresh subprocess per ticket
   "checkpoint_granularity": "product"      // "ticket" | "group" | "product"
 }
 ```
@@ -129,17 +125,16 @@ Railhead warns (never blocks) when `review`/`goal` is weaker than `implement`, o
 
 Every gate has a cadence mode: `full` | `medium` | `light` | `off`. Presets choose defaults; per-gate flags override.
 
-| Preset | Code review | Visual | Goal | Structural | TDD test phase | Interview |
-|--------|-------------|--------|------|------------|----------------|-----------|
-| `--full` | per-ticket, BLOCKER+MAJOR retry | per-ticket + run-end | checkpoints + run-end | checkpoints + run-end | on | on |
-| `--medium` | per-ticket, BLOCKER+MAJOR retry | run-end | checkpoints | checkpoints | off | on |
-| `--light` (default) | per-ticket; BLOCKER full retry, MAJOR one attempt | run-end | advisory checkpoints + run-end | run-end | off | off |
-| `--none` | off | off | off | off | off | off |
+| Preset | Code review | Visual | Goal | Structural | Interview |
+|--------|-------------|--------|------|------------|-----------|
+| `--full` | per-ticket, BLOCKER+MAJOR retry | per-ticket + run-end | checkpoints + run-end | checkpoints + run-end | on |
+| `--medium` | per-ticket, BLOCKER+MAJOR retry | run-end | checkpoints | checkpoints | on |
+| `--light` (default) | per-ticket; BLOCKER full retry, MAJOR one attempt | run-end | advisory checkpoints + run-end | run-end | off |
+| `--none` | off | off | off | off | off |
 
 Notes:
 
 - **Severities:** `[BLOCKER]` always retries (up to the cap, then hard-fail). `[MAJOR]` retries through the budget in `medium`/`full`; in `light` it gets one corrective attempt, then soft-passes. Minor findings never retry.
-- **TDD test phase:** when on, a fresh phase writes a failing test per acceptance criterion before each testable ticket; the implementer must make it pass. `--tdd`/`--no-tdd` override the preset, and `fix` forces it off — the reproducer is the test.
 - **Mid-run vs run-end:** goal and structural fire at group checkpoints as well as at run end; visual fires per-ticket (under `full`) and at run end. When goal review fires at run end it takes visual's whole-app seat — the goal + design-doc frame is stronger.
 - **Corrective tickets:** `[BLOCKER]` findings generate corrective tickets that run the full gate inline before the originating review may pass.
 - **Visual review** runs the app, captures screenshots with a vision model, and judges them against the acceptance criteria. `fix` raises it to `full` whenever the gate is enabled with a vision model, since a bug fix is about observable behaviour.
@@ -179,7 +174,7 @@ npm run bench -- --mode e2e     --project <dir> --tickets <dir> --model <provide
 npm run bench -- --mode fixture --model <provider/model>
 ```
 
-- `plan` — planning only (`runPlan`); records wall time, plan-check rounds, ticket count, dependency-graph sanity, and the plan phases' first-step prefix cache.
+- `plan` — planning only (`runPlan`); records wall time, ticket count, and the plan phases' first-step prefix cache.
 - `e2e` — a full `railhead run` on a prepared ticket set; records wall time, commits, goal/visual verdicts, and per-phase first-step cache.
 - `fixture` — builds `scripts/fixtures/seeded-defect/` (a counter app whose tests encode a defect its README forbids) and asserts a gate still names the discrepancy — the judge-quality check.
 
@@ -210,7 +205,7 @@ Set `request_ceiling_tokens` in `railhead.json` to bound the largest single requ
 
 ## Design principles
 
-- **Context is O(ticket), not O(project)** — fresh, diff-scoped judging phases plus the contracts index are the seam that makes long unattended runs possible.
+- **Context is O(ticket), not O(project)** — fresh, diff-scoped judging phases plus the auto-extracted contracts index are the seam that makes long unattended runs possible; the builder is one session that compacts.
 - **No gate overlaps the builder** — review phases run in sequence with implementation, so a reviewer never sees a half-edited worktree (ADR 0046).
 - **Green at every step** — every commit passed verify first, so the suite must be a baseline (typecheck, lint, existing tests), never future-feature assertions.
 - **Verify, then trust** — every commit has passed its gate; the ledger is the audit trail.

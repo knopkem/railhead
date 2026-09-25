@@ -128,3 +128,15 @@ vs current light vs light-with-advisory-checkpoints. Compare wall-clock,
 whole-app quality at the goal criteria, and corrective-ticket count. The same
 corpus backs ADR 0028's validation (fewer coherence-class blockers when the
 charter steers), so one set of runs feeds both measurements.
+
+> Amended by v2 issue 01: the light preset's mid-run goal checkpoint is
+> CORRECTIVE-anchored, not advisory — `goalCheckpointActionFor("light")`
+> returns `"corrective"`, and `goalFiresCheckpointsMidRun` fires group
+> checkpoints under `light` by mode. Anchored `[BLOCKER]` findings splice
+> corrective tickets ahead of the frontier through the existing corrective
+> pipeline; unanchored / steering-only findings stay recorded-only; `$REPLAN`
+> stays `max_replans`-capped. A persisted legacy
+> `checkpoint_action: "advisory"` keeps the advisory processing exactly as
+> this ADR defined it. The false-scope blockers advisory was compensating for
+> are gated by ADR 0043's evidence anchoring, which now precedes every
+> corrective splice.

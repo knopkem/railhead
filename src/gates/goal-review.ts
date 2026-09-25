@@ -1,5 +1,5 @@
 import { parseVerdict } from "./reviewer.ts";
-import type { PlanTicket } from "../core/ticket-dag.ts";
+import type { PlanTicket } from "../core/ticket.ts";
 import { LEARNED_MARKER, RETRACTED_MARKER } from "../context/learnings.ts";
 import { buildDigestInjection, DIGEST_MARKER } from "../context/digest.ts";
 import { BROWSER_HYGIENE, HALT_CONTRACT, SCRATCH_FILE_DISCIPLINE } from "../context/prompt.ts";
@@ -11,6 +11,17 @@ import { renderPreamble, type PhaseMessages } from "../context/preamble.ts";
 import { scanJsonObjects } from "../core/json.ts";
 import { indexOfOutsideFences } from "../core/fences.ts";
 import { isBlocker } from "./reviewer.ts";
+import type { ProbeRecipe, ProbeStatus } from "../core/probes.ts";
+
+/** One registered probe's deterministic re-run result, rendered into the goal
+ * prompt so a later round judges the SAME evidence instead of re-probing. */
+export interface RegisteredProbeResult {
+  behavior: string;
+  command: string;
+  expect: string;
+  status: ProbeStatus;
+  output?: string;
+}
 
 export interface GoalVerdict {
   verdict: "pass" | "fail" | "inconclusive";
@@ -70,19 +81,42 @@ export function parseCorrectiveTickets(text: string): PlanTicket[] | null {
     if (!title) continue;
     tickets.push({
       title,
-      mission: typeof o.mission === "string" ? o.mission : undefined,
       what: typeof o.what === "string" && o.what.trim() ? o.what.trim() : title,
       criteria: Array.isArray(o.criteria)
         ? (o.criteria as unknown[]).filter((x): x is string => typeof x === "string")
         : ["Run the app and confirm the quality gap is addressed", "Existing verify commands still pass"],
-      blocked_by: [],
-      files: Array.isArray(o.files) ? (o.files as unknown[]).filter((x): x is string => typeof x === "string") : [],
-      references: Array.isArray(o.references) ? (o.references as unknown[]).filter((x): x is string => typeof x === "string") : [],
-      introduces: Array.isArray(o.introduces) ? (o.introduces as unknown[]).filter((x): x is string => typeof x === "string") : [],
-      testable: typeof o.testable === "boolean" ? o.testable : false,
     });
   }
   return tickets.length > 0 ? tickets : null;
+}
+
+/**
+ * v2 issue 01: parse the goal reviewer's optional `$PROBE` block — one JSON
+ * object per materialized behavior probe `{behavior, command, expect}`. The
+ * railhead registers these once per group; later rounds run them
+ * deterministically before judging, so the same blocker is never re-derived by
+ * hand. Fence-aware gate on the UNFENCED marker; JSON sliced from the raw text
+ * (mirrors `parseCorrectiveTickets`).
+ */
+export function parseProbeBlock(text: string): ProbeRecipe[] | null {
+  const start = indexOfOutsideFences(text, /\$probe\b/i);
+  if (start < 0) return null;
+  let slice = text.slice(start + "$PROBE".length);
+  const end = slice.search(/\$end\b/i);
+  if (end >= 0) slice = slice.slice(0, end);
+
+  const recipes: ProbeRecipe[] = [];
+  for (const o of scanJsonObjects(slice)) {
+    const behavior = typeof o.behavior === "string" ? o.behavior.trim() : "";
+    const command = typeof o.command === "string" ? o.command.trim() : "";
+    if (!behavior || !command) continue;
+    recipes.push({
+      behavior,
+      command,
+      expect: typeof o.expect === "string" ? o.expect.trim() : "",
+    });
+  }
+  return recipes.length > 0 ? recipes : null;
 }
 
 /**
@@ -113,6 +147,32 @@ export function findingsEchoLastRound(previous: string[], current: string[]): bo
   if (current.length === 0) return false;
   const sort = (fs: string[]) => fs.map(normalizeFinding).sort().join("\n");
   return sort(previous) === sort(current);
+}
+
+/**
+ * v2 issue 01: drop findings whose behavior a registered probe already proved
+ * closed. The seat is told to make each probe's `behavior` name the finding it
+ * proves, so matching is normalized containment in either direction — a seat
+ * that writes the behavior as the shorter clause ("the snake eats food") still
+ * matches a fuller finding line that quotes it. Conservative by construction:
+ * an empty behavior never matches, and unrecognized text passes through
+ * (dropping a real blocker would be the far worse error).
+ */
+export function dropClosedFindings(
+  findings: string[],
+  closedBehaviors: string[],
+): { findings: string[]; dropped: string[] } {
+  const closed = closedBehaviors.map(normalizeFinding).filter((b) => b.length > 0);
+  if (closed.length === 0) return { findings, dropped: [] };
+  const kept: string[] = [];
+  const dropped: string[] = [];
+  for (const finding of findings) {
+    const nf = normalizeFinding(finding);
+    const matches = nf.length > 0 && closed.some((b) => nf.includes(b) || b.includes(nf));
+    if (matches) dropped.push(finding);
+    else kept.push(finding);
+  }
+  return { findings: kept, dropped };
 }
 
 /**
@@ -192,6 +252,11 @@ export function buildGoalReviewPrompt(options: {
   /** Prior findings from earlier goal reviews, so the reviewer can confirm
    * earlier gaps were addressed. */
   priorFindings: string[];
+  /** v2 issue 01: probes registered by earlier rounds of THIS group, re-run
+   * deterministically by the railhead. A PASS closes the behavior it proves —
+   * the reviewer must not re-find it; only genuinely new behaviors need a new
+   * probe. */
+  registeredProbes?: RegisteredProbeResult[];
   /** Project learnings (tooling facts from prior phases). */
   learnings?: string | null;
   /** Issue #50: rolling project digest. See ADR 0018. */
@@ -273,6 +338,7 @@ export function buildGoalReviewPrompt(options: {
     coreLoopReady,
     advisory,
     visionCapability,
+    registeredProbes,
   } = options;
 
   const designBlock = designDoc
@@ -297,6 +363,12 @@ export function buildGoalReviewPrompt(options: {
 
   const priorBlock = priorFindings.length
     ? `\nPRIOR GOAL FINDINGS (from earlier group checkpoints — confirm each is now resolved before re-raising; do not repeat a resolved item):\n${priorFindings.join("\n")}`
+    : "";
+
+  const probesBlock = registeredProbes && registeredProbes.length
+    ? `\n## Registered probes (the railhead re-ran these before this pass — deterministic evidence)
+Earlier rounds materialized a probe for concrete findings of this checkpoint. The railhead ran each command; a [PASS] means the behavior it proves HOLDS NOW and that finding is CLOSED — do NOT re-raise it unless you have new evidence the probe itself is wrong. Judge [FAIL]/[ERROR] probes yourself against the running app; only genuinely NEW behaviors need a new probe ($PROBE block below).
+${registeredProbes.map((p) => `- [${p.status.toUpperCase()}] ${p.behavior}\n  command: ${p.command}${p.expect ? `\n  expect: ${p.expect}` : ""}${p.status !== "pass" && p.output ? `\n  output tail: ${p.output.trim().split("\n").slice(-3).join(" | ")}` : ""}`).join("\n")}`
     : "";
 
   const completedBlock = completedGroups.length
@@ -403,7 +475,7 @@ You MUST:
     ? "Drive every deliverable of THIS group end-to-end in the running app (see the group playthrough section below) — not a couple of isolated sample inputs. The full core loop is out of scope at this checkpoint."
     : "Play through the core loop to completion (see the core-loop playthrough section below) — a full cycle of the app's central mechanic, NOT a couple of isolated sample inputs."}
 3. Judge the build against the ORIGINAL GOAL and the design intent above — not against any single ticket's acceptance criteria. The question is "is this the thing we were asked to build?" not "does function X exist."
-${priorBlock}
+${priorBlock}${probesBlock}
 
 ${playthroughBlock}
 
@@ -432,6 +504,18 @@ A [BLOCKER] must satisfy both of these:
 The railhead verifies this: a [BLOCKER] naming no existing artifact, or naming only files owned by unbuilt tickets, is recorded for steering and generates NO corrective ticket.
 
 ${severityBlock}
+
+## Behavior probes (materialize one per finding)
+For every concrete finding you emit, also materialize a probe the railhead registers and re-runs in later rounds — so the next review checks the SAME evidence deterministically instead of re-deriving and re-probing the blocker by hand. A probe is a deterministic command plus an expected predicate: the behavior holds when the command's output contains the \`expect\` substring. Write any helper script under \`.railhead/probes/\` first if you need one (the railhead records the command; it stays language-agnostic — never name a test framework). Emit one JSON object per probe, after the $END above:
+
+$PROBE
+{"behavior":"the pause button stops the clock","command":"node .railhead/probes/pause.mjs","expect":"paused=true"}
+$END
+
+Rules:
+- One object per finding, each on its own line between $PROBE and $END. The command must run from the repo root.
+- The predicate must be a substring of the command's output when the behavior holds — never prose, never a test name.
+- Omit the block entirely when you have nothing concrete to probe. Do NOT emit \`$PROBE NONE\`.
 
 ## Reusable tooling facts (push)
 
@@ -553,7 +637,6 @@ export function splitAnchoredBlockers(
   findings: string[],
   opts: {
     exists: (path: string) => boolean;
-    pendingFiles: ReadonlySet<string>;
   },
 ): { findings: string[]; unanchored: { finding: string; reason: string }[] } {
   const kept: string[] = [];
@@ -571,37 +654,9 @@ export function splitAnchoredBlockers(
       unanchored.push({ finding, reason: "cites no artifact that exists in the current tree (needs a screenshot or a file present now)" });
       continue;
     }
-    if (existingShots.length === 0 && existing.length > 0 && existing.every((f) => opts.pendingFiles.has(f))) {
-      unanchored.push({ finding, reason: "names only files owned by unbuilt tickets (later scope is not a blocker at this checkpoint)" });
-      continue;
-    }
     kept.push(finding);
   }
   return { findings: kept, unanchored };
 }
 
-/**
- * Issue #66: pull likely contract/symbol names out of a finding so a corrective
- * ticket's `references` list tells the implementer which existing contracts to
- * honor. Three unambiguous shapes are extracted:
- *   - SCREAMING_SNAKE constants (TILE_SIZE, BIOME_2_CONFIG, WORLD_GRAVITY)
- *   - PascalCase multi-word identifiers (GameScene, ParallaxBackground) —
- *     requires two fused capitalized words so prose words like "The" don't match
- *   - backtick-quoted identifiers (`applyHazard`) — findings often quote symbols
- *
- * Pure; no I/O. camelCase prose is deliberately not matched (too noisy); the
- * structured $CORRECTIVE path (issue #67) is the higher-fidelity source when
- * the reviewer emits one.
- */
-const SCREAMING_CONST_RE = /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g;
-const PASCAL_MULTIWORD_RE = /\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b/g;
-const BACKTICK_SYMBOL_RE = /`([A-Za-z_][A-Za-z0-9_]*)`/g;
 
-export function extractFindingReferences(text: string): string[] {
-  const out: string[] = [];
-  const add = (s: string) => { if (s && !out.includes(s)) out.push(s); };
-  for (const m of text.matchAll(SCREAMING_CONST_RE)) add(m[0]);
-  for (const m of text.matchAll(PASCAL_MULTIWORD_RE)) add(m[0]);
-  for (const m of text.matchAll(BACKTICK_SYMBOL_RE)) add(m[1]);
-  return out;
-}

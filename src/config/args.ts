@@ -9,8 +9,8 @@ import { parseGateMode, type GateMode, type GatePreset } from "./config.ts";
  * Issue #73: the old opt-out review knobs (-nt/-nr/-nv/-ns and the single
  * `review_mode`) are gone. Per-gate cadence is `mode: full|medium|light|off`,
  * chosen by preset (--full/--medium/--light/--none) with per-gate overrides
- * (--review/--vision/--goal/--structural) and boolean overrides
- * (--tdd/--no-tdd, --sharpen/--no-sharpen).
+ * (--review/--vision/--goal/--structural) and the boolean override
+ * --sharpen/--no-sharpen.
  */
 
 /** The four gate keys that carry a `mode` field. */
@@ -30,8 +30,6 @@ export interface RunArgs {
   quiet: boolean;
   maxRetriesRaw: string | null;
   fresh: boolean;
-  /** Boolean override for the TDD test phase; null = not specified. */
-  tdd: boolean | null;
   /** Per-gate cadence overrides. */
   overrides: GateOverrides;
 }
@@ -45,7 +43,6 @@ export function parseRunArgs(rest: string[]): RunArgs {
     quiet: rest.includes("--quiet"),
     maxRetriesRaw: argValue(rest, "-m"),
     fresh: rest.includes("--fresh"),
-    tdd: parseBoolOverride(rest, "--tdd", "--no-tdd"),
     overrides: {
       code: parseGateMode(argValue(rest, "--review")),
       visual: parseGateMode(argValue(rest, "--vision")),
@@ -67,7 +64,6 @@ export interface PlanArgs {
   /** The chosen preset; null = interactive (prompts, light defaults). */
   preset: GatePreset | null;
   overrides: GateOverrides;
-  tdd: boolean | null;
   sharpen: boolean | null;
   mode: "build" | "fix";
 }
@@ -78,7 +74,6 @@ const PLAN_BOOL_FLAGS = new Set([
   "--yolo",
   "--verbose",
   "--full", "--medium", "--light", "--none",
-  "--tdd", "--no-tdd",
   "--sharpen", "--no-sharpen",
 ]);
 
@@ -101,7 +96,6 @@ export function parsePlanArgs(argv: string[], mode: "build" | "fix"): PlanArgs {
     goal: parseGateMode(argValue(argv, "--goal")),
     structural: parseGateMode(argValue(argv, "--structural")),
   };
-  const tdd = parseBoolOverride(argv, "--tdd", "--no-tdd");
   const sharpen = parseBoolOverride(argv, "--sharpen", "--no-sharpen");
   const consumed: string[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -130,7 +124,6 @@ export function parsePlanArgs(argv: string[], mode: "build" | "fix"): PlanArgs {
     modelOverride: argValue(argv, "--model"),
     preset: presets[0] ?? null,
     overrides,
-    tdd,
     sharpen,
     mode,
   };

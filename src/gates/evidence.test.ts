@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseToolCalls, hasAppLaunch, hasInteractionEvidence, type ToolCall } from "./evidence.ts";
+import { parseToolCalls, hasAppLaunch, hasInteractionEvidence, hasRenderObservation, interactionSmokePassGap, type ToolCall } from "./evidence.ts";
 
 function toolUseEvent(tool: string, input: Record<string, unknown>, status = "completed"): string {
   return JSON.stringify({
@@ -204,5 +204,39 @@ describe("hasInteractionEvidence (#97)", () => {
     }
     expect(hasInteractionEvidence([], null).ok).toBe(true);
     expect(hasInteractionEvidence([], undefined).ok).toBe(true);
+  });
+});
+
+describe("interaction smoke pass evidence (v2 issue 01)", () => {
+  it("hasRenderObservation: screenshots and image reads count; a text snapshot does not", () => {
+    expect(hasRenderObservation(toolCall("chrome-devtools_take_screenshot", { filePath: "a.png" }))).toBe(true);
+    expect(hasRenderObservation(toolCall("read", { filePath: ".railhead/visual/a.png" }))).toBe(true);
+    expect(hasRenderObservation(toolCall("read", { path: "shot.webp" }))).toBe(true);
+    expect(hasRenderObservation(toolCall("chrome-devtools_take_snapshot", {}))).toBe(false);
+    expect(hasRenderObservation(toolCall("read", { filePath: "src/main.ts" }))).toBe(false);
+  });
+
+  it("a browser-ui pass with real input but no pixels is a gap (the curl-200 case), not a failure", () => {
+    const gap = interactionSmokePassGap(toolCall("chrome-devtools_click", { uid: "new-game" }), "browser-ui");
+    expect(gap).toMatch(/render observation/i);
+    expect(gap).toMatch(/200/);
+  });
+
+  it("a browser-ui pass with pixels but only synthetic dispatch is a gap", () => {
+    const odd: ToolCall[] = [
+      { tool: "chrome-devtools_evaluate_script", input: { function: "() => document.querySelector('#a').click()" }, status: "completed" },
+      { tool: "chrome-devtools_take_screenshot", input: { filePath: "a.png" }, status: "completed" },
+    ];
+    expect(interactionSmokePassGap(odd, "browser-ui")).toMatch(/real-input|synthetic/i);
+  });
+
+  it("a fully evidenced browser-ui pass has no gap; non-browser interfaces are exempt", () => {
+    const good: ToolCall[] = [
+      { tool: "chrome-devtools_click", input: { uid: "new-game" }, status: "completed" },
+      { tool: "chrome-devtools_take_screenshot", input: { filePath: "before.png" }, status: "completed" },
+      { tool: "chrome-devtools_take_screenshot", input: { filePath: "after.png" }, status: "completed" },
+    ];
+    expect(interactionSmokePassGap(good, "browser-ui")).toBeNull();
+    expect(interactionSmokePassGap([], "canvas")).toBeNull();
   });
 });

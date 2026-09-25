@@ -1,5 +1,9 @@
 # Gate findings and rulings identify tickets by slug; the repair table speaks array coordinates
 
+> Amended by ADR 0048: the plan-time findings and `$RULINGS` gate this ADR
+> identifies are removed. Title-slug identity survives for ticket file names and
+> gate finding text.
+
 Amends the plan-repair vocabulary introduced by ADR 0007's `NN-slug.md`
 naming and issue #86's bounded plan gate. Recorded after a real run
 (spriteforge, a 12-ticket Vite plan) where the repair loop spoke two different

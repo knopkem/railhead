@@ -1,5 +1,9 @@
 # Plan-producing diagnosis rung for the implement path
 
+> Superseded by ADR 0047: the plan-producing diagnosis rung was reachable only
+> on the fresh-implementer path, which is deleted. A diagnosed failure now takes
+> the durable builder's fresh-session recovery.
+
 ## Context
 
 The failure-response ladder (ADR 0023) classifies an implementer's third consecutive execution failure as `diagnosed` — but rung 3 is terminal: `nextRung` returns a human-readable diagnosis string and the ticket stops. No model is asked *why* the approach failed, and no corrective plan is produced. A systemic (non-review) failure — not capacity, not fatal-config — therefore ends an unattended run with nothing but a summary line, even when a different approach would have landed the ticket.

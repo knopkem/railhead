@@ -1,5 +1,9 @@
 # The plan gate resolves mechanical findings deterministically — repeats collapse, same-file editors chain
 
+> Superseded by ADR 0048: the mechanical findings this ADR resolves
+> (duplicate repeats, same-file chains, implied edges) no longer exist — the
+> ticket schema has no dependencies or file ownership to gate.
+
 Extends ADR 0030 (the gate auto-inserts implied references→introduces edges).
 Recorded after a spriteforge plan (pixel-art editor, local planner model) in
 which the planner emitted its entire 13-ticket plan **twice inside one

@@ -7,7 +7,6 @@ import {
   extractContractsBlock,
   mergeContracts,
   renderContracts,
-  sliceContracts,
   summarizeContracts,
   verifyContractEntries,
   type ContractEntry,
@@ -77,31 +76,6 @@ describe("extractContractsBlock", () => {
 
   it("returns [] when no symbols appear", () => {
     expect(extractContractsBlock("no contract here", "f.js")).toEqual([]);
-  });
-});
-
-describe("sliceContracts", () => {
-  const idx = mergeContracts(
-    EMPTY_INDEX,
-    [
-      { ...greet },
-      { symbol: "deploy", kind: "function", file: "src/deploy.js", signature: "deploy()" },
-    ],
-    "01",
-  );
-
-  it("filters by file", () => {
-    const out = sliceContracts(idx, { files: ["src/deploy.js"] });
-    expect(out.entries.map((e) => e.symbol)).toEqual(["deploy"]);
-  });
-
-  it("filters by symbol", () => {
-    const out = sliceContracts(idx, { symbols: ["greet"] });
-    expect(out.entries.map((e) => e.symbol)).toEqual(["greet"]);
-  });
-
-  it("returns empty when nothing matches", () => {
-    expect(sliceContracts(idx, { symbols: ["nope"] }).entries).toEqual([]);
   });
 });
 

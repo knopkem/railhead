@@ -1,5 +1,9 @@
 # Small-context perf target: 64k working budget, 16GB VRAM PC
 
+> Amended by ADR 0047: the TDD test phase (the external oracle this ADR
+> discusses) is retired with the fresh implementer; the durable session is the
+> only builder.
+
 ## Context
 
 The railhead's stated purpose is to run real software tasks on local models with small context windows. ADR 0001 names "~100k window of a local model" as the motivating constraint for the fresh-subprocess-per-phase design. That number was picked when the target hardware was vague. It is no longer vague, and the actual constraint turns out to be a *gradient*, not a wall.

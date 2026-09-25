@@ -8,12 +8,11 @@ import {
   type RunState,
   type TicketState,
 } from "../core/state.ts";
-import { initLedger, ledgerDir, newRunId, writeState, extractAssistantText, readStderrLines, boundedLog, writeRawLog, appendEvent } from "../core/ledger.ts";
+import { initLedger, ledgerDir, newRunId, writeState, extractAssistantText, readStderrLines, boundedLog, writeRawLog, appendEvent, eventPath } from "../core/ledger.ts";
 import { readFile, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { loadTickets, toTicketState, testPhaseRan, renderTicket, type Ticket } from "../core/ticket.ts";
-import { reportConflicts, scanOrderedConflicts } from "../plan/plan.ts";
-import { readPlanOrigin, checkPlanOrigin, readPlanRulings, readPlanWallMs } from "../plan/plan-identity.ts";
+import { loadTickets, toTicketState, renderTicket, type Ticket } from "../core/ticket.ts";
+import { readPlanOrigin, checkPlanOrigin, readPlanWallMs } from "../plan/plan-identity.ts";
 import { replanFromCheckpoint } from "../gates/replan.ts";
 import type { BlockReport } from "../core/blocked.ts";
 import { describeExecFailure, executeOpendCode, executeFreshPhase, killActiveChild, withPersistentWorker, startPersistentWorker, stopPersistentWorker } from "./executor.ts";
@@ -21,7 +20,6 @@ import { baseSessionId, ensureBaseSession, forkPhase } from "./base-session.ts";
 import { setProviderHealth } from "./provider-health.ts";
 import { withFailureLadder, withFailureLadderOnThrow, PhaseFailure, evidenceFromResult, SPIRAL_COMPACTION_THRESHOLD, type FailureEvidence } from "./failure-ladder.ts";
 import { setDependencySourceDeny } from "./guard.ts";
-import { buildImplementerPrompt, buildTestPhasePrompt, type AttemptRound } from "../context/prompt.ts";
 import { joinPhaseMessages } from "../context/preamble.ts";
 import { readVisionCapabilityFor } from "./vision-probe.ts";
 import { summarizeIfNeeded, writeRunSummary } from "../context/summary.ts";
@@ -29,12 +27,13 @@ import { compressVerifyOutput } from "./output-compress.ts";
 import { runVerify, type VerifyResult } from "./verify.ts";
 import { runSmoke, type SmokeResult } from "./smoke.ts";
 import { summarizePermissionRejections } from "../core/permissions.ts";
-import { nextRunStatus, reconcileCommittedButUnsaved, repairBlockedByReferences } from "../core/recovery.ts";
+import { nextRunStatus, reconcileCommittedButUnsaved } from "../core/recovery.ts";
 import { review, reviewSummary, severityOf, stripCompileClaimsWhenGreen, changedPathsFromDiff, downgradeUnanchoredBlockers, runReviewAgent } from "../gates/reviewer.ts";
 import { kickoffPerTicketVisualReview, joinPendingVisualReview, visualReviewLoop } from "../gates/visual-loop.ts";
 import { addPendingCheckpoint } from "../core/pending-checkpoints.ts";
 import { runCommandFromVerify } from "../gates/visual.ts";
 import { buildInteractionSmokePrompt, parseInteractionSmokeVerdict } from "../gates/interaction-smoke.ts";
+import { interactionSmokePassGap, parseToolCalls } from "../gates/evidence.ts";
 import { touchesVisualSurface } from "../context/surface.ts";
 import { goalReviewAtCheckpoint, goalReviewAtRunEnd, goalCheckpointsToFire } from "../gates/goal-loop.ts";
 import { structuralReviewAtCheckpoint, structuralCheckpointsToFire, runStructuralReview } from "../gates/structural-loop.ts";
@@ -44,7 +43,7 @@ export { detectGroupCheckpoints } from "../gates/goal-loop.ts";
 // Re-exported so run.ts's historical surface (and run.test.ts's import) keeps
 // working — the function's home is corrective.ts.
 export { nextTicketNumber } from "../gates/corrective.ts";
-import { CEILING_FRACTION, DEFAULT_MAX_REPLANS, DEFAULT_MODEL, codeReviewRunsMidRun, contextBudget, effectiveContextTokens, firesAtRunEnd, firesMidRun, goalFiresCheckpointsMidRun, queryOpencodeContextLimit, resolveModels, severityTriggersRetry, visualFiresAtRunEnd, type CheckpointGranularity } from "../config/config.ts";
+import { CEILING_FRACTION, DEFAULT_MAX_REPLANS, DEFAULT_MODEL, codeReviewRunsMidRun, contextBudget, effectiveContextTokens, firesAtRunEnd, firesMidRun, goalFiresCheckpointsMidRun, interactionSmokeEnabled, queryOpencodeContextLimit, resolveModels, severityTriggersRetry, visualFiresAtRunEnd, type CheckpointGranularity } from "../config/config.ts";
 import { analyzePhase, summarizePhaseFiles } from "../core/telemetry.ts";
 import { advanceRetry, INITIAL_COUNTERS, type GateCounters, type GateLimits } from "../gates/gate.ts";
 import { ensureProjectGitignore, ensureProjectOpenCodePermissions, frameworkExternalDirsForVerify, detectFramework, frameworkSmokeRun, RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
@@ -62,7 +61,6 @@ import {
   CONTRACTS_FILE,
   loadContracts,
   summarizeContracts,
-  knownContractSymbols,
 } from "../core/contracts.ts";
 import { updateContracts } from "./contract-extract.ts";
 import { stripNonSource, estimateTokens, REVIEW_MODE_THRESHOLD_RATIO, DIFF_FILE_THRESHOLD_RATIO } from "./diff-filter.ts";
@@ -73,14 +71,12 @@ import {
   readLearnings,
 } from "../context/learnings.ts";
 import { readDigest } from "../context/digest.ts";
-import { readHandoffMarker } from "../context/handoff.ts";
 import { queryReasoningCapability } from "../core/models.ts";
 import { buildBuilderPrompt, buildBuilderFindingsPrompt, DESIGN_DOC, ARCHITECTURE_DOC, type BuilderTicket, type GateFeedback } from "../context/builder.ts";
 import { nextBuilderUnit, checkpointTarget, type BuilderUnit } from "./builder-units.ts";
 import { CHECKPOINT_RE, readCheckpointTicket } from "../core/checkpoint.ts";
 import { builderRecoveryFor } from "./builder-loop.ts";
 import { findUnresolvedArtifact, planMentions, describePlanContradiction } from "../plan/plan-contradiction.ts";
-import { buildDiagnosisPrompt, parseDiagnosis } from "./diagnosis.ts";
 import {
   RECONCILE_MAX_STEPS,
   applyReconcileEdits,
@@ -112,15 +108,6 @@ function ladderRestart(state: RunState): () => Promise<void> {
   return state.config.persistent_worker === true
     ? async () => { await stopPersistentWorker(); await startPersistentWorker({ cwd: state.cwd }); }
     : async () => {};
-}
-
-/** Issue #80 stage 5: the shrink-scope feedback fed to the next implement
- * attempt after a capacity failure. The problem is request size, not code — the
- * instruction tells the implementer to stop re-reading and scope its I/O. */
-function capacityShrinkInstruction(evidence: FailureEvidence[], budget: number): string {
-  const last = evidence[evidence.length - 1];
-  const peak = last && last.peakTokens > 0 ? ` (peak ${last.peakTokens} tokens vs ${budget} budget)` : "";
-  return `Your previous attempt exhausted the model's context window${peak}. This is a request-size problem, not a code problem: do not re-read files you already read; use targeted greps; scope every command's output (\`| tail -30\`, \`--stat\`); do not read images or run the app — verification is done by the railhead.`;
 }
 
 /** Read the current ticket's raw plan text so a resolver failure can be
@@ -221,32 +208,6 @@ export async function startRun(options: RunOptions): Promise<{ runId: string; st
   for (const w of originWarnings) {
     console.warn(`[plan-origin] ${w}`);
     await appendEvent(ledger, "plan-origin", `[warn] ${w}`);
-  }
-
-  // Issue #86: plan-time adjudications are loaded into the run state so the
-  // class-A gate below (and the runtime extension scans) can see them — a
-  // legitimately-ruled finding must never re-fire as a railhead-defect abort.
-  state.plan_rulings = await readPlanRulings(join(options.ticketsDir, ".."));
-
-  const conflicts = scanOrderedConflicts(parsed, {
-    // Issue #103: a ticket may reference a contract the contracts index
-    // already knows (committed work from an earlier plan) without introducing
-    // it here — that existing-symbol universe keeps such references from
-    // scanning as dangling.
-    existingSymbols: knownContractSymbols(await loadContracts(options.cwd)),
-  });
-  if (await reportConflicts(conflicts, { ledger, appendEvent })) {
-    throw new Error(`conflict scan aborted the run:\n${conflicts.errors.map((e) => `  - ${e}`).join("\n")}`);
-  }
-  // Issue #86: a class-A finding (duplicate introduces / unordered same-file)
-  // that no plan-time ruling covers means the plan gate failed — the plan must
-  // not run as-is, or ticket 01 burns hours into a defect the scan already named.
-  const ruledKeys = new Set((state.plan_rulings ?? []).map((r) => r.key));
-  const unruledClassA = conflicts.classA.filter((f) => !ruledKeys.has(f.key));
-  if (unruledClassA.length > 0) {
-    throw new Error(
-      `plan gate rejected the run: ${unruledClassA.length} un-ruled class-A finding(s) (${unruledClassA.map((f) => `"${f.message}"`).join("; ")}) — replan, repair, or rule them before running`,
-    );
   }
 
   // A fresh run on a branch that already has committed tickets (e.g., after a
@@ -389,34 +350,6 @@ async function runLoopInner(state: RunState, ledger: string, onUpdate?: () => vo
   // Runs before the frontier so no ticket stacks on a foundation a gate has
   // not cleared (ADR 0006). A failed replay stops the run like any gate
   // failure; the halt file, if present, wins as usual.
-  // ADR 0045: repair stale blocked_by references a pre-fix replan may have
-  // left (replan-local names vs globally numbered files) before the frontier
-  // is consulted — otherwise the run stops as stuck on a dependency that
-  // exists under another name.
-  const blockedByRepair = repairBlockedByReferences(state);
-  if (blockedByRepair.remapped.length > 0) {
-    for (const r of blockedByRepair.remapped) {
-      console.log(`[${nowClock()}] blocked_by repair: ${r.ticket} — ${r.from} -> ${r.to}`);
-    }
-    // The affected ticket FILES carry the same stale local numbering in their
-    // header and blocked_by line (a pre-fix replan rendered them that way), so
-    // rewrite them from the repaired state — the builder reads the file.
-    const repairedFiles = new Set(blockedByRepair.remapped.map((r) => r.ticket));
-    const parsed = await loadTickets(state.tickets_dir).catch(() => []);
-    const byFile = new Map(parsed.map((t) => [t.file, t]));
-    for (const t of state.tickets) {
-      if (!repairedFiles.has(t.file)) continue;
-      const p = byFile.get(t.file);
-      if (!p) continue;
-      await writeFile(join(state.tickets_dir, t.file), renderTicket({ ...p, number: t.number, file: t.file, blocked_by: t.blocked_by }), "utf8");
-    }
-    await writeState(ledger, state);
-  }
-  if (blockedByRepair.unresolved.length > 0) {
-    for (const u of blockedByRepair.unresolved) {
-      console.log(`[${nowClock()}] blocked_by repair: ${u.ticket} still names an unknown blocker "${u.entry}" — leaving it; the ticket will not become ready until it is fixed`);
-    }
-  }
   // Issue #133: establish the run's base session before the first phase, so
   // every fresh phase forks the shared `[system][preamble]` prefix. Skipped
   // when there is no work (a finished run pays no model call) and when a halt
@@ -444,14 +377,10 @@ async function runLoopInner(state: RunState, ledger: string, onUpdate?: () => vo
       await writeState(ledger, state);
     }
   }
-  // Issue #95 stage 1: under the durable-session builder, `group` granularity
-  // drives its own unit loop (the whole group is one builder checkpoint + one
-  // gate); `ticket`/`product` granularities keep the per-ticket frontier loop
-  // below — processTicket's engine swaps to the resumed builder session.
-  if (
-    state.config.session_builder === true &&
-    (state.config.checkpoint_granularity ?? "product") === "group"
-  ) {
+  // Issue #95 stage 1: `group` granularity drives its own unit loop (the whole
+  // group is one builder checkpoint + one gate); `ticket`/`product`
+  // granularities keep the per-ticket frontier loop below.
+  if ((state.config.checkpoint_granularity ?? "product") === "group") {
     await runBuilderGroupLoop(state, ledger, onUpdate);
   } else {
     while (!isFinished(state.status)) {
@@ -584,17 +513,6 @@ async function runLoopInner(state: RunState, ledger: string, onUpdate?: () => vo
 
 
 
-/** Parse a `$HANDOFF ... $END` block from a worker transcript (issue #9).
- * Thin wrapper over `readHandoffMarker` so callers stay one-import-stop.
- * Returns null when the worker emitted no handoff (the common case for a
- * succeeding attempt) — the next attempt then falls back to the raw
- * `priorDiff` path. */
-async function readHandoffFromTranscript(ledger: string, phaseFile: string): Promise<string | null> {
-  const transcript = await extractAssistantText(ledger, phaseFile);
-  if (!transcript.trim()) return null;
-  return readHandoffMarker(transcript);
-}
-
 type TicketOutcome = "ok" | "failed" | "halted";
 
 /** The implement/build phase's own outcome. The `halted` variant is gh #111's
@@ -708,7 +626,7 @@ async function committedTicket(
   // ticket the build has now committed through (the fresh-seed resume point)
   // and the checkpoint counter (report telemetry). The commit hash IS the last
   // green commit; recorded so a fresh-session recovery can seed from it.
-  if (state.config.session_builder === true && state.builder && ticket.commit) {
+  if (state.builder && ticket.commit) {
     state.builder.checkpoint_count += 1;
     state.builder.committed_through = ticket.number;
     state.builder.last_green_commit = ticket.commit;
@@ -798,19 +716,6 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
     throw new Error(`ticket file not found: ${ticket.file} in ${state.tickets_dir} (${allParsed.length} tickets loaded: ${allParsed.map((t) => t.file).join(", ")})`);
   }
   let prevFeedback: string | null = null;
-  // Issue #106 (G): the retry bookkeeping below — `patching`, `attemptHistory`,
-  // and the failed-attempt `$HANDOFF` parse — exists ONLY for the ADR 0001
-  // fresh implementer (runImplement consumes them; cleanWorktree runs only in
-  // fresh mode). The durable builder shares this processTicket loop but never
-  // reads them (runBuilderStep takes testHandoff directly, never cleans the
-  // tree), so under the session builder they are write-only noise. `isBuilder`
-  // guards those writes so the builder path stays clean.
-  const isBuilder = state.config.session_builder === true;
-  // Whether the next implement attempt should PATCH existing work (true after
-  // a review BLOCKER) or start from a clean tree (true on first attempt and
-  // after a verify failure). The implementer recomputes the actual working
-  // diff live each call — never a stale snapshot from a prior review.
-  let patching = false;
   const priorFindings: string[] = [];
   const limits: GateLimits = {
     maxRetries: state.config.max_retries,
@@ -832,20 +737,6 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
   // the retry machine owns their MAJOR rounds.
   const reviewMode = state.config.code_review?.mode ?? "light";
   let majorRetriesSpent = 0;
-  // Issue #80 stage 5: capacity-fail handling. `capacityStrikes` counts
-  // consecutive capacity failures; two at the reduced prompt fail the ticket
-  // as capacity_limited. `capacityLimited` tells the next runImplement to
-  // drop handoff/history (prompt weight the failing context can't afford).
-  let capacityStrikes = 0;
-  let capacityLimited = false;
-  let capacityLimitedFail = false;
-
-  // Attempt history for the implementer prompt (#16): each entry records
-  // the findings that blocked a prior attempt + the approach summary (from
-  // the handoff). A fresh-context implementer has no memory of what it
-  // already tried, so it converges on the same fix. This gives it just
-  // enough history to diverge.
-  const attemptHistory: AttemptRound[] = [];
 
   // Smoke phase recipe: when the config declares a launch command (the planner
   // emitted a $SMOKE block, or the user set one by hand), detect the framework
@@ -862,78 +753,14 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
       })()
     : null;
 
-  // TDD phase (issue #5): when enabled and the ticket is testable, a fresh
-  // subprocess writes one failing test per acceptance criterion at the seams
-  // the ticket names, then emits a $HANDOFF block the implementer receives
-  // as its first attempt's prevHandoff. The test substitutes self-judgment
-  // with an external oracle (ADR 0014) — the implementer doesn't ship until
-  // the tests pass, and the reviewer cannot hallucinate a failure the tests
-  // disprove. Skipped silently for pure-config tickets (testable === false)
-  // and when the user opted out (test_phase === false). Fix mode defaults
-  // test_phase off (#6 — the bug reproducer is already the test).
-  let testHandoff: string | null = null;
-  const testPhaseEnabled = testPhaseRan(state.config.test_phase, parsed.testable);
-  if (testPhaseEnabled) {
-    const testPhase = `${ticket.number}-00-test`;
-    const testRetry = await withFailureLadderOnThrow(
-      () => runTestPhase(state, ledger, ticket, parsed, testPhase),
-      {
-        backoff: state.config.infra_backoff_sec,
-        budget: contextBudget(state),
-        restartWorker: ladderRestart(state),
-        onRung: (rung) => {
-          console.log(`[${nowClock()}]   ${ticket.number} test: ${rung.diagnosis}`);
-        },
-      },
-    );
-    const testResult = testRetry.ok ? testRetry.value : { ok: false as const, err: testRetry.rung.diagnosis };
-    // Push learnings (ADR 0013): the test author may emit a LEARNED: line
-    // while probing the project's tooling — capture it the same as every
-    // other phase.
-    await pushLearnings(state, ledger, testPhase);
-    if (testResult.ok) {
-      testHandoff = await readHandoffFromTranscript(ledger, testPhase);
-      if (testHandoff) {
-        ticket.logs.push(`test ${testPhase}: handoff captured (${testHandoff.length} chars)`);
-      } else {
-        ticket.logs.push(`test ${testPhase}: ok (no handoff emitted)`);
-      }
-    } else {
-      ticket.logs.push(`test ${testPhase}: ${testResult.err}`);
-    }
-    await writeState(ledger, state);
-  }
-
-  // Distilled handoff from the prior failed attempt (issue #9). Captured by
-  // parsing the prior implementer's transcript for a $HANDOFF...$END block;
-  // null when the model emitted none (push failed) or on the first attempt.
-  // Substitutes for priorDiff in the next attempt's prompt when present.
-  // Seeded with the test phase's handoff (issue #5) so the FIRST implement
-  // attempt receives the test author's guidance before writing any code.
-  let prevHandoff: string | null = testHandoff;
-
-  // Context telemetry from each implement attempt — merged at ticket end so
-  // the report reflects total work, not just the last (often tiny) fix. Every
-  // attempt writes its own phase file (events/<NN>-<attempt>-implement|build),
-  // whether it reached a checkpoint or not; the compaction a durable-session
-  // builder suffers often lands in a NO-marker attempt, so the ticket's
-  // telemetry must merge ALL of them, not only the attempts that returned ok
+  // Context telemetry from each builder attempt — merged at ticket end so the
+  // report reflects total work, not just the last (often tiny) fix. Every
+  // attempt writes its own phase file (events/<NN>-<attempt>-build), whether it
+  // reached a checkpoint or not; the compaction a durable-session builder
+  // suffers often lands in a NO-marker attempt, so the ticket's telemetry must
+  // merge ALL of them, not only the attempts that returned ok
   // (telemetry.ts summarizePhaseFiles).
   const implementPhaseFiles = new Set<string>();
-
-  // When the test phase ran, it wrote test files (e.g. tests/ball_tests.rs)
-  // as untracked files in the worktree. The first implement attempt would
-  // normally cleanWorktree (patching=false), which runs `git clean -fd` and
-  // deletes those test files before the implementer starts — the implementer
-  // then can't find the tests the test phase wrote. Preserve the worktree
-  // when the test phase ran AND produced a handoff: set patching=true so
-  // cleanWorktree is skipped and the implementer sees the test files.
-  //
-  // When the test phase failed (crash, budget exceeded) or bailed out
-  // ($HANDOFF NONE — the seam doesn't exist yet), do NOT preserve: let
-  // cleanWorktree remove any broken/stub test files so the implementer
-  // starts clean and doesn't spiral trying to make broken tests pass.
-  if (!isBuilder && testPhaseEnabled && testHandoff) patching = true;
 
   while (counters.unproductive <= state.config.max_retries && attempt < maxAttempts) {
     // ADR 0040: the per-ticket cumulative budget. Checked at every attempt
@@ -974,25 +801,22 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
     }
     attempt++;
     ticket.attempts = attempt;
-    const phaseFile = `${ticket.number}-${String(attempt).padStart(2, "0")}-${state.config.session_builder === true ? "build" : "implement"}`;
+    const phaseFile = `${ticket.number}-${String(attempt).padStart(2, "0")}-build`;
     implementPhaseFiles.add(phaseFile);
     await writeState(ledger, state);
 
-    // Failure ladder around the Implementer invocation (issue #80): execution
+    // Failure ladder around the builder invocation (issue #80): execution
     // failures escalate retry → worker restart → diagnose instead of identical
-    // retries. runImplement returns a structured failure; the ladder reads it.
-    // Under the durable-session builder (#95) the SAME ladder wraps the builder
-    // invocation: its rungs retry a durable session (which is disk-durable and
-    // warm-banked, so rung 2's worker restart is a bounded no-op on it) and its
-    // terminal verdicts drive builderRecoveryFor below — capacity/diagnosed/
-    // fatal-config force a FRESH session from the last green commit instead of
-    // the classic prompt-shrink (the session's fill is compaction's business).
+    // retries. The ladder's rungs retry the durable session (which is
+    // disk-durable and warm-banked, so rung 2's worker restart is a bounded
+    // no-op on it) and its terminal verdicts drive builderRecoveryFor below —
+    // capacity/diagnosed/fatal-config force a FRESH session from the last green
+    // commit instead of the classic prompt-shrink (the session's fill is
+    // compaction's business).
     const implStart = Date.now();
     const impl = await withFailureLadder(
       async () => {
-        const r = state.config.session_builder === true
-          ? await runBuilderStep(state, ledger, ticket, parsed, phaseFile, prevFeedback, testHandoff)
-          : await runImplement(state, ledger, ticket, parsed, phaseFile, prevFeedback, patching, prevHandoff, attemptHistory, capacityLimited);
+        const r = await runBuilderStep(state, ledger, ticket, parsed, phaseFile, prevFeedback);
         if (!r.ok && "evidence" in r && r.evidence) throw new PhaseFailure(r.evidence);
         return r;
       },
@@ -1004,124 +828,41 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
           ? async () => { await stopPersistentWorker(); await startPersistentWorker({ cwd: state.cwd }); }
           : async () => {},
         onRung: (rung) => {
-          console.log(`[${nowClock()}]   ${ticket.number} ${state.config.session_builder === true ? "build" : "implement"}: ${rung.diagnosis}`);
+          console.log(`[${nowClock()}]   ${ticket.number} build: ${rung.diagnosis}`);
         },
       },
     );
     ticket.duration_ms += Date.now() - implStart;
 
-    // Push path (ADR 0013): parse any LEARNED: marker the implementer
-    // emitted. Runs on every attempt — a fresh agent's own comprehension is
-    // the cheapest extractor of what was hard, and the marker sits before
-    // DONE so the model actually emits it.
-  await pushLearnings(state, ledger, phaseFile);
-
-    // Capture the failed-attempt handoff (issue #9) for the next attempt.
-    // Parsed from the same transcript pushLearnings already touches; null
-    // when the model emitted no $HANDOFF block (the common case for a
-    // succeeding attempt, and for verify/review failures where the model
-    // didn't know it was failing). The next attempt's prompt substitutes
-    // this for the raw priorDiff when present. Falls back to the test
-    // phase's handoff (issue #5) when no failed-attempt handoff was emitted
-    // but the test phase ran — the test's "where to look" guidance stays
-    // relevant across retries until the implementer succeeds.
-    // Issue #106 (G): fresh-only. The durable builder never consumes a
-    // $HANDOFF from its own transcripts — its retries are in-session gate
-    // feedback (runBuilderStep takes testHandoff directly) and the 
-    // build-phase transcript carries $CHECKPOINT markers, not $HANDOFF
-    // handoff blocks — so parsing/logging it here would be a misleading log
-    // plus a dead parse on the builder path.
-    let handoff: string | null = null;
-    if (!isBuilder) {
-      handoff = await readHandoffFromTranscript(ledger, phaseFile);
-      if (handoff) {
-        ticket.logs.push(`handoff captured from ${phaseFile}: ${handoff.length} chars`);
-      }
-      prevHandoff = handoff ?? testHandoff;
-    }
+    // Push path (ADR 0013): parse any LEARNED: marker the builder emitted.
+    // Runs on every attempt — the builder's own comprehension is the cheapest
+    // extractor of what was hard.
+    await pushLearnings(state, ledger, phaseFile);
 
     if (!impl.ok) {
       const err = impl.rung.diagnosis;
       ticket.logs.push(err);
       ticket.ladder_rung = impl.rung.rung;
       ticket.last_failure_class = impl.rung.class;
-      if (state.config.session_builder === true) {
-        // Issue #95 / ADR 0022 §5: the builder's response to a terminal infra
-        // verdict is NOT the classic prompt-shrink (which races the session's
-        // compacter) — it is builderRecoveryFor's split: capacity/diagnosed/
-        // fatal-config are terminal classes, and all three force a FRESH
-        // session from the last green commit. (blip/server-state never reach
-        // here — the ladder retried them on the same id before exhausting to a
-        // terminal rung.) The gate machine the shared per-ticket loop branches
-        // on (advanceRetry) applies unchanged — the builder shares this loop
-        // instead of re-deriving it (issue #106-G: the old `nextBuilderStep`
-        // mapping was dead; the loop drives advanceRetry directly).
-        const recovery = builderRecoveryFor(impl.rung.class);
-        if (recovery === "fresh-session") {
-          recordBuilderRestart(state, ticket.number, `${impl.rung.class} (${err})`);
-          dropBuilderSession(state);
-        }
-        prevFeedback = err;
-        await writeState(ledger, state);
-        continue;
+      // Issue #95 / ADR 0022 §5: the builder's response to a terminal infra
+      // verdict is NOT the classic prompt-shrink (which races the session's
+      // compacter) — it is builderRecoveryFor's split: capacity/diagnosed/
+      // fatal-config are terminal classes, and all three force a FRESH
+      // session from the last green commit. (blip/server-state never reach
+      // here — the ladder retried them on the same id before exhausting to a
+      // terminal rung.) The gate machine the shared per-ticket loop branches
+      // on (advanceRetry) applies unchanged — the builder shares this loop
+      // instead of re-deriving it (issue #106-G: the old `nextBuilderStep`
+      // mapping was dead; the loop drives advanceRetry directly).
+      const recovery = builderRecoveryFor(impl.rung.class);
+      if (recovery === "fresh-session") {
+        recordBuilderRestart(state, ticket.number, `${impl.rung.class} (${err})`);
+        dropBuilderSession(state);
       }
-      if (impl.rung.action === "capacity-fail") {
-        capacityStrikes++;
-        if (capacityStrikes >= 2) {
-          capacityLimitedFail = true;
-          break;
-        }
-        prevFeedback = capacityShrinkInstruction(impl.evidence, contextBudget(state));
-        prevHandoff = null;
-        attemptHistory.length = 0;
-        capacityLimited = true;
-        patching = false;
-        await writeState(ledger, state);
-        continue;
-      }
-      // gh #110 / ADR 0033: the plan-producing diagnosis rung. A rung-3
-      // `diagnosed` hard-fail (not capacity, not fatal-config — those
-      // short-circuit above) triggers exactly one deep-diagnosis phase. Its
-      // `$PLAN` feeds ONE final implementer attempt; a missing plan (or a
-      // failed diagnosis) falls through to today's terminal rung. The
-      // `ticket.diagnosis` guard bounds it to one call + one guided attempt
-      // per ticket per run, persisted so a resume does neither again.
-      if (impl.rung.class === "diagnosed" && !ticket.diagnosis) {
-        const diagPhase = `${ticket.number}-${String(attempt).padStart(2, "0")}-diagnose`;
-        const eventsRel = relative(state.cwd, join(ledger, "events"));
-        const transcriptPaths = [...implementPhaseFiles].map((p) => join(eventsRel, `${p}.jsonl`));
-        let diag: { diagnosis: string | null; plan: string | null };
-        try {
-          diag = await runDiagnosisPhase(state, ledger, ticket, parsed, diagPhase, impl.evidence, transcriptPaths);
-        } catch (e) {
-          diag = { diagnosis: null, plan: null };
-          ticket.logs.push(`diagnose ${diagPhase}: phase failed (${e instanceof Error ? e.message : String(e)}) — terminal`);
-        }
-        ticket.diagnosis = { text: diag.diagnosis ?? err, plan_spent: false };
-        if (diag.plan) {
-          ticket.diagnosis.plan_spent = true;
-          ticket.logs.push(`diagnose ${diagPhase}: plan produced — one diagnosis-guided attempt`);
-          console.log(`[${nowClock()}]   ${ticket.number} diagnose ✓ plan → one guided attempt`);
-          prevFeedback = `${diag.plan}\n\n(root cause: ${diag.diagnosis ?? "unknown"})`;
-          prevHandoff = null;
-          attemptHistory.length = 0;
-          patching = false;
-          await writeState(ledger, state);
-          continue;
-        }
-        ticket.logs.push(`diagnose ${diagPhase}: ${diag.diagnosis ? "no plan — terminal" : "failed — terminal"}`);
-        console.log(`[${nowClock()}]   ${ticket.number} diagnose ${diag.diagnosis ? "→ no plan (terminal)" : "✗ failed (terminal)"}`);
-        await writeState(ledger, state);
-        // Fall through to today's terminal rung below.
-      }
-      capacityStrikes = 0;
-      capacityLimited = false;
       prevFeedback = err;
-      patching = false;
       await writeState(ledger, state);
       continue;
     }
-    capacityLimited = false;
     const implValue = impl.value;
     // gh #111: an agent-initiated halt must bypass the failure ladder's retry
     // machine and the no-DONE handling below — it is an honest stop, not a
@@ -1203,84 +944,34 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
       }
     }
     if (!implValue.ok && "err" in implValue) {
-      // The no-DONE completion failure — the model ran cleanly (exit 0) but
-      // never emitted the DONE marker. Not an execution failure (no restart
-      // helps). The right reaction depends on the worktree, and the two cases
-      // could not be more different:
+      // The no-checkpoint-marker exit — the builder process ran cleanly (exit 0)
+      // but never emitted the expected $CHECKPOINT marker. Its recovery is
+      // "resume the session and drive it to the checkpoint", never a gate on
+      // half-built work, so the failure feeds straight back into the session.
       //
-      //  - EMPTY tree: the model stopped before producing anything — genuinely
-      //    unproductive. Feed the failure back and retry from a clean slate.
-      //  - NON-EMPTY tree: the model did the work but skipped the marker (the
-      //    SpriteForge-14 wipe: a green, complete ticket was destroyed by
-      //    cleanWorktree purely because the closing prose said "Done." and not
-      //    "DONE"). Wiping here destroys real work for a formatting slip.
-      //    Treat the attempt as a soft success and run the tree through the
-      //    normal verify/review gate — verify is the objective oracle, not the
-      //    marker. If verify fails the tree is genuinely broken and the
-      //    ordinary verify-failure retry (wipe + stashed-diff feedback) takes
-      //    over from there.
-      //
-      // The durable-session builder is exempt: its ok:false shape here is a
-      // no-checkpoint-marker exit whose recovery is "resume the session and
-      // drive it to the checkpoint", never a gate on half-built work.
-      if (state.config.session_builder === true) {
-        // Issue: a no-clean-checkpoint exit after a dependency-resolution
-        // grind is the signature of a plan-authored artifact claim the build
-        // disproved (the builder re-probed a phantom package then stopped).
-        // Detect it in the session transcript and reroute the retry from
-        // "drive it to the checkpoint" to "the plan text is wrong; substitute
-        // a real artifact and record the decision" so the correction is not
-        // silent.
-        const contradiction = await planContradictionFor(state, ticket, await extractAssistantText(ledger, phaseFile).catch(() => ""));
-        if (contradiction) {
-          logPlanContradiction(state, ticket, contradiction);
-          ticket.logs.push(implValue.err);
-          prevFeedback = `${contradiction}\n\n${implValue.err}`;
-        } else {
-          ticket.logs.push(implValue.err);
-          prevFeedback = implValue.err;
-        }
-        await writeState(ledger, state);
-        continue;
-      }
-      const realWork = await git.hasRealWorkingChanges(state.cwd, protectedPaths(state.cwd, state.tickets_dir));
-      if (!realWork) {
+      // A no-clean-checkpoint exit after a dependency-resolution
+      // grind is the signature of a plan-authored artifact claim the build
+      // disproved (the builder re-probed a phantom package then stopped).
+      // Detect it in the session transcript and reroute the retry from
+      // "drive it to the checkpoint" to "the plan text is wrong; substitute
+      // a real artifact and record the decision" so the correction is not
+      // silent.
+      const contradiction = await planContradictionFor(state, ticket, await extractAssistantText(ledger, phaseFile).catch(() => ""));
+      if (contradiction) {
+        logPlanContradiction(state, ticket, contradiction);
+        ticket.logs.push(implValue.err);
+        prevFeedback = `${contradiction}\n\n${implValue.err}`;
+      } else {
         ticket.logs.push(implValue.err);
         prevFeedback = implValue.err;
-        patching = false;
-        await writeState(ledger, state);
-        continue;
       }
-      ticket.logs.push(implValue.err);
-      ticket.logs.push(`implement ${phaseFile}: clean exit without DONE but worktree non-empty — gating existing work through verify/review instead of wiping`);
-      console.log(`[${nowClock()}]   ${ticket.number} implement: exited without DONE but worktree non-empty — running the gate on the existing tree`);
       await writeState(ledger, state);
-      // Fall through to the verify block below — do NOT wipe, do NOT retry.
+      continue;
     }
     // Phase succeeded: clear any persisted ladder state so a later resume does
     // not re-enter mid-ladder on a fresh failure.
     ticket.ladder_rung = undefined;
     ticket.last_failure_class = undefined;
-
-    // Issue #69: an implementer that completed with ZERO tool calls changed
-    // nothing — it only emitted prose, usually after hitting its output limit
-    // before acting. Verify/smoke/review cannot pass against an empty diff, so
-    // skip the whole wasted cycle and send it straight back to implement with
-    // explicit feedback. Only actionable when the executor actually observed
-    // the stream (mocks without `toolCalls` are treated as "did work").
-    //
-    // The builder is exempt: a durable session legitimately completes a ticket
-    // in a PREVIOUS invocation and checkpoints it now with zero tool calls (it
-    // over-delivered before the boundary kill) — "nothing to do this round" is
-    // not an empty diff, the work is in the tree and verify gates it.
-    if (implValue.ok && !state.config.session_builder && implValue.toolCalls === 0) {
-      const msg = `implement ${phaseFile}: no tool calls made (${ticket.context?.totalOutputTokens ?? "unknown"} output tokens) — nothing changed; treating as unproductive`;
-      ticket.logs.push(msg);
-      console.log(`[${nowClock()}]   ${ticket.number} implement: no tool calls made — retrying without verify/smoke/review (issue #69)`);
-      prevFeedback = "The previous attempt produced no code: it made ZERO tool calls (no file edits, no commands — only text, likely hitting its output limit before acting). Actually make the changes the ticket requires: edit the named files and run the verify commands. Do not just describe the plan.";
-      attemptHistory.push({ attempt, findings: ["(no tool calls — empty diff)"], approach: prevHandoff ?? undefined });
-      continue;
-    }
 
     // Verify.
     const verifyStart = Date.now();
@@ -1432,20 +1123,11 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
             prevFeedback = `${contradiction}\n\n${prevFeedback ?? ""}`;
           }
         }
-        // Issue #106 (G): attemptHistory feeds only the fresh implementer
-        // prompt; on the builder path it is write-only noise. Same for the
-        // patching reset below (cleanWorktree never runs in builder mode).
-        if (!isBuilder) {
-          attemptHistory.push({ attempt, findings: ["(verify failed)"], approach: prevHandoff ?? undefined });
-        }
         // Mine the verify failure for a correction to learnings.md (#42).
         // The implementer's transcript may or may not have emitted LEARNED:;
         // mineFailureLearning skips silently when it did.
         await mineFailureLearning(state, ledger, phaseFile, { verifyOutput: verifyBlob });
-        // Verify failed: the worktree may be in a broken state, so the next
-        // attempt starts from a clean slate (no carried diff).
-        if (!isBuilder) patching = false;
-        continue; // next implement attempt
+        continue; // next build attempt
       }
     }
 
@@ -1515,23 +1197,25 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
             prevFeedback = `${smokeContradiction}\n\n${prevFeedback ?? ""}`;
           }
         }
-        if (!isBuilder) {
-          attemptHistory.push({ attempt, findings: ["(smoke failed)"], approach: prevHandoff ?? undefined });
-        }
-        if (!isBuilder) patching = false;
-        continue; // next implement attempt
+        continue; // next build attempt
       }
     }
 
-    // Interaction smoke (per-ticket): when enabled, a fresh opencode agent
-    // launches the running app and drives ONE real user interaction to prove
-    // the app is OPERABLE, not merely startable. This is the earliest gate that
-    // closes the "compiles + tests green but the core loop is unwired" failure
-    // class — a pure-logic verify suite cannot see a missing UI caller, and a
-    // diff-only review cannot see an omission. Fails like smoke: the finding
-    // feeds back to the implementer and retries before review. Skipped when
-    // there is no resolved model or the declared interface is non-interactive.
-    if (state.config.interaction_smoke) {
+    // Interaction smoke (v2 issue 01): once per committed group boundary and
+    // BLOCKING — a fresh opencode agent launches the running app and drives ONE
+    // real user interaction with a render-delta plus zero-console-errors
+    // assertion (a curl-style 200 is not evidence). This is the earliest gate
+    // that closes the "app launches, request 200, canvas is an unwired rect"
+    // failure class. It runs on the ticket that completes a group (or on every
+    // ticket when the plan is ungrouped), so it judges the composed group
+    // artifact rather than a single ticket's partial work. Fails like smoke:
+    // the finding feeds back to the implementer and retries before review.
+    // Skipped when the config resolves it off, there is no resolved model, or
+    // the declared interface is non-interactive.
+    const interactionBoundary = !ticket.group || state.tickets
+      .filter((t) => t.group === ticket.group && t.file !== ticket.file)
+      .every((t) => t.status === "committed");
+    if (interactionSmokeEnabled(state.config) && interactionBoundary) {
       const interactModel = state._models?.visual ?? state._models?.review ?? state._models?.implement ?? null;
       const iface = state.config.projectInterface;
       if (interactModel !== null && iface !== "none") {
@@ -1571,7 +1255,20 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
         if (agentOutcome.status === "ok") {
           const verdict = parseInteractionSmokeVerdict(agentOutcome.transcript);
           if (verdict.verdict === "pass") {
-            ticket.logs.push(`interact ${isPhase}: ok — app operated by a real interaction`);
+            // v2 issue 01: a browser-ui PASS must carry real-input + render
+            // observation evidence; a startup-only run (a 200, a listening
+            // port) is downgraded to inconclusive, never recorded as green.
+            let gap: string | null = null;
+            if (iface === "browser-ui") {
+              const raw = await readFile(eventPath(ledger, isPhase), "utf8").catch(() => "");
+              gap = interactionSmokePassGap(parseToolCalls(raw), iface);
+            }
+            if (gap) {
+              ticket.logs.push(`interact ${isPhase}: $SMOKE_PASS downgraded to inconclusive — ${gap}`);
+              console.log(`[${nowClock()}]   ${ticket.number} interaction smoke ⚠ inconclusive — ${gap}`);
+            } else {
+              ticket.logs.push(`interact ${isPhase}: ok — app operated by a real interaction`);
+            }
           } else if (verdict.verdict === "fail") {
             const findings = verdict.findings;
             ticket.logs.push(`interact ${isPhase}: FAIL — ${findings.length} finding(s)`);
@@ -1580,11 +1277,7 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
             const r = advanceRetry(counters, { type: "verify_failed", output: findings.join("\n") }, limits);
             counters = r.counters;
             prevFeedback = r.step.next === "implement" ? (r.step as { feedback: string }).feedback : null;
-            if (!isBuilder) {
-              attemptHistory.push({ attempt, findings: ["(interaction smoke failed)"], approach: prevHandoff ?? undefined });
-            }
-            if (!isBuilder) patching = false;
-            continue; // next implement attempt
+            continue; // next build attempt
           } else {
             ticket.logs.push(`interact ${isPhase}: inconclusive — agent produced no verdict (app could not be driven); not a failure`);
           }
@@ -1699,15 +1392,6 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
           surface,
           coherenceDoc: rvCoherenceDoc,
           lintOutput,
-          // Issue #106 (F): the reviewer's red/green evidence checklist asserts
-          // "the implementer was asked to include a red→green evidence block in
-          // its report" — true only for the ADR 0001 fresh implementer, whose
-          // prompt carries that ask (prompt.ts evidenceBlock). The durable
-          // builder's thin prompt never asks for one (#75, ADR 0022), so
-          // conditioning the checklist on the builder seat would be a lie; the
-          // gate still judges builder work from the diff + verify, which is the
-          // objective oracle. Suppress the item under the session builder.
-          testable: testPhaseEnabled && state.config.session_builder !== true,
         }),
         {
           backoff: state.config.infra_backoff_sec,
@@ -1818,21 +1502,6 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
         await mineFailureLearning(state, ledger, rvPhase, { reviewFindings: gated });
         if (r.step.next === "fail") break; // budget exhausted — falls through to the soft-pass/fail decision
         prevFeedback = (r.step as { feedback: string }).feedback;
-        if (!isBuilder) {
-          attemptHistory.push({ attempt, findings: gated, approach: prevHandoff ?? undefined });
-        }
-        // Preserve the implementer's prior work for the next attempt: it was
-        // mostly correct (the findings are addressable patches, not a rewrite
-        // mandate), and regenerating from scratch risks introducing new
-        // severe issues. Set the patching flag so the next runImplement
-        // preserves the worktree (no cleanWorktree) and captures the LIVE
-        // working diff as the implementer's patch target. The flag, not a
-        // snapshot string, is what survives an infra-retry sequence — saving
-        // us from handing the implementer a stale diff that references files
-        // a crashed prior attempt had already moved or deleted.
-        // Issue #106 (G): fresh-only — the builder path never runs
-        // cleanWorktree, so the flag is a no-op there.
-        if (!isBuilder) patching = true;
         const attemptsLeft = Math.max(0, maxAttempts - attempt);
         const sevLabel = sev === "blocker" ? "BLOCKER" : "MAJOR";
         if (distinct) {
@@ -1859,14 +1528,6 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
   // finding remains — the ticket basically works — soft-pass: commit it with
   // the residual non-blocking findings noted, and let downstream tickets
   // proceed.
-  if (capacityLimitedFail) {
-    const lastDiff = await git.workingDiff(state.cwd).catch(() => "");
-    if (lastDiff) await git.cleanWorktree(state.cwd, protectedPaths(state.cwd, state.tickets_dir));
-    ticket.status = "failed";
-    if (implementPhaseFiles.size > 0) ticket.context = await summarizePhaseFiles(ledger, implementPhaseFiles);
-    ticket.logs.push("capacity_limited — ticket exceeds the model's context budget even at the reduced prompt");
-    return "failed";
-  }
   const attemptCapHit = attempt >= maxAttempts;
   // Soft-pass conditions: no [BLOCKER] finding stands AND we've run out of
   // runway. Runway is either the attempt cap, or — issue #96 — light mode
@@ -1948,157 +1609,21 @@ export function protectedPaths(cwd: string, ticketsDir: string): string[] {
   );
 }
 
-/** Run the TDD test phase (issue #5): a fresh opencode subprocess writes one
- * failing test per acceptance criterion at the seams the ticket names, runs
- * them, confirms they fail for the right reasons, and emits a `$HANDOFF`
- * block the implementer receives as its first attempt's `prevHandoff`. The
- * test is the external oracle a small-context model cannot provide for
- * itself (ADR 0014). Same executeOpendCode primitive as every other phase
- * (ADR 0001) — fresh subprocess, own ledger file, own transcript.
- *
- * Returns `{ ok: true }` on a completed subprocess (the test author reached
- * DONE, regardless of whether the tests it wrote actually fail — that they
- * fail is the author's own assertion, the implement phase will discover the
- * truth). Returns `{ ok: false, err }` when the subprocess crashed/stalled,
- * so the ticket's implement loop still runs — a failed test phase is not a
- * hard gate, just a missed quality multiplier. */
-async function runTestPhase(
-  state: RunState,
-  ledger: string,
-  ticket: TicketState,
-  parsed: Ticket,
-  phaseFile: string,
-): Promise<{ ok: true } | { ok: false; err: string }> {
-  // Seams: the ticket's named files + the symbols it references or introduces.
-  // The test author targets the public boundary the implementer will produce,
-  // not an imagined one — surfacing these as a block keeps tests at the right
-  // seam and is the anti-horizontal-slicing discipline.
-  const seams = [
-    ...(parsed.files ?? []),
-    ...(parsed.references ?? []),
-    ...(parsed.introduces ?? []),
-  ].filter((s) => s.length > 0);
-
-  const prompt = await buildTestPhasePrompt({
-    cwd: state.cwd,
-    ticketFile: ticket.file,
-    ticketBody: parsed.what,
-    criteria: parsed.criteria,
-    verify: state.config.verify,
-    seams,
-    learnings: await readLearnings(state.cwd),
-    contextBudget: contextBudget(state),
-  });
-
-  const fork = baseFork(state, prompt);
-  const result = await executeFreshPhase(joinPhaseMessages(prompt), {
-    cwd: state.cwd,
-    ledgerDir: ledger,
-    phaseFile,
-    model: state._models?.implement ?? null,
-    agent: RAILHEAD_AGENT_NAMES.build,
-    session: fork.session,
-    fork: fork.fork,
-    task: fork.task,
-    live: !state.quiet, verbose: state.verbose,
-    heartbeat: true,
-    livePrefix: `${ticket.number} test`,
-    maxSteps: state.config.max_phase_steps,
-    stallTimeoutSec: state.config.stall_timeout_sec,
-    maxStepModelSec: state.config.max_step_model_sec,
-    maxContextTokens: contextBudget(state),
-  });
-
-  // Push learnings + capture handoff happen in the caller (processTicket),
-  // the same way they do for the implement phase — one place owns the
-  // post-phase plumbing, not the phase runner itself.
-  if (result.status === "transient") {
-    throw new Error(`test ${phaseFile} ${describeExecFailure(result)}`);
-  }
-
-  if (result.status !== "ok") {
-    const transcript = await extractAssistantText(ledger, phaseFile);
-    const err = boundedLog(`test ${phaseFile} ${describeExecFailure(result)}`, transcript);
-    return { ok: false, err: `${err} (full transcript: \`railhead log ${phaseFile}\`)` };
-  }
-  return { ok: true };
-}
-
-/**
- * gh #110 / ADR 0033: the plan-producing diagnosis phase. One fresh opencode
- * call (model = the goal/oversight tier or implement, ADR 0015) invoked at
- * rung 3 of the implement path, given the ticket, the accumulated failure
- * evidence, the failed transcripts' paths, the working diff, contracts, and
- * learnings. Its `$DIAGNOSIS`/`$PLAN` output (parsed lossily, fence-aware) is
- * returned to the caller — a plan is fed into ONE final implementer attempt;
- * a missing plan (or a failed phase) means terminal, exactly like rung 3.
- *
- * Fail-open: this phase never throws and never retries on its own. Its own
- * failure must not become a new wedging point — the caller falls through to
- * the terminal rung with the phase failure logged.
- */
-async function runDiagnosisPhase(
-  state: RunState,
-  ledger: string,
-  ticket: TicketState,
-  parsed: Ticket,
-  phaseFile: string,
-  evidence: FailureEvidence[],
-  transcriptPaths: string[],
-): Promise<{ diagnosis: string | null; plan: string | null }> {
-  const contracts = await loadContracts(state.cwd);
-  const prompt = buildDiagnosisPrompt({
-    ticketFile: ticket.file,
-    ticketBody: parsed.what,
-    criteria: parsed.criteria,
-    evidence: evidence.map((e) => ({ errorMessage: e.errorMessage, status: e.status, peakTokens: e.peakTokens, steps: e.steps })),
-    transcriptPaths,
-    diff: await git.workingDiff(state.cwd).catch(() => ""),
-    contractsSummary: contracts.entries.length ? summarizeContracts(contracts) : null,
-    learnings: await readLearnings(state.cwd),
-    contextBudget: contextBudget(state),
-  });
-
-  const result = await executeOpendCode(prompt, {
-    cwd: state.cwd,
-    ledgerDir: ledger,
-    phaseFile,
-    model: state._models?.goal ?? state._models?.implement ?? null,
-    live: !state.quiet, verbose: state.verbose,
-    heartbeat: true,
-    livePrefix: `${ticket.number} diagnose`,
-    maxSteps: state.config.max_phase_steps,
-    stallTimeoutSec: state.config.stall_timeout_sec,
-    maxStepModelSec: state.config.max_step_model_sec,
-    maxContextTokens: contextBudget(state),
-  });
-
-  if (result.status !== "ok") {
-    return { diagnosis: null, plan: null };
-  }
-  const transcript = await extractAssistantText(ledger, phaseFile);
-  return parseDiagnosis(transcript);
-}
-
 // ---------------------------------------------------------------------------
 // Issue #95 (ADR 0022 stages 1–3): the durable-session builder.
 //
-// When `session_builder: true`, processTicket's implement engine is
-// runBuilderStep instead of runImplement: each attempt resumes ONE durable
-// opencode session (`--session <id>`, compaction permitted) instead of
-// spawning a fresh-context implementer. Everything else in processTicket — the
-// test phase, verify/smoke/review gates, the retry counters, the commit — is
-// the SAME machinery, so the gates stay byte-identical to the ADR 0001 path.
+// processTicket's implement engine is runBuilderStep: each attempt resumes ONE
+// durable opencode session (`--session <id>`, compaction permitted) with
+// fresh diff-scoped gates interleaved between invocations. Everything else in
+// processTicket — verify/smoke/review gates, the retry counters, the commit —
+// is shared machinery.
 //
 // Granularity routing: `ticket` and `product` keep the per-ticket frontier
 // loop (they differ only in the builder prompt's framing); `group` runs
 // runBuilderGroupLoop, which hands the whole planner group to the session and
 // gates it as ONE unit before committing the group in a single checkpoint.
-// This intentionally parallels processTicket's gate sequence rather than
-// sharing it inline — two live orchestration paths (fresh phases vs durable
-// session) that must stay independently debuggable until #83 validates the
-// head-to-head and decides the default. The COUNTER semantics are shared:
-// both paths drive the same `advanceRetry` machine (issue #106-G).
+// The COUNTER semantics are shared: every path drives the same `advanceRetry`
+// machine (issue #106-G).
 // ---------------------------------------------------------------------------
 
 function ensureBuilderState(state: RunState): BuilderState {
@@ -2120,18 +1645,14 @@ function dropBuilderSession(state: RunState): void {
   ensureBuilderState(state).session_id = undefined;
 }
 
-/** Map a parsed ticket onto the builder prompt's thin ticket shape. The test
- * phase's $HANDOFF rides on the ticket (issue #95 stage 1) so it lands in
- * context exactly when that ticket becomes the session's current work. */
-function toBuilderTicket(parsed: Ticket, handoff: string | null | undefined): BuilderTicket {
+/** Map a parsed ticket onto the builder prompt's thin ticket shape. */
+function toBuilderTicket(parsed: Ticket): BuilderTicket {
   return {
     file: parsed.file,
     number: parsed.number,
     title: parsed.title,
-    mission: parsed.mission || undefined,
     body: parsed.what,
     criteria: parsed.criteria,
-    handoff: handoff ?? undefined,
     openEnded: parsed.open_ended === true,
   };
 }
@@ -2178,12 +1699,19 @@ async function builderInvocationPlan(
 ): Promise<{ unit: BuilderUnit; allParsed: Ticket[] }> {
   const allParsed = await loadTickets(state.tickets_dir);
   const byFile = new Map(allParsed.map((t) => [t.file, t]));
+  // Tickets run strictly in array order; correctives are inserted ahead of the
+  // remaining planned frontier. The current ticket leads the unit so the
+  // session is always asked to checkpoint the work actually in flight.
   const remaining = state.tickets.filter((t) => t.status === "ready" || t.status === "in_progress");
+  const currentInRemaining = remaining.some((t) => t.file === current.file);
+  const orderedRemaining = currentInRemaining
+    ? remaining
+    : [current, ...remaining.filter((t) => t.file !== current.file)];
   let unit: BuilderUnit;
   if (granularity === "product") {
-    unit = { tickets: [...remaining], checkpointAtEnd: false };
+    unit = { tickets: [...orderedRemaining], checkpointAtEnd: false };
   } else {
-    unit = nextBuilderUnit(remaining, granularity) ?? { tickets: [], checkpointAtEnd: false };
+    unit = nextBuilderUnit(orderedRemaining, granularity) ?? { tickets: [], checkpointAtEnd: false };
   }
   // The current ticket may not be the unit's leader (a corrective generated
   // mid-run, or a ticket reached out of plan order): fall back to a
@@ -2199,11 +1727,10 @@ async function builderInvocationPlan(
 }
 
 /**
- * The durable-session builder engine — processTicket's implementer under
- * `session_builder`. Resumes `state.builder.session_id` (or starts fresh when
- * none is held), asks the session to implement the current unit and stop at a
- * `$CHECKPOINT ticket=NN` marker, and returns ok only when the marker names
- * the ticket the run loop asked for.
+ * The durable-session builder engine. Resumes `state.builder.session_id` (or
+ * starts fresh when none is held), asks the session to implement the current
+ * unit and stop at a `$CHECKPOINT ticket=NN` marker, and returns ok only when
+ * the marker names the ticket the run loop asked for.
  *
  * Gate findings arrive via `prevFeedback` and are re-injected IN CONTEXT with
  * buildBuilderFindingsPrompt — the session that wrote the code receives the
@@ -2220,7 +1747,6 @@ async function runBuilderStep(
   parsed: Ticket,
   phaseFile: string,
   prevFeedback: string | null,
-  testHandoff: string | null,
 ): Promise<ImplementResult> {
   const granularity = state.config.checkpoint_granularity ?? "product";
   const { unit, allParsed } = await builderInvocationPlan(state, ticket, granularity);
@@ -2237,7 +1763,7 @@ async function runBuilderStep(
   const promptTicketsAll = unit.tickets.map((ts) => {
     const p = byFile.get(ts.file);
     if (!p) throw new Error(`builder prompt: ticket file missing for ${ts.file} in ${state.tickets_dir}`);
-    return toBuilderTicket(p, ts.file === ticket.file ? testHandoff : null);
+    return toBuilderTicket(p);
   });
   // gh #105: under product granularity the prompt surfaces the CURRENT ticket
   // ONLY — pre-listing the whole remaining queue invited a session to
@@ -2290,6 +1816,7 @@ async function runBuilderStep(
    * target session and gate feedback. Isolated so a session-lost adoption can
    * re-drive once as a SEEDED advance (a fresh session must not receive a
    * findings prompt that references a "last checkpoint" it never had). */
+  const visionCapability = await readVisionCapabilityFor(state.cwd, state._models?.implement ?? null);
   const driveOnce = async (opts: { sessionIdForPrompt: string | null; feedbackForPrompt: GateFeedback | null; fullContextOverride?: boolean }): Promise<{
     result: Awaited<ReturnType<typeof executeOpendCode>>;
   }> => {
@@ -2309,6 +1836,7 @@ async function runBuilderStep(
           feedback: opts.feedbackForPrompt,
           design: surface ? designDoc : null,
           coherence: charter,
+          visionCapability,
         })
       : buildBuilderPrompt({
           session: targetSession,
@@ -2322,7 +1850,11 @@ async function runBuilderStep(
           contracts: useFull ? contractsBlock : null,
           learnings: useFull ? learningsBlock : null,
           digest: useFull ? digestBlock : null,
-          designDoc: useFull && surface ? designDoc : null,
+          // v2 issue 01: a surface invocation gets the design intent on EVERY
+          // prompt — the preamble on a fresh seed, a verbatim task re-injection
+          // on a warm resume whose cheap model will not re-read it.
+          designDoc: surface ? designDoc : null,
+          reinjectDesign: !useFull,
           architectureDoc: useFull ? architectureDoc : null,
           contextPointers: useFull
             ? undefined
@@ -2335,7 +1867,7 @@ async function runBuilderStep(
               },
           charter,
           contextBudget: contextBudget(state),
-          visionCapability: await readVisionCapabilityFor(state.cwd, state._models?.implement ?? null),
+          visionCapability,
         });
     // Issue #133: a fresh seed (first run, or after a session-lost recovery
     // dropped the handle) branches off the base session with the builder's
@@ -2442,6 +1974,17 @@ async function runBuilderStep(
   // drive it to the checkpoint rather than gating half-done work.
   const markerTicket = result.checkpointTicket ?? readCheckpointTicket(await extractAssistantText(ledger, phaseFile));
   if (markerTicket !== expectedTicket) {
+    // v2 issue 01 fallback: a turn that ended with NO marker but whose ticket
+    // was already verified green counts as the checkpoint. Re-invoking only to
+    // see the marker again wastes a whole builder invocation (five observed in
+    // one run: 01, 07, 10, 12 twice); the marker stays primary, and this never
+    // covers unverified work — the verify gate below still runs before commit.
+    if (!markerTicket && ticket.verify_ok === true) {
+      ticket.logs.push(`build ${phaseFile}: ended without a marker, but ticket ${expectedTicket} was already verify-green — counting it as the checkpoint (v2 issue 01 fallback)`);
+      console.log(`[${nowClock()}]   ${ticket.number} build ⊘ no marker, already verify-green — counting it as the checkpoint`);
+      ticket.context = await analyzePhase(ledger, phaseFile);
+      return { ok: true, toolCalls: result.toolCalls };
+    }
     const err =
       `build ${phaseFile}: exited ok but ${markerTicket ? `checkpointed ticket ${markerTicket}` : "emitted no checkpoint marker"} — expected a $CHECKPOINT ticket=${expectedTicket} (${granularity} granularity). The session stopped for a reason other than a clean checkpoint; continue in this session and drive it to checkpoint ${expectedTicket}.`;
     ticket.logs.push(err);
@@ -2588,170 +2131,4 @@ async function runBuilderGroupLoop(state: RunState, ledger: string, onUpdate?: (
       break;
     }
   }
-}
-
-async function runImplement(
-  state: RunState,
-  ledger: string,
-  ticket: TicketState,
-  parsed: Ticket,
-  phaseFile: string,
-  prevFeedback: string | null,
-  patching: boolean,
-  prevHandoff: string | null,
-  attemptHistory: AttemptRound[],
-  capacityLimited: boolean,
-): Promise<ImplementResult> {
-  // A verify failure may leave the worktree in a broken half-written state,
-  // so a clean slate is the safe default. A REVIEW failure is different: the
-  // work is mostly correct (that is the whole premise of feeding findings
-  // back), and wiping it forces the next attempt to regenerate from scratch —
-  // which is exactly how a fresh [BLOCKER] gets introduced. Preserve the tree
-  // on review-retry and hand the implementer its own prior diff to patch.
-  //
-  // When the prior attempt emitted a $HANDOFF (issue #9), the handoff summary
-  // substitutes for the raw prior diff in the prompt — so we skip computing
-  // priorDiff entirely. The raw diff is the 5-10k-token bloat the handoff was
-  // introduced to shed; computing it just to pass it through would waste the
-  // I/O and require the prompt builder to remember to ignore it.
-  let priorDiff: string | null = null;
-  if (!patching) {
-    const cleanResult = await git.cleanWorktree(state.cwd, protectedPaths(state.cwd, state.tickets_dir));
-    if (!capacityLimited && cleanResult.stashed && cleanResult.stashPath) {
-      const stashContent = await readFile(cleanResult.stashPath, "utf8").catch(() => "");
-      if (stashContent.trim()) {
-        priorDiff = stashContent;
-        const threshold = contextBudget(state) * REVIEW_MODE_THRESHOLD_RATIO;
-        const est = estimateTokens(priorDiff);
-        if (est > threshold) {
-          priorDiff = await git.diffStat(state.cwd, "HEAD").catch(() => priorDiff);
-        }
-      }
-    }
-  } else if (!capacityLimited && prevFeedback && !prevHandoff) {
-    // Recompute the working diff fresh on EACH invocation. A ladder retry
-    // sequence (withFailureLadder) calls runImplement more than once with the
-    // same `patching` flag; a snapshot captured at review time would be stale
-    // by the second retry if the prior attempt crashed mid-write and moved or
-    // deleted files. A live read ensures the implementer sees the actual
-    // current worktree and falls back to a clean-rewrite when the tree is
-    // empty (e.g. the prior attempt already wiped itself via cleanWorktree).
-    const live = await git.workingDiff(state.cwd).catch(() => "");
-    priorDiff = live || null;
-    if (priorDiff) {
-      const threshold = contextBudget(state) * REVIEW_MODE_THRESHOLD_RATIO;
-      const est = estimateTokens(priorDiff);
-      if (est > threshold) {
-        priorDiff = await git.diffStat(state.cwd, "HEAD").catch(() => priorDiff);
-      }
-    }
-  }
-  // Issue #64: full index, not a slice. The ticket's declared files are
-  // advisory — the implementer edits wiring files (main.ts) the ticket never
-  // listed, and the narrow slice hid those files' contracts entirely (the
-  // catastrophic-handoff run replaced BootScene because the implementer never
-  // saw BootScene existed as a contract). The index is the ground-truth seam
-  // (ADR 0008) and small (O(contracts)).
-  const contracts = await loadContracts(state.cwd);
-  // Issue #34: read the planner's persistent design/architecture intent so
-  // the fresh-context implementer reconstructs the vision from a written
-  // description instead of reverse-engineering it from committed code.
-  // Issue #99 (ADR 0028): the design NARRATIVE is surface-gated inside the
-  // prompt builder (`surface`); the coherence charter is read for surface
-  // tickets only, so a pure-model ticket never carries either.
-  const surface = touchesVisualSurface(parsed);
-  const designDoc = await git.readProjectDoc(state.cwd, "docs/design.md");
-  const architectureDoc = await git.readProjectDoc(state.cwd, "docs/architecture.md");
-  const coherenceDoc = surface ? await git.readProjectDoc(state.cwd, "docs/coherence.md") : null;
-  // Issue #45: require RED/GREEN evidence in the report when the ticket has a
-  // test phase. Fix mode defaults the test phase off (#6) — its Phase 5
-  // already mandates watch-fail→watch-pass on the reproducer, a richer
-  // discipline than this block, so we gate on the same fuse rather than
-  // re-deriving it.
-  const requireEvidence = testPhaseRan(state.config.test_phase, parsed.testable);
-  const prompt = await buildImplementerPrompt({
-    cwd: state.cwd,
-    ticketFile: ticket.file,
-    mission: parsed.mission,
-    ticketBody: parsed.what,
-    criteria: parsed.criteria,
-    verify: state.config.verify,
-    prevFeedback,
-    priorDiff,
-    prevHandoff: capacityLimited ? null : prevHandoff,
-    contextBudget: contextBudget(state),
-    contracts: contracts.entries.length ? contracts : undefined,
-    learnings: await readLearnings(state.cwd),
-    digest: await readDigest(state.cwd),
-    fixMode: !!state.config.fix_mode,
-    attemptHistory: capacityLimited ? undefined : attemptHistory.length ? attemptHistory : undefined,
-    designDoc,
-    architectureDoc,
-    surface,
-    coherenceDoc,
-    testable: requireEvidence,
-    visionCapability: await readVisionCapabilityFor(state.cwd, state._models?.implement ?? null),
-  });
-
-  const fork = baseFork(state, prompt);
-  const result = await executeFreshPhase(joinPhaseMessages(prompt), {
-    cwd: state.cwd,
-    ledgerDir: ledger,
-    phaseFile,
-    model: state._models?.implement ?? null,
-    agent: RAILHEAD_AGENT_NAMES.build,
-    session: fork.session,
-    fork: fork.fork,
-    task: fork.task,
-    live: !state.quiet, verbose: state.verbose,
-    heartbeat: true,
-    livePrefix: `${ticket.number} implement`,
-    maxSteps: state.config.max_phase_steps,
-    stallTimeoutSec: state.config.stall_timeout_sec,
-    maxStepModelSec: state.config.max_step_model_sec,
-    maxContextTokens: contextBudget(state),
-  });
-  const transcript = await extractAssistantText(ledger, phaseFile);
-
-  // gh #111: an agent-initiated halt is not a failure — it must not enter the
-  // failure ladder's retry machinery. Propagate it straight up.
-  if (result.status === "halted") {
-    return { ok: false, halted: true, reason: result.haltReason ?? result.errorMessage ?? "halt file present" };
-  }
-
-  // Surface opencode permission rejections even on a "successful" exit. The
-  // snake-qwen run died on this: 02-02 returned status ok from the railhead's
-  // view while three auto-rejects of ~/.cargo/.../termion silently piled up
-  // in the .stderr ledger — the implementer had given up without producing
-  // work. Making the pattern visible here turns a slow, silent failure into a
-  // diagnosable one.
-  const stderrLines = await readStderrLines(ledger, phaseFile);
-  const rejections = summarizePermissionRejections(stderrLines);
-  if (rejections.count > 0) {
-    const msg = `${ticket.number} implement: ${rejections.summary}`;
-    console.log(`[${nowClock()}]   ${msg}`);
-    ticket.logs.push(`permission rejections: ${rejections.summary}`);
-  }
-
-  if (result.status === "transient") {
-    return { ok: false, err: `implement ${phaseFile} ${describeExecFailure(result)}`, evidence: result.evidence ?? evidenceFromResult(result) };
-  }
-
-  if (result.status !== "ok") {
-    const rejectionSuffix = rejections.count > 0 ? ` | ${rejections.summary}` : "";
-    const err = `${boundedLog(`implement ${phaseFile} ${describeExecFailure(result)}`, transcript)}${rejectionSuffix} (full transcript: \`railhead log ${phaseFile}\`)`;
-    return { ok: false, err, evidence: result.evidence ?? evidenceFromResult(result) };
-  }
-  if (!/\bDONE\b/.test(transcript)) {
-    const msg = `implement ${phaseFile}: process exited cleanly but never emitted DONE — the worktree decides whether this was a completed ticket (gated) or a stopped attempt (retried) (last text: ${transcript.slice(-200).trim() || "(none)"}). Full transcript: \`railhead log ${phaseFile}\``;
-    console.log(`[${nowClock()}]   ${ticket.number} implement: exited cleanly without DONE — worktree will arbitrate (gate if non-empty, retry if empty)`);
-    return { ok: false, err: msg, evidence: null };
-  }
-  ticket.context = await analyzePhase(ledger, phaseFile);
-  // The full transcript already lives verbatim in events/<phaseFile>.jsonl
-  // (written by executeOpendCode as it streams). state.json is rewritten
-  // wholesale on nearly every phase transition, so `ticket.logs` gets a
-  // pointer + size here, not a second unbounded copy of the same text.
-  ticket.logs.push(`implement ${phaseFile}: ok (${transcript.length} chars — see \`railhead log ${phaseFile}\`)`);
-  return { ok: true, toolCalls: result.toolCalls };
 }

@@ -67,7 +67,17 @@ ${HALT_CONTRACT}
 1. Launch the app and get it to its interactive state (past any title/menu if needed).
 2. Identify the app's most basic single user action — the smallest thing that proves it is operable: press the primary button, advance one turn, submit a form, move the player. One real action is enough.
 3. Perform that action FOR REAL using the interface's real-input tools (a real click / key press / form fill — never a synthetic el.click()/dispatchEvent unless the declared interface explicitly says synthetic dispatch is the input class).
-4. Wait for the state to settle, then CONFIRM the action actually changed observable state: read the DOM text (a11y snapshot) or the app's state, and assert the change you expected (e.g. the turn counter advanced, a new element appeared, a value updated).
+4. Wait for the state to settle, then CONFIRM the action actually changed observable state — a RENDER DELTA plus clean console:
+   a. Capture the rendered output BEFORE the action (a screenshot, a pixel/RGBA sample, or a DOM/a11y text snapshot).
+   b. Perform the action, wait for the frame/state to settle.
+   c. Capture the SAME output again and assert it CHANGED in the way the action implies (the turn counter advanced, a new element appeared, the canvas pixels differ, a value updated). "No error occurred" is not a delta.
+   d. Read the browser/app console and assert ZERO errors after the action. ANY logged error — including a failed request the app needs — is a failure; name it.
+
+## Evidence bar (do not pass on startup alone)
+
+- An HTTP 200, a listening port, or a process that stays up proves only that the app STARTS. It is NOT evidence the app is operable and must never be your basis for a pass.
+- The failure this gate exists to catch: the page loads, every request succeeds, and the canvas is an unwired rectangle — nothing the user does changes the render. A pass REQUIRES the render-delta check from step 4c and the zero-console-errors check from step 4d.
+- If the declared interface makes a real-input or render-delta check impossible with your tools, do NOT claim a pass: say exactly what you could not do and what you tried.
 
 Reply terse. Emit EXACTLY one of these markers:
 

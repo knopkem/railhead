@@ -48,18 +48,17 @@ describe("builder state record (ADR 0022 stage 3, #84)", () => {
     expect(newBuilderState()).toEqual({ checkpoint_count: 0, restarts: [] });
   });
 
-  it("createRunState seeds a builder record only when session_builder is enabled", () => {
-    const meta = (sessionBuilder: boolean): RunMeta => ({
+  it("createRunState always seeds a builder record (the durable session is the only engine)", () => {
+    const meta: RunMeta = {
       cwd: "/x",
       branch: "run/x",
       tickets_dir: "/x/issues",
-      config: { ...cfg, session_builder: sessionBuilder },
+      config: { ...cfg },
       pause_on_failure: false,
       verbose: false,
       quiet: false,
-    });
-    expect(createRunState(meta(true)).builder).toEqual({ checkpoint_count: 0, restarts: [] });
-    expect(createRunState(meta(false)).builder).toBeUndefined();
+    };
+    expect(createRunState(meta).builder).toEqual({ checkpoint_count: 0, restarts: [] });
   });
 
   it("normalizeState repairs a partial builder record (an older run that predates the counter/restart fields)", () => {

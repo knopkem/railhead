@@ -21,6 +21,17 @@ describe("readCheckpointTicket (issue #84 S0.2)", () => {
     expect(readCheckpointTicket("I will emit a $CHECKPOINT when I am done")).toBeNull();
   });
 
+  it("normalizes zero-padding drift: ticket=1 matches ticket 01 (v2 issue 01)", () => {
+    expect(readCheckpointTicket(`${CHECKPOINT_START} ticket=1`)).toBe("01");
+    expect(readCheckpointTicket(`${CHECKPOINT_START} ticket=01`)).toBe("01");
+    expect(readCheckpointTicket(`${CHECKPOINT_START} ticket=101`)).toBe("101");
+  });
+
+  it("accepts a trailing-marker variant: the marker may follow prose on its line (v2 issue 01)", () => {
+    expect(readCheckpointTicket(`all tests pass — ${CHECKPOINT_START} ticket=01`)).toBe("01");
+    expect(readCheckpointTicket(`${CHECKPOINT_START} ticket=2 (tests green)`)).toBe("02");
+  });
+
   it("takes the LAST marker line — a stressed model that re-emits mid-ramble yields the terminal ticket", () => {
     const transcript = [
       "some work",
@@ -66,5 +77,10 @@ describe("endsWithCheckpoint (terminal-anchored executor latch)", () => {
 
   it("accepts the colon form the model may drift into, like readCheckpointTicket", () => {
     expect(endsWithCheckpoint(`${CHECKPOINT_START} ticket: 03`)).toBe(true);
+  });
+
+  it("accepts zero-padding drift and a trailing-marker last line (v2 issue 01)", () => {
+    expect(endsWithCheckpoint(`${CHECKPOINT_START} ticket=3`)).toBe(true);
+    expect(endsWithCheckpoint(`all green — ${CHECKPOINT_START} ticket=3`)).toBe(true);
   });
 });
