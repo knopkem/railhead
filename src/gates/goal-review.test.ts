@@ -952,6 +952,23 @@ describe("goal prompt — feature scope (ADR 0051)", () => {
     expect(text).toMatch(/integration breakage/);
   });
 
+  it("carries the exact roadmap step and the human's reopen feedback as must-check constraints", () => {
+    const text = goalPrompt({
+      ...FEATURE,
+      arcStep: { number: 2, title: "Search", description: "Search trails by name and tag.", feedback: "Must hit Enter to submit." },
+    });
+    expect(text).toContain("THE ROADMAP STEP THIS RUN BUILDS: 2 — Search");
+    expect(text).toContain("Search trails by name and tag.");
+    expect(text).toContain("Must hit Enter to submit.");
+    expect(text).toMatch(/REOPENED/);
+  });
+
+  it("a run without a step identity (legacy origin) still gets the arc context", () => {
+    const text = goalPrompt({ ...FEATURE, arcStep: null });
+    expect(text).toContain("VANILLA_JUSTICE — decided.");
+    expect(text).not.toMatch(/THE ROADMAP STEP THIS RUN BUILDS/);
+  });
+
   it("the final-group pass judges the feature's full goal, never the whole product", () => {
     const text = goalPrompt({ ...FEATURE, isFinalGroup: true });
     expect(text).toMatch(/judge the feature's FULL goal/);

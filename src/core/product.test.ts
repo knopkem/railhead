@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import {
-  firstOpenStep,
+  nextArcAction,
   parseProductPlan,
   renderProductPlan,
   renderProductBrief,
@@ -148,16 +148,26 @@ Follows the panel.
   });
 });
 
-describe("firstOpenStep", () => {
-  it("returns the first todo step in document order, skipping built and done", () => {
+describe("nextArcAction — the strict frontier (ADR 0051)", () => {
+  it("a built-but-unverified step blocks the frontier: the action is verify, not the next todo", () => {
     const { plan } = parseProductPlan(DOC);
-    expect(firstOpenStep(plan)?.number).toBe(3);
+    const action = nextArcAction(plan);
+    expect(action.kind).toBe("verify");
+    if (action.kind === "verify") expect(action.step.number).toBe(2);
   });
 
-  it("returns null when every step is finished", () => {
+  it("the first todo is eligible to build once every earlier step is done", () => {
+    const { plan } = parseProductPlan(DOC);
+    plan.steps[1].status = "done";
+    const action = nextArcAction(plan);
+    expect(action.kind).toBe("build");
+    if (action.kind === "build") expect(action.step.number).toBe(3);
+  });
+
+  it("every step done means the arc needs a new step", () => {
     const { plan } = parseProductPlan(DOC);
     plan.steps.forEach((s) => (s.status = "done"));
-    expect(firstOpenStep(plan)).toBeNull();
+    expect(nextArcAction(plan)).toEqual({ kind: "extend" });
   });
 });
 

@@ -117,3 +117,17 @@ not instructions to a model:
 No unattended multi-step runs, no auto-restarts of the arc, no
 auto-stabilization of red baselines, and no merge/rebase automation of
 feature branches — the human gate between steps is the feature, not overhead.
+
+## Amendment (ADR 0052): the loop is sharpened, grounded, and gated
+
+ADR 0052 hardens this decision after its first implementation. The arc gets
+the existing planning-interview discipline before adoption; the feature
+derivation gets the repo's real contracts/digest/learnings and the previous
+attempt's report; the held charter owns the look (feature plans no longer get
+the greenfield whole-look art-direction rules or the deterministic craft
+ticket); the frontier is strict (a `built`-but-unverified step blocks the
+next, `--step N` overrides with a warning); the step identity is persisted
+and the `built` transition is committed on the run branch (not on "the
+product branch" as §4 loosely says), with `resume`/`run` finishing the
+transaction; and a feature plan's `$VERIFY` copies the existing suite rather
+than extending the global gate.

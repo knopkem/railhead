@@ -18,6 +18,14 @@ export const PRODUCT_DOC = "docs/product.md";
 
 export type StepStatus = "todo" | "built" | "done";
 
+/** The identity of the step a Feature Run builds, persisted with the run
+ * (origin.json, RunState) so resume and run-end can finish the arc
+ * transaction without the process that derived the prompt. */
+export interface ArcStepIdentity {
+  number: number;
+  title: string;
+}
+
 export interface ProductStep {
   number: number;
   title: string;
@@ -266,10 +274,21 @@ export async function writeProductPlan(cwd: string, plan: ProductPlan): Promise<
   await writeFile(join(cwd, PRODUCT_DOC), renderProductPlan(plan), "utf8");
 }
 
-/** The first Roadmap step eligible to build — the arc's frontier. Document
- * order is the execution order, exactly like tickets. */
-export function firstOpenStep(plan: ProductPlan): ProductStep | null {
-  return plan.steps.find((s) => s.status === "todo") ?? null;
+/** The arc's next actionable step, with the human gate enforced (ADR 0051):
+ * the first step not `done` decides the action. A `todo` step is eligible to
+ * build; a `built` step awaits the human's verification and BLOCKS the steps
+ * after it (test it, then mark it done or reopen it with feedback); every step
+ * done means the arc needs a new step. Document order is the execution order,
+ * exactly like tickets. */
+export type ArcAction =
+  | { kind: "build"; step: ProductStep }
+  | { kind: "verify"; step: ProductStep }
+  | { kind: "extend" };
+
+export function nextArcAction(plan: ProductPlan): ArcAction {
+  const step = plan.steps.find((s) => s.status !== "done");
+  if (!step) return { kind: "extend" };
+  return step.status === "built" ? { kind: "verify", step } : { kind: "build", step };
 }
 
 /** Splice one step's machine-readable lines in a saved arc: the block's prose

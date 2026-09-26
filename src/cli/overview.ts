@@ -8,7 +8,7 @@ import { loadTickets } from "../core/ticket.ts";
 import { touchesVisualSurface } from "../context/surface.ts";
 import { detectGameCanvas } from "../core/project-assets.ts";
 import { collectCacheStats, type RunCacheStats } from "../core/telemetry.ts";
-import { firstOpenStep, PRODUCT_DOC, type ProductPlan } from "../core/product.ts";
+import { nextArcAction, PRODUCT_DOC, type ProductPlan } from "../core/product.ts";
 
 const STATUS_SYM: Record<string, string> = {
   ready: "○",
@@ -437,13 +437,20 @@ export function renderNextActionable(state: RunState): string {
 }
 /** The product arc's status view (ADR 0051): one line per roadmap step plus
  * the frontier hint — the thing `railhead status` shows above run tables and
- * `railhead product` prints before adoption. */
+ * `railhead product` prints before adoption. The hint enforces the human gate:
+ * a built-but-unverified step blocks the steps after it. */
 export function renderArcSummary(plan: ProductPlan): string {
   const lines = [`product arc: ${plan.name} — ${plan.steps.length} step(s)`];
   for (const s of plan.steps) {
     lines.push(`  ${s.number}. ${s.title} [${s.status}]${s.runId ? ` (run ${s.runId})` : ""}${s.feedback ? "\n     reopened with feedback — the next attempt folds it in" : ""}`);
   }
-  const open = firstOpenStep(plan);
-  lines.push(open ? `  next: step ${open.number} — ${open.title}` : `  every step is built or done — extend the arc with \`railhead product "…"\``);
+  const action = nextArcAction(plan);
+  if (action.kind === "build") {
+    lines.push(`  next: step ${action.step.number} — ${action.step.title}`);
+  } else if (action.kind === "verify") {
+    lines.push(`  step ${action.step.number} — ${action.step.title} is built — test it, then mark it done or reopen it with feedback in ${PRODUCT_DOC}`);
+  } else {
+    lines.push(`  every step is built or done — extend the arc with \`railhead product "…"\``);
+  }
   return lines.join("\n");
 }

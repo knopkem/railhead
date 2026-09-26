@@ -6,15 +6,16 @@ import { loadContracts, summarizeContracts } from "../core/contracts.ts";
 import { DEFAULT_CONTEXT_TOKENS, DEFAULT_INFRA_BACKOFF_SEC, DEFAULT_MAX_REPLANS } from "../config/config.ts";
 import { buildReplanPrompt } from "../gates/replan.ts";
 import { readDigest } from "../context/digest.ts";
+import { readLearnings } from "../context/learnings.ts";
 import { withFailureLadderOnThrow } from "../execute/failure-ladder.ts";
-import { planDesignSystemPrompt, planTicketsSystemPrompt, planFeatureDesignSystemPrompt, planFeatureTicketsSystemPrompt, planFixSystemPrompt, planContinuationSystemPrompt, buildProductSessionPrompt, parseProductReply, buildFeatureStepPrompt, parseFeatureStepReply, buildPlanRevisionPrompt, buildPlanUserFeedbackPrompt, buildPlanMarkdown, buildPlanGatePrompt, parsePlanGateVerdict, parsePlanJson, parseVerifyBlock, parseSmokeBlock, parseDesignBlock, parseArchitectureBlock, parseInterfaceBlock, splitCoherenceContract, type PlanMode, type PlanTicket } from "./plan.ts";
+import { planDesignSystemPrompt, planTicketsSystemPrompt, planFeatureDesignSystemPrompt, planFeatureTicketsSystemPrompt, planFixSystemPrompt, planContinuationSystemPrompt, buildProductSessionPrompt, buildProductRevisionPrompt, parseProductReply, buildFeatureStepPrompt, parseFeatureStepReply, buildPlanRevisionPrompt, buildPlanUserFeedbackPrompt, buildPlanMarkdown, buildPlanGatePrompt, parsePlanGateVerdict, parsePlanJson, parseVerifyBlock, parseSmokeBlock, parseDesignBlock, parseArchitectureBlock, parseInterfaceBlock, splitCoherenceContract, type PlanMode, type PlanTicket } from "./plan.ts";
 import { touchesVisualSurface } from "../context/surface.ts";
 import { isRenderedSurface, type ProjectInterface } from "../config/interface.ts";
 import { numberTickets, writeTickets, type Ticket } from "../core/ticket.ts";
 import { writePlanOrigin } from "./plan-identity.ts";
 import { extractAssistantText, extractPlanText, initLedger, resetPhase, readStderrLines } from "../core/ledger.ts";
 import { readProjectDoc, writeProjectDoc, headCommit } from "../core/git.ts";
-import { readProductPlan, renderProductBrief, renderProductPlan, type ProductPlan } from "../core/product.ts";
+import { readProductPlan, renderProductBrief, renderProductPlan, PRODUCT_DOC, type ArcStepIdentity, type ProductPlan } from "../core/product.ts";
 import { CHARTER_DOC } from "../context/coherence.ts";
 import { summarizePermissionRejections } from "../core/permissions.ts";
 import {
@@ -114,10 +115,19 @@ export async function runPlan(options: {
   /** Cap on plan-gate frontier regenerations. Defaults to
    * `DEFAULT_MAX_REPLANS`. */
   maxReplans?: number | null;
+  /** ADR 0051: in feature mode, the roadmap step (1-based) this plan builds.
+   * Resolved against the product arc so the plan gate judges the step and the
+   * origin records the identity for run-end/resume. */
+  arcStepNumber?: number | null;
+  /** Override the plan's slug/namespace. A feature run passes a stable
+   * step-derived slug so reopening the same step reuses its `.scratch/<slug>/`
+   * plan namespace (and its `run/<slug>` branch) instead of fragmenting a new
+   * one per attempt. Defaults to a prompt-derived slug. */
+  slug?: string;
 }): Promise<PlanResult> {
-  const { cwd, prompt, model, contextBudget, maxSteps, stallTimeoutSec, maxStepModelSec, mode, verbose, maxContextTokens, persistentWorker, infraBackoffSec, reviewPlan, interviewPlan, artDirection, goalModel, maxReplans } = options;
+  const { cwd, prompt, model, contextBudget, maxSteps, stallTimeoutSec, maxStepModelSec, mode, verbose, maxContextTokens, persistentWorker, infraBackoffSec, reviewPlan, interviewPlan, artDirection, goalModel, maxReplans, arcStepNumber, slug } = options;
   return withPersistentWorker(persistentWorker === true, cwd, async () => {
-  return runPlanInner({ cwd, prompt, model, contextBudget, maxSteps, stallTimeoutSec, maxStepModelSec, mode, verbose, maxContextTokens, infraBackoffSec, persistentWorker, reviewPlan, interviewPlan, artDirection, goalModel, maxReplans });
+  return runPlanInner({ cwd, prompt, model, contextBudget, maxSteps, stallTimeoutSec, maxStepModelSec, mode, verbose, maxContextTokens, infraBackoffSec, persistentWorker, reviewPlan, interviewPlan, artDirection, goalModel, maxReplans, arcStepNumber, slug });
   });
 }
 
@@ -197,6 +207,21 @@ interface ProductSessionOptions {
   verbose?: boolean;
   infraBackoffSec?: number[];
   persistentWorker?: boolean;
+  /** ADR 0051: the post-condense arc interview. Called with the parsed arc
+   * markdown; a non-empty return is the operator's answers, which revise the
+   * arc through one more stage before it is returned. The CLI owns the
+   * session and the prompting (mirrors `runPlan`'s `interviewPlan`). */
+  refine?: (arcMarkdown: string) => Promise<string | null>;
+}
+
+/** The product session's output: the parsed arc plus the parser's warnings
+ * (status anomalies, duplicate steps) — the CLI surfaces both before adoption. */
+export interface ProductSessionResult {
+  plan: ProductPlan;
+  warnings: string[];
+  /** The arc markdown exactly as the model emitted it (the CLI renders this
+   * for explicit adoption; `plan` may normalize marker lines). */
+  markdown: string;
 }
 
 /**
@@ -205,7 +230,7 @@ interface ProductSessionOptions {
  * the parsed arc and adopts it explicitly — silently overwriting
  * docs/product.md would desync the thing the whole process steers against.
  */
-export async function runProductSession(options: ProductSessionOptions): Promise<ProductPlan> {
+export async function runProductSession(options: ProductSessionOptions): Promise<ProductSessionResult> {
   const { cwd, instruction } = options;
   const planLedger = join(cwd, ".railhead", "plan-latest");
   await initLedger(planLedger);
@@ -222,17 +247,39 @@ export async function runProductSession(options: ProductSessionOptions): Promise
     persistentWorker: options.persistentWorker,
   };
   const current = await readProductPlan(cwd);
+  // ADR 0051: an existing repo's public surface is real even when the index is
+  // empty — the existing-repo framing keeps the prompt from telling the arc
+  // session "greenfield" and then steering every feature against that lie.
+  const contracts = await loadContracts(cwd);
   const system = buildProductSessionPrompt({
+    contractsSummary: summarizeContracts(contracts, "existing-repo"),
     existingPlanMarkdown: current ? renderProductPlan(current) : null,
     existingGlossary: (await readProjectDoc(cwd, "CONTEXT.md")) ?? undefined,
   });
   const text = await plannerStage(stageOpts, "product", `${system}\n\nThe operator's input for this session: ${instruction}`, "product");
-  return parseProductReply(text).plan;
+  const first = parseProductReply(text);
+  if (options.refine) {
+    // ADR 0051: the arc is sharpened before adoption. A zero-question
+    // interview is a valid outcome; the answers only trigger a revision when
+    // the operator actually changed something.
+    const answers = await options.refine(renderProductPlan(first.plan));
+    if (answers?.trim()) {
+      const revised = await plannerStage(
+        stageOpts,
+        "product-revise",
+        `${buildProductRevisionPrompt({ instruction, priorArcMarkdown: renderProductPlan(first.plan), findings: [answers.trim()] })}\n\nEmit the revised arc now.`,
+        "product",
+      );
+      const parsed = parseProductReply(revised);
+      return { plan: parsed.plan, warnings: parsed.warnings, markdown: renderProductPlan(parsed.plan) };
+    }
+  }
+  return { plan: first.plan, warnings: first.warnings, markdown: renderProductPlan(first.plan) };
 }
 
 export interface FeatureStepOptions {
   cwd: string;
-  step: { number: number; title: string; description: string; feedback: string | null };
+  step: { number: number; title: string; description: string; feedback: string | null; runId?: string | null };
   plan: ProductPlan;
   model: string | null;
   maxSteps?: number | null;
@@ -250,6 +297,21 @@ function roadmapSummary(plan: ProductPlan): string {
   return plan.steps
     .map((s) => `${s.number} — ${s.title} [${s.status}]`)
     .join("\n");
+}
+
+/** ADR 0051: the previous attempt's report, when a step was reopened after a
+ * build. Capped — the report is an orientation, not the record (the ledger is).
+ * Absent report (never ran, purged) reads as null and the prompt omits it. */
+async function readPriorAttempt(cwd: string, runId: string | null | undefined): Promise<string | null> {
+  if (!runId) return null;
+  try {
+    const raw = (await readFile(join(cwd, ".railhead", runId, "report.md"), "utf8")).trim();
+    if (!raw) return null;
+    const cap = 2500;
+    return raw.length > cap ? `${raw.slice(0, cap)}\n… (report truncated)` : raw;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -285,6 +347,11 @@ export async function deriveFeaturePrompt(options: FeatureStepOptions): Promise<
     contractsSummary: contracts.entries.length || contracts.schema_version ? summarizeContracts(contracts, "existing-repo") : undefined,
     existingCharter: (await readProjectDoc(cwd, CHARTER_DOC)) ?? undefined,
     existingGlossary: (await readProjectDoc(cwd, "CONTEXT.md")) ?? undefined,
+    // Ground truth: the digest/learnings say what the repo actually is now;
+    // a reopened step also carries what its previous run did.
+    projectDigest: (await readDigest(cwd)) ?? undefined,
+    learnings: (await readLearnings(cwd)) ?? undefined,
+    priorAttempt: await readPriorAttempt(cwd, step.runId),
   });
   const text = await plannerStage(
     stageOpts,
@@ -317,10 +384,12 @@ async function runPlanInner(options: {
   artDirection?: boolean;
   goalModel?: string | null;
   maxReplans?: number | null;
+  arcStepNumber?: number | null;
+  slug?: string;
 }): Promise<PlanResult> {
-  const { cwd, prompt, model, contextBudget, maxSteps, stallTimeoutSec, maxStepModelSec, mode, verbose, maxContextTokens, infraBackoffSec, persistentWorker, reviewPlan, interviewPlan, artDirection, goalModel, maxReplans } = options;
-  const slug =
-    prompt
+  const { cwd, prompt, model, contextBudget, maxSteps, stallTimeoutSec, maxStepModelSec, mode, verbose, maxContextTokens, infraBackoffSec, persistentWorker, reviewPlan, interviewPlan, artDirection, goalModel, maxReplans, arcStepNumber, slug: slugOverride } = options;
+  const slug = slugOverride?.trim()
+    || prompt
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/(^-|-$)/g, "")
@@ -336,6 +405,15 @@ async function runPlanInner(options: {
   const productPlan = mode === "feature" ? await readProductPlan(cwd) : null;
   const productBrief = productPlan ? renderProductBrief(productPlan) : undefined;
   const existingCharter = mode === "feature" ? await readProjectDoc(cwd, CHARTER_DOC) : null;
+  // ADR 0051: the exact roadmap step this feature plan builds. The plan gate
+  // judges the step (description + feedback), and the plan's origin records
+  // the identity so run-end/resume can finish the arc transaction.
+  const arcStep = mode === "feature" && arcStepNumber != null
+    ? productPlan?.steps.find((s) => s.number === arcStepNumber) ?? null
+    : null;
+  if (mode === "feature" && arcStepNumber != null && !arcStep) {
+    throw new Error(`step ${arcStepNumber} does not exist in ${PRODUCT_DOC} — re-run \`railhead feature\` to pick an existing step`);
+  }
   const planLedger = join(cwd, ".railhead", "plan-latest");
   await initLedger(planLedger);
   const stageOpts: PlannerStageOptions = {
@@ -409,7 +487,7 @@ async function runPlanInner(options: {
       console.log("[plan] plan accepted — decomposing into tickets");
     }
     const ticketsSystem = feature
-      ? planFeatureTicketsSystemPrompt({ contractsSummary, existingGlossary: existingGlossary ?? undefined, artDirection })
+      ? planFeatureTicketsSystemPrompt({ contractsSummary, existingGlossary: existingGlossary ?? undefined, artDirection, existingCharter: existingCharter ?? undefined })
       : planTicketsSystemPrompt({ contractsSummary, existingGlossary: existingGlossary ?? undefined, artDirection });
     ticketsText = await stage(
       "plan-tickets",
@@ -452,6 +530,8 @@ async function runPlanInner(options: {
       planLedger,
       mode: (mode ?? "build") as PlanMode,
       artDirection,
+      heldCharter: Boolean(existingCharter?.trim()),
+      arcStep: arcStep ? { number: arcStep.number, title: arcStep.title } : undefined,
     });
 
   let plan = await finalize(ticketsText);
@@ -477,6 +557,10 @@ async function runPlanInner(options: {
       }),
       contractsSummary,
       tickets: plan.tickets.map((t) => ({ number: t.number, title: t.title, what: t.what, criteria: t.criteria })),
+      productBrief,
+      arcStep: arcStep
+        ? { number: arcStep.number, title: arcStep.title, description: arcStep.description, feedback: arcStep.feedback }
+        : null,
     });
     const gateText = await stage(`plan-gate-${round}`, gatePrompt, "gate");
     const gate = parsePlanGateVerdict(gateText);
@@ -585,15 +669,27 @@ function hardenerTicket(): PlanTicket {
   planLedger: string;
   mode: PlanMode;
   artDirection?: boolean;
+  /** ADR 0051: a feature plan into a product whose coherence charter already
+   * exists. The charter is the visual authority — the plan neither re-authors
+   * it nor gets the deterministic whole-look craft ticket, and the missing-
+   * charter warning stays silent. */
+  heldCharter?: boolean;
+  /** ADR 0051: the roadmap step this feature plan builds, persisted into the
+   * plan's origin.json so run-end/resume can mark it `built`. */
+  arcStep?: ArcStepIdentity;
 }): Promise<PlanResult> {
-  const { cwd, prompt, designText, ticketsText, outDir, slug, mode, artDirection, planLedger } = opts;
+  const { cwd, prompt, designText, ticketsText, outDir, slug, mode, artDirection, planLedger, arcStep } = opts;
   const verify = parseVerifyBlock(designText);
   const smoke = parseSmokeBlock(designText);
   const projectInterface = parseInterfaceBlock(designText);
   // A plan that declares a rendered surface must own the look with an
   // open-ended craft ticket unless the project disabled art direction.
-  // Undeclared (fix mode) or terminal/none never requires one.
-  const artDirectionRequired = artDirection !== false && isRenderedSurface(projectInterface);
+  // Undeclared (fix mode) or terminal/none never requires one. A feature plan
+  // with a held charter is the exception: the look is already owned by
+  // docs/coherence.md, and only a genuinely NEW surface warrants a craft
+  // ticket — a decision the planner makes, not a deterministic append.
+  const featureWithHeldCharter = mode === "feature" && opts.heldCharter === true;
+  const artDirectionRequired = artDirection !== false && isRenderedSurface(projectInterface) && !featureWithHeldCharter;
   // Issue #34: extract the planner's design and architecture intent from
   // $DESIGN / $ARCHITECTURE marker blocks. In fix mode they stay optional.
   // When present, the documents are written under docs/ so implementers,
@@ -669,6 +765,7 @@ function hardenerTicket(): PlanTicket {
     created_at: new Date().toISOString(),
     ticket_files: ordered.map((t) => t.file),
     base_sha: await headCommit(cwd).catch(() => null),
+    ...(arcStep ? { arc_step: arcStep } : {}),
   });
   // The human-facing plan overview. Written for build plans only (fix mode is
   // one ticket — there is nothing to iterate on); the distilled
@@ -692,7 +789,7 @@ function hardenerTicket(): PlanTicket {
   // and the input for the report.md escalation. If this fires repeatedly in
   // practice, revisit a post-plan distill pass (Decision 1), not now.
   const surfaceTickets = ordered.filter((t) => touchesVisualSurface(t));
-  if (surfaceTickets.length > 0 && !coherenceAuthored) {
+  if (surfaceTickets.length > 0 && !coherenceAuthored && !featureWithHeldCharter) {
     console.warn(
       `[plan] warning: ${surfaceTickets.length} ticket(s) appear to touch a visual surface (${surfaceTickets.map((t) => t.number).join(", ")}) but the plan's $DESIGN block has no \`## Coherence contract\` section — surface tickets will build without a coherence charter (ADR 0028). Add the section to $DESIGN or accept the drift.`,
     );

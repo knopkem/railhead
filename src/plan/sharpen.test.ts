@@ -67,6 +67,32 @@ describe("sharpenSystemPrompt", () => {
   });
 });
 
+describe("sharpenSystemPrompt — product mode (ADR 0051)", () => {
+  const ARC = "# Trail Tracker\n\n## Vision\nA hiking log.\n\n## Roadmap\n\n### 1 — MVP\n\n**Status:** todo\n\nShell + one trail.";
+
+  it("asks the operator about the roadmap — the MVP cut, each step's outcome, and how they will test it", () => {
+    const p = sharpenSystemPrompt("a hiking log", "(none)", "", undefined, undefined, "product", ARC);
+    expect(p).toContain("PRODUCT ARC");
+    expect(p).toContain("THE ARC UNDER REVIEW");
+    expect(p).toContain("Shell + one trail.");
+    expect(p).toMatch(/MVP CUT/);
+    expect(p).toMatch(/morning after the run/);
+  });
+
+  it("forbids asking the operator about code structure, modules, and libraries", () => {
+    const p = sharpenSystemPrompt("a hiking log", "(none)", "", undefined, undefined, "product", ARC);
+    expect(p).toMatch(/Do NOT ask about code structure, module design, libraries/);
+  });
+
+  it("keeps the $TERMS/$ADRS/$QUESTIONS/$DONE contract", () => {
+    const p = sharpenSystemPrompt("a hiking log", "(none)", "", undefined, undefined, "product", ARC);
+    expect(p).toContain("$TERMS");
+    expect(p).toContain("$ADRS");
+    expect(p).toContain("$QUESTIONS");
+    expect(p).toContain("$DONE");
+  });
+});
+
 describe("sharpenSystemPrompt — fix mode", () => {
   it("fix mode tells the model to ask ONLY about reproduction, not implementation details", () => {
     const p = sharpenSystemPrompt("ball bounces off side walls instead of scoring", "(none)", "", undefined, undefined, "fix");

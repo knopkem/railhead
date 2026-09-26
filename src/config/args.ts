@@ -141,6 +141,9 @@ export interface ProductArgs {
   auto: boolean;
   verbose: boolean;
   modelOverride: string | null;
+  /** ADR 0051: boolean override for the arc interview. null = ask (interactive)
+   * or skip (auto). */
+  sharpen: boolean | null;
 }
 
 /** Parse the arguments of `railhead product`: the joined non-flag text is the
@@ -156,7 +159,7 @@ export function parseProductArgs(argv: string[]): ProductArgs {
         consumed.push(v);
         i++;
       }
-    } else if (a === "-a" || a === "--auto" || a === "-y" || a === "--yes" || a === "--verbose") {
+    } else if (a === "-a" || a === "--auto" || a === "-y" || a === "--yes" || a === "--verbose" || a === "--sharpen" || a === "--no-sharpen") {
       consumed.push(a);
     }
   }
@@ -166,6 +169,7 @@ export function parseProductArgs(argv: string[]): ProductArgs {
     auto: argv.includes("-a") || argv.includes("--auto") || argv.includes("-y") || argv.includes("--yes"),
     verbose: argv.includes("--verbose"),
     modelOverride: argValue(argv, "--model") ?? argValueFlag(argv, "-m"),
+    sharpen: parseBoolOverride(argv, "--sharpen", "--no-sharpen"),
   };
 }
 

@@ -427,4 +427,10 @@ Search by tag.
     const s = renderArcSummary(parseProductPlan("# Empty\n\n## Roadmap\n").plan);
     expect(s).toContain("every step is built or done");
   });
+
+  it("a built step blocks the frontier with a verify-me hint, not a skip-ahead", () => {
+    const s = renderArcSummary(parseProductPlan(ARC.replace("**Status:** done", "**Status:** built")).plan);
+    expect(s).toContain("step 1 — Rough MVP is built — test it, then mark it done or reopen it with feedback");
+    expect(s).not.toContain("next: step 2");
+  });
 });

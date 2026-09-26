@@ -202,11 +202,16 @@ export async function startRun(options: RunOptions): Promise<{ runId: string; st
     ? await queryReasoningCapability(options.config.model.implement)
     : false;
   await ensureProjectOpenCodePermissions(options.cwd, frameworkExternalDirsForVerify(options.config.verify), { yolo: options.config.yolo_permissions === true, contextTokens: options.config.max_context_tokens, implementModel: options.config.model.implement ?? undefined, clampReasoning: implSupportsReasoning });
+  // Read the plan identity before the run state exists: a feature plan's
+  // arc_step rides the state (ADR 0051) so the goal reviewer and the run-end
+  // finalizer know which roadmap step this run builds.
+  const origin = await readPlanOrigin(join(options.ticketsDir, ".."));
   const meta: RunMeta = {
     cwd: options.cwd,
     branch: options.branch,
     tickets_dir: options.ticketsDir,
     docs_dir: await resolveDocsRoot(options.cwd, options.ticketsDir),
+    arc_step: origin?.arc_step,
     config: options.config,
     pause_on_failure: options.pauseOnFailure,
     verbose: options.verbose ?? false,
@@ -243,7 +248,6 @@ export async function startRun(options: RunOptions): Promise<{ runId: string; st
   const parsed = await loadTickets(options.ticketsDir);
   state.tickets = parsed.map(toTicketState);
 
-  const origin = await readPlanOrigin(join(options.ticketsDir, ".."));
   const originWarnings = checkPlanOrigin(origin, parsed.map((t) => t.file));
   for (const w of originWarnings) {
     console.warn(`[plan-origin] ${w}`);

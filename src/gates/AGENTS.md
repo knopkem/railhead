@@ -11,7 +11,7 @@ Everything that judges a ticket after implementation: the shared review-agent ru
 - `visual-loop.ts` / `goal-loop.ts` / `structural-loop.ts` — cadence scheduling and round execution per gate; `owed-gates.ts` replays gates owed across a stop (ADR 0038).
 - `evidence.ts` — transcript predicates (screenshots, real interaction, app launch) used to keep reviewers honest.
 - `goal-review.ts`, `structural-review.ts`, `visual.ts`, `interaction-smoke.ts` — prompt builders and verdict parsers per gate. `goal-review.ts` owns the `$PROBE` block parser (`parseProbeBlock`) and `dropClosedFindings` (probe-closed findings are never re-found).
-- `goal-loop.ts` re-verifies previously open blockers from the probe registry before a re-review (ADR 0043 amendment); `interaction-smoke.ts` runs once per committed group boundary with a render-delta + zero-console-errors bar, scoped to the built frontier — a feature owned by a pending ticket is absent by design, so a boundary with no built interactive surface yields `$SMOKE_INCONCLUSIVE`, not a failure.
+- `goal-loop.ts` re-verifies previously open blockers from the probe registry before a re-review (ADR 0043 amendment); a feature run's goal review is scoped to its roadmap step (arc brief, roadmap, and the run state's `arc_step` description/feedback ride the prompt). `interaction-smoke.ts` runs once per committed group boundary with a render-delta + zero-console-errors bar, scoped to the built frontier — a feature owned by a pending ticket is absent by design, so a boundary with no built interactive surface yields `$SMOKE_INCONCLUSIVE`, not a failure.
 
 ## Invariants
 

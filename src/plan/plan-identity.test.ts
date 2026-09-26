@@ -129,6 +129,45 @@ describe("writePlanOrigin / readPlanOrigin (#47)", () => {
     }
   });
 
+  it("round-trips a feature plan's arc_step identity (ADR 0051)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "railhead-origin-"));
+    try {
+      await writePlanOrigin(dir, {
+        slug: "step-03-search",
+        prompt: "add search",
+        created_at: "2026-08-31T12:00:00Z",
+        ticket_files: ["01-a.md"],
+        base_sha: null,
+        arc_step: { number: 3, title: "Search" },
+      });
+      expect((await readPlanOrigin(dir))!.arc_step).toEqual({ number: 3, title: "Search" });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores a malformed arc_step instead of failing the whole origin read", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "railhead-origin-"));
+    try {
+      await writeFile(
+        join(dir, "origin.json"),
+        JSON.stringify({
+          slug: "x",
+          prompt: "p",
+          created_at: "2026-01-01T00:00:00Z",
+          ticket_files: ["01-a.md"],
+          arc_step: { number: "three", title: 7 },
+        }),
+        "utf8",
+      );
+      const origin = await readPlanOrigin(dir);
+      expect(origin).not.toBeNull();
+      expect(origin!.arc_step).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("readPlanOrigin returns null when no origin.json exists", async () => {
     const dir = await mkdtemp(join(tmpdir(), "railhead-origin-"));
     try {

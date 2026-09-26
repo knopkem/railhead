@@ -54,6 +54,14 @@ describe("docs_dir (ADR 0051)", () => {
     const state = createRunState({ cwd: "/x", branch: "run/x", tickets_dir: "/x/.scratch/add-search/issues", docs_dir: ".scratch/add-search/docs", config: cfg, pause_on_failure: false, verbose: false, quiet: false });
     expect(state.docs_dir).toBe(".scratch/add-search/docs");
   });
+
+  it("createRunState carries a feature run's arc_step identity and leaves it absent otherwise", () => {
+    const step = { number: 3, title: "Search" };
+    const feature = createRunState({ cwd: "/x", branch: "run/step-03-search", tickets_dir: "/x/.scratch/step-03-search/issues", config: cfg, pause_on_failure: false, verbose: false, quiet: false, arc_step: step });
+    expect(feature.arc_step).toEqual(step);
+    const build = createRunState({ cwd: "/x", branch: "run/x", tickets_dir: "/x/issues", config: cfg, pause_on_failure: false, verbose: false, quiet: false });
+    expect(build.arc_step).toBeUndefined();
+  });
 });
 
 describe("builder state record (ADR 0022 stage 3, #84)", () => {

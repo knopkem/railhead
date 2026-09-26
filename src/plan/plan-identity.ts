@@ -1,6 +1,7 @@
 import { writeFile, readFile } from "node:fs/promises";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { ArcStepIdentity } from "../core/product.ts";
 
 export interface PlanOrigin {
   slug: string;
@@ -13,6 +14,12 @@ export interface PlanOrigin {
    * satisfy a fresh plan's ticket titles. Legacy origin.json files without
    * the field read as null (scan everything, the old behavior). */
   base_sha: string | null;
+  /** ADR 0051: the product-arc roadmap step this plan builds (feature runs
+   * only). Persisting the identity here lets resume/run-end finish the arc
+   * transaction (mark the step `built`) without the deriving CLI process,
+   * and lets the goal reviewer judge the step, not just the derived prompt.
+   * Legacy origin.json files read as undefined. */
+  arc_step?: ArcStepIdentity;
 }
 
 const ORIGIN_FILE = "origin.json";
@@ -48,13 +55,24 @@ export async function readPlanOrigin(dir: string): Promise<PlanOrigin | null> {
   ) {
     throw new Error(`plan origin file at ${join(dir, ORIGIN_FILE)} is missing required fields (slug, created_at, ticket_files) — the plan directory may be corrupted`);
   }
+  const arcStep = readArcStep(obj.arc_step);
   return {
     slug: obj.slug,
     prompt: typeof obj.prompt === "string" ? obj.prompt : "",
     created_at: obj.created_at,
     ticket_files: (obj.ticket_files as unknown[]).filter((f): f is string => typeof f === "string"),
     base_sha: typeof obj.base_sha === "string" && obj.base_sha ? obj.base_sha : null,
+    ...(arcStep ? { arc_step: arcStep } : {}),
   };
+}
+
+/** Tolerant read of the optional arc-step identity: a malformed value is
+ * ignored (legacy/corrupt origin files keep working), never fatal. */
+function readArcStep(raw: unknown): ArcStepIdentity | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const o = raw as Record<string, unknown>;
+  if (typeof o.number !== "number" || !Number.isFinite(o.number)) return null;
+  return { number: o.number, title: typeof o.title === "string" ? o.title : "" };
 }
 
 export function checkPlanOrigin(origin: PlanOrigin | null, currentTicketFiles: string[]): string[] {

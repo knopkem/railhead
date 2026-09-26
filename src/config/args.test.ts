@@ -125,6 +125,14 @@ describe("parseProductArgs", () => {
   it("an all-flags invocation has an empty instruction (the command throws the guidance)", () => {
     expect(parseProductArgs(["-a"]).instruction).toBe("");
   });
+
+  it("reads the arc interview override and rejects both sides at once", () => {
+    expect(parseProductArgs(["vision text"]).sharpen).toBeNull();
+    expect(parseProductArgs(["vision text", "--sharpen"]).sharpen).toBe(true);
+    expect(parseProductArgs(["vision text", "--no-sharpen"]).sharpen).toBe(false);
+    expect(parseProductArgs(["vision text", "--sharpen"]).instruction).toBe("vision text");
+    expect(() => parseProductArgs(["x", "--sharpen", "--no-sharpen"])).toThrow(/mutually exclusive/);
+  });
 });
 
 describe("parseGateMode", () => {

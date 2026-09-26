@@ -18,6 +18,7 @@ vi.mock("../execute/executor.ts", async (importOriginal) => {
 import { executeOpendCode } from "../execute/executor.ts";
 import { runPlan, runSharpenSession, maybeGenerateAgentsMd, runProductSession, deriveFeaturePrompt } from "./planner.ts";
 import { writeProductPlan, renderProductPlan, type ProductPlan } from "../core/product.ts";
+import { saveContracts } from "../core/contracts.ts";
 import { writeProjectDoc, readProjectDoc } from "../core/git.ts";
 import { CHARTER_DOC } from "../context/coherence.ts";
 import type { Ticket } from "../core/ticket.ts";
@@ -367,6 +368,75 @@ describe("runPlan — two-call planning (design -> tickets)", () => {
     expect(ticketsPrompt).not.toMatch(/stand up a buildable scaffold/);
   });
 
+  it("feature mode: a feature plan carries its arc step into the gate and origin, under a stable slug (ADR 0051)", async () => {
+    const cwd = await freshCwd();
+    await writeProductPlan(cwd, {
+      name: "Trail Tracker",
+      vision: "A hiking log.",
+      workflows: "plan, record, browse.",
+      traits: "offline.",
+      stack: "plain ESM, no framework.",
+      steps: [{
+        number: 2,
+        title: "Search",
+        status: "todo",
+        description: "Search trails by name and tag.",
+        runId: null,
+        feedback: "Must hit Enter to submit.",
+      }],
+    });
+    const phases: string[] = [];
+    let gatePrompt = "";
+    mockExec.mockImplementation(async (prompt, options) => {
+      phases.push(options.phaseFile);
+      if (options.phaseFile === "plan-gate-0") {
+        gatePrompt = prompt;
+        await emitText(options.ledgerDir, options.phaseFile, "$PLAN_PASS\n$END\n");
+        return okResult();
+      }
+      await emitStaged(options, planPayload());
+      return okResult();
+    });
+    const result = await runPlan({
+      cwd,
+      prompt: "add search to the trail log",
+      model: null,
+      mode: "feature",
+      goalModel: "some/model",
+      artDirection: false,
+      arcStepNumber: 2,
+      slug: "step-02-search",
+    });
+    expect(phases).toEqual(["plan", "plan-tickets", "plan-gate-0"]);
+    // The gate judges the STEP, including the human's reopen feedback.
+    expect(gatePrompt).toContain("2 — Search");
+    expect(gatePrompt).toContain("Search trails by name and tag.");
+    expect(gatePrompt).toContain("Must hit Enter to submit.");
+    // The stable slug drives the namespace and the persisted step identity.
+    expect(result.outDir).toContain(join(".scratch", "step-02-search", "issues"));
+    const origin = JSON.parse(await readFile(join(cwd, ".scratch", "step-02-search", "origin.json"), "utf8"));
+    expect(origin.arc_step).toEqual({ number: 2, title: "Search" });
+  });
+
+  it("feature mode: a missing arc step fails loud instead of planning an untracked feature", async () => {
+    const cwd = await freshCwd();
+    await writeProductPlan(cwd, {
+      name: "Trail Tracker",
+      vision: "A hiking log.",
+      workflows: "plan.",
+      traits: "offline.",
+      stack: "plain ESM.",
+      steps: [{ number: 1, title: "MVP shell", status: "done", description: "shell", runId: null, feedback: null }],
+    });
+    mockExec.mockImplementation(async (_prompt, options) => {
+      await emitStaged(options, planPayload());
+      return okResult();
+    });
+    await expect(
+      runPlan({ cwd, prompt: "add search", model: null, mode: "feature", arcStepNumber: 9, artDirection: false }),
+    ).rejects.toThrow(/step 9 does not exist/);
+  });
+
   it("asks for the REMAINING tickets once when the decomposition output is truncated", async () => {
     const cwd = await freshCwd();
     const phases: string[] = [];
@@ -410,13 +480,45 @@ describe("runPlan — two-call planning (design -> tickets)", () => {
       await emitStaged(options, "$PRODUCT\n# Trail Tracker\n\n## Vision\nA hiking log.\n\n## Roadmap\n\n### 1 — MVP\n\n**Status:** todo\n\nShell + one trail.\n$END\n");
       return okResult();
     });
-    const plan = await runProductSession({ cwd, instruction: "a hiking log for the family", model: null });
+    const { plan, warnings, markdown } = await runProductSession({ cwd, instruction: "a hiking log for the family", model: null });
     expect(plan.name).toBe("Trail Tracker");
     expect(plan.steps[0].title).toBe("MVP");
     expect(plan.steps[0].status).toBe("todo");
+    expect(warnings).toEqual([]);
+    expect(markdown).toContain("Shell + one trail.");
     expect(prompts[0]).toContain("a hiking log for the family");
     // The session never persists: adoption is the CLI's explicit act.
     expect(await readProjectDoc(cwd, "docs/product.md")).toBeNull();
+  });
+
+  it("runProductSession gives the arc session the repo's real contracts (existing-repo framing)", async () => {
+    const cwd = await freshCwd();
+    await saveContracts(cwd, {
+      schema_version: 1,
+      entries: [{ symbol: "renderBoard", kind: "function", file: "src/board.ts", signature: "() => void" }],
+    });
+    const prompts: string[] = [];
+    mockExec.mockImplementation(async (prompt, options) => {
+      prompts.push(prompt);
+      await emitStaged(options, "$PRODUCT\n# Trail Tracker\n\n## Vision\nA hiking log.\n\n## Roadmap\n\n### 1 — MVP\n\n**Status:** todo\n\nShell.\n$END\n");
+      return okResult();
+    });
+    await runProductSession({ cwd, instruction: "a hiking log", model: null });
+    expect(prompts[0]).toContain("renderBoard");
+    expect(prompts[0]).not.toContain("no contracts index");
+  });
+
+  it("runProductSession surfaces parser warnings instead of swallowing them", async () => {
+    const cwd = await freshCwd();
+    const prompts: string[] = [];
+    mockExec.mockImplementation(async (prompt, options) => {
+      prompts.push(prompt);
+      await emitStaged(options, "$PRODUCT\n# Trail Tracker\n\n## Roadmap\n\n### 1 — MVP\n\n**Status:** maybe\n\nShell.\n$END\n");
+      return okResult();
+    });
+    const { plan, warnings } = await runProductSession({ cwd, instruction: "a hiking log", model: null });
+    expect(plan.steps[0].status).toBe("todo");
+    expect(warnings.join(" ")).toMatch(/status "maybe"/);
   });
 
   it("runProductSession steers an existing arc — the current arc rides the prompt", async () => {
@@ -440,6 +542,54 @@ describe("runPlan — two-call planning (design -> tickets)", () => {
       return okResult();
     });
     await expect(runProductSession({ cwd, instruction: "a thing", model: null })).rejects.toThrow(/no readable \$PRODUCT/);
+  });
+
+  it("runProductSession runs one revision stage when the arc interview returns answers (ADR 0051)", async () => {
+    const cwd = await freshCwd();
+    const phases: string[] = [];
+    const prompts: string[] = [];
+    mockExec.mockImplementation(async (prompt, options) => {
+      phases.push(options.phaseFile);
+      prompts.push(prompt);
+      if (options.phaseFile === "product") {
+        await emitStaged(options, "$PRODUCT\n# Trail\n\n## Vision\nrough.\n\n## Roadmap\n\n### 1 — MVP\n\n**Status:** todo\n\nRough mvp.\n$END\n");
+      } else {
+        await emitStaged(options, "$PRODUCT\n# Trail\n\n## Vision\nrough.\n\n## Roadmap\n\n### 1 — MVP\n\n**Status:** todo\n\nLog one hike.\n\n### 2 — Search\n\n**Status:** todo\n\nFind a hike.\n$END\n");
+      }
+      return okResult();
+    });
+    const seen: string[] = [];
+    const { plan } = await runProductSession({
+      cwd,
+      instruction: "a hiking log",
+      model: null,
+      refine: async (arcMarkdown) => {
+        seen.push(arcMarkdown);
+        return "Split the MVP and add search as step 2.";
+      },
+    });
+    expect(phases).toEqual(["product", "product-revise"]);
+    expect(seen[0]).toContain("Rough mvp.");
+    expect(plan.steps.map((s) => s.title)).toEqual(["MVP", "Search"]);
+    expect(prompts[1]).toContain("Split the MVP and add search as step 2.");
+  });
+
+  it("runProductSession skips the revision stage when the interview asked nothing", async () => {
+    const cwd = await freshCwd();
+    const phases: string[] = [];
+    mockExec.mockImplementation(async (_prompt, options) => {
+      phases.push(options.phaseFile);
+      await emitStaged(options, "$PRODUCT\n# Trail\n\n## Roadmap\n\n### 1 — MVP\n\n**Status:** todo\n\nShell.\n$END\n");
+      return okResult();
+    });
+    const { plan } = await runProductSession({
+      cwd,
+      instruction: "a hiking log",
+      model: null,
+      refine: async () => null,
+    });
+    expect(phases).toEqual(["product"]);
+    expect(plan.steps).toHaveLength(1);
   });
 
   it("deriveFeaturePrompt returns the derived prompt with the step, feedback, and roadmap folded in", async () => {
@@ -467,6 +617,27 @@ describe("runPlan — two-call planning (design -> tickets)", () => {
       return okResult();
     });
     expect(await deriveFeaturePrompt({ cwd, step: ARC.steps[1], plan: ARC, model: null })).toBe("Plain prompt without markers.");
+  });
+
+  it("deriveFeaturePrompt grounds integration points in the digest/learnings and folds in a reopened step's prior report (ADR 0051)", async () => {
+    const cwd = await freshCwd();
+    const step = { ...ARC.steps[1]!, runId: "run-20260101-0000" };
+    const plan = { ...ARC, steps: [ARC.steps[0]!, step] };
+    await writeProductPlan(cwd, plan);
+    await mkdir(join(cwd, ".railhead", "run-20260101-0000"), { recursive: true });
+    await writeFile(join(cwd, ".railhead", "digest.md"), "DIGEST_MARKER: board.ts owns the grid.", "utf8");
+    await writeFile(join(cwd, ".railhead", "learnings.md"), "LEARNINGS_MARKER: no TTY on this project.", "utf8");
+    await writeFile(join(cwd, ".railhead", "run-20260101-0000", "report.md"), "# Report\n\nPRIOR_MARKER: the search box rendered but did not submit.\n", "utf8");
+    const prompts: string[] = [];
+    mockExec.mockImplementation(async (prompt, options) => {
+      prompts.push(prompt);
+      await emitText(options.ledgerDir, options.phaseFile, "$FEATURE_PROMPT\nGrounded search.\n$END\n");
+      return okResult();
+    });
+    await deriveFeaturePrompt({ cwd, step, plan, model: null });
+    expect(prompts[0]).toContain("DIGEST_MARKER");
+    expect(prompts[0]).toContain("LEARNINGS_MARKER");
+    expect(prompts[0]).toContain("PRIOR_MARKER");
   });
 
   it("rejects a decomposition whose ticket carries no acceptance criteria", async () => {
@@ -600,6 +771,31 @@ describe("runPlan — two-call planning (design -> tickets)", () => {
     });
     const result = await runPlan({ cwd, prompt: "a canvas game", model: null, artDirection: false });
     expect(result.tickets.filter((t) => t.open_ended === true)).toHaveLength(1);
+  });
+
+  it("a feature plan with a held charter gets no deterministic whole-look craft ticket and no false charter warning (ADR 0051)", async () => {
+    const cwd = await freshCwd();
+    await writeProductPlan(cwd, {
+      name: "Trail Tracker",
+      vision: "A hiking log.",
+      workflows: "plan, record, browse.",
+      traits: "offline.",
+      stack: "plain ESM.",
+      steps: [{ number: 2, title: "Search", status: "todo", description: "Search trails.", runId: null, feedback: null }],
+    });
+    await writeProjectDoc(cwd, CHARTER_DOC, "HELD_CHARTER_MARKER: tokens.");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      mockExec.mockImplementation(async (_prompt, options) => {
+        await emitStaged(options, "$VERIFY\nnpm test\n$INTERFACE\nbrowser-ui\n$SMOKE\nnpm run dev\n$DESIGN\nGoal: search.\n$END\n$ARCHITECTURE\nModules: searchbox.\n$END\n$TICKETS\n[{\"title\":\"Search box\",\"what\":\"type to filter\",\"criteria\":[\"the search panel renders results as you type\"],\"group\":\"search\"}]\n");
+        return okResult();
+      });
+      const result = await runPlan({ cwd, prompt: "add search", model: null, mode: "feature", artDirection: true });
+      expect(result.tickets.some((t) => t.open_ended === true)).toBe(false);
+      expect(warn.mock.calls.join("\n")).not.toMatch(/without a coherence charter/);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("fix mode is one call: no decomposition stage, no PLAN.md", async () => {

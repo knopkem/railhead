@@ -8,6 +8,7 @@ import {
   planContinuationSystemPrompt,
   buildPlanRevisionPrompt,
   buildProductSessionPrompt,
+  buildProductRevisionPrompt,
   parseProductReply,
   buildFeatureStepPrompt,
   parseFeatureStepReply,
@@ -184,10 +185,12 @@ describe("planFeatureDesignSystemPrompt — feature mode stage 1", () => {
     expect(text).toMatch(/new capability|RESOLUTION/);
   });
 
-  it("frames verify as guarding the project's existing suite — never weaken, rename, or drop", () => {
+  it("frames verify as guarding the project's existing suite — never weaken, rename, drop, or extend the global gate", () => {
     const text = p();
     expect(text).toMatch(/ALREADY HAS a working verify suite/);
-    expect(text).toMatch(/never weaken, rename, or drop/);
+    expect(text).toMatch(/never weaken, rename, or drop/i);
+    expect(text).toMatch(/Do NOT add new checks that only pass once the feature is complete/);
+    expect(text).toMatch(/the final hardening ticket/);
   });
 
   it("uses the feature-first spine, not the whole-app launchable spine", () => {
@@ -206,8 +209,13 @@ describe("planFeatureDesignSystemPrompt — feature mode stage 1", () => {
     expect(text).toMatch(/DESIGN and \$ARCHITECTURE blocks are REQUIRED/);
   });
 
-  it("keeps art direction for features with a rendered surface", () => {
-    expect(planFeatureDesignSystemPrompt({ contractsSummary: "" })).toMatch(/ART DIRECTION/);
+  it("scopes art direction to the feature's NEW surface and defers to the held charter (ADR 0051)", () => {
+    const text = planFeatureDesignSystemPrompt({ contractsSummary: "", existingCharter: "CHARTER_HELD" });
+    expect(text).toMatch(/FEATURE ART DIRECTION/);
+    expect(text).toMatch(/DECIDED and normative/);
+    expect(text).toMatch(/do NOT restate, re-decide, or restyle/);
+    // The whole-look greenfield request never rides a feature plan.
+    expect(text).not.toMatch(/palette roles as hex values with a stated value separation/);
     expect(planFeatureDesignSystemPrompt({ contractsSummary: "", artDirection: false })).not.toMatch(/ART DIRECTION/);
   });
 });
@@ -246,9 +254,13 @@ describe("planFeatureTicketsSystemPrompt — feature mode stage 2", () => {
     expect(text).toContain("Prefer fewer dependencies");
   });
 
-  it("keeps the single open-ended art ticket rule for rendered features, droppable via artDirection", () => {
-    expect(p()).toMatch(/OPEN-ENDED CRAFT TICKET/);
-    expect(planFeatureTicketsSystemPrompt({ contractsSummary: "", artDirection: false })).not.toMatch(/OPEN-ENDED CRAFT TICKET/);
+  it("does not let a feature claim the whole product's look — craft tickets are new-surface only (ADR 0051)", () => {
+    const text = p();
+    expect(text).toMatch(/open-ended craft ticket scoped to THAT surface/i);
+    expect(text).toMatch(/genuinely NEW surface/);
+    expect(text).toMatch(/needs NO open-ended ticket/);
+    expect(text).not.toMatch(/owns everything the user sees/);
+    expect(planFeatureTicketsSystemPrompt({ contractsSummary: "", artDirection: false })).not.toMatch(/open-ended craft ticket/i);
   });
 });
 
@@ -292,6 +304,30 @@ describe("buildPlanGatePrompt / parsePlanGateVerdict (v2 issue 01)", () => {
   it("defaults to pass when the seat emitted no verdict, and prefers fail over a later pass", () => {
     expect(parsePlanGateVerdict("the model rambled and emitted nothing").verdict).toBe("pass");
     expect(parsePlanGateVerdict("$PLAN_FAIL\n[GAP] x\n$END\n$PLAN_PASS").verdict).toBe("fail");
+  });
+
+  it("stays product-free for build plans (no feature block)", () => {
+    const text = prompt();
+    expect(text).not.toMatch(/PRODUCT CONTEXT/);
+    expect(text).not.toMatch(/STEP THIS PLAN BUILDS/);
+  });
+
+  it("feature mode: carries the arc brief and the exact step, with feedback as hard constraints", () => {
+    const text = buildPlanGatePrompt({
+      originalPrompt: "add search to the trail log",
+      planMarkdown: "# PLAN\n\nGoal: search.",
+      productBrief: "## Stack\nplain ESM — decided",
+      tickets: [{ number: "01", title: "Search box", what: "type to filter", criteria: ["results filter"] }],
+      arcStep: { number: 2, title: "Search", description: "Search trails by name and tag.", feedback: "Must hit Enter to submit." },
+    });
+    expect(text).toMatch(/PRODUCT CONTEXT/);
+    expect(text).toContain("plain ESM — decided");
+    expect(text).toContain("2 — Search");
+    expect(text).toContain("Search trails by name and tag.");
+    expect(text).toContain("Must hit Enter to submit.");
+    // The scope rules tell the seat later steps are out of scope and the stack is decided.
+    expect(text).toMatch(/LATER roadmap step is out of scope/);
+    expect(text).toMatch(/DECIDED/);
   });
 });
 
@@ -709,6 +745,28 @@ describe("buildProductSessionPrompt — the product arc session", () => {
   });
 });
 
+describe("buildProductRevisionPrompt (ADR 0051)", () => {
+  const p = () => buildProductRevisionPrompt({
+    instruction: "a hiking log my family opens",
+    priorArcMarkdown: "# Trail Tracker\n\n### 1 — MVP\n\n**Status:** todo\n\nShell.",
+    findings: ["1. Keep the MVP to logging one hike."],
+  });
+
+  it("carries the operator's input, answers, and current arc, and demands a full re-emit", () => {
+    const text = p();
+    expect(text).toContain("a hiking log my family opens");
+    expect(text).toContain("Keep the MVP to logging one hike.");
+    expect(text).toContain("**Status:** todo");
+    expect(text).toContain("$PRODUCT");
+    expect(text).toContain("$END");
+    expect(text).toMatch(/COMPLETE/);
+  });
+
+  it("forbids rewriting what the answers did not touch", () => {
+    expect(p()).toMatch(/exactly as it is|EXACTLY as it is/);
+  });
+});
+
 describe("parseProductReply", () => {
   const REPLY = "Sure!\n$PRODUCT\n# Trail\n\n## Vision\nV\n\n## Roadmap\n\n### 1 — One\n\n**Status:** todo\n\ndesc\n$END\ntrailing";
 
@@ -763,6 +821,35 @@ describe("buildFeatureStepPrompt / parseFeatureStepReply — roadmap step → fe
   it("a fresh step (no feedback) says nothing about reopening", () => {
     const text = buildFeatureStepPrompt({ stepNumber: 1, stepTitle: "A", stepDescription: "d", feedback: null, productBrief: "b", roadmapSummary: "1 — A [todo]" });
     expect(text).not.toMatch(/REOPENED/);
+  });
+
+  it("requires the structured brief: goal, behaviour + morning check, real integration points, out of scope, verified by", () => {
+    const text = p();
+    expect(text).toMatch(/these five parts, in order/);
+    expect(text).toMatch(/1\. Goal:/);
+    expect(text).toMatch(/the literal check the operator will run the morning after/);
+    expect(text).toMatch(/Integration points.*named from the contracts and project state/s);
+    expect(text).toMatch(/Out of scope/);
+    expect(text).toMatch(/5\. Verified by:/);
+    expect(text).toMatch(/never invented names/);
+  });
+
+  it("carries the project state and a prior attempt when present, and omits both otherwise", () => {
+    const withState = buildFeatureStepPrompt({
+      stepNumber: 2,
+      stepTitle: "Search",
+      stepDescription: "Search trails.",
+      productBrief: "b",
+      roadmapSummary: "2 — Search [todo]",
+      projectDigest: "DIGEST_MARKER: board.ts owns the grid.",
+      learnings: "LEARNINGS_MARKER: no TTY.",
+      priorAttempt: "PRIOR_MARKER: the search box rendered but did not submit.",
+    });
+    expect(withState).toContain("DIGEST_MARKER");
+    expect(withState).toContain("LEARNINGS_MARKER");
+    expect(withState).toContain("PRIOR_MARKER");
+    const bare = buildFeatureStepPrompt({ stepNumber: 1, stepTitle: "A", stepDescription: "d", productBrief: "b", roadmapSummary: "1 — A [todo]" });
+    expect(bare).not.toMatch(/CURRENT STATE|PREVIOUS attempt/);
   });
 });
 

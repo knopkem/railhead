@@ -1,5 +1,6 @@
 import type { RailheadConfig, ResolvedModels, SeatName } from "../config/config.ts";
 import type { PhaseContext } from "./telemetry.ts";
+import type { ArcStepIdentity } from "./product.ts";
 
 export const SCHEMA_VERSION = 1;
 
@@ -199,6 +200,10 @@ export interface RunState {
    * gates must never be pointed at a stale project-root plan. Absent on
    * legacy state files: normalization defaults it to `docs`. */
   docs_dir: string;
+  /** ADR 0051: the product-arc roadmap step this run builds (feature runs
+   * only). Lets run-end/resume mark the step `built` and lets the goal
+   * reviewer judge the step; absent on build/fix runs and legacy state. */
+  arc_step?: ArcStepIdentity;
   config: RailheadConfig;
   pause_on_failure: boolean;
   verbose: boolean;
@@ -304,6 +309,9 @@ export interface RunMeta {
   /** The run's plan-docs directory; resolved by startRun (feature runs point
    * at their ticket store's sibling docs). Optional — defaults to `docs`. */
   docs_dir?: string;
+  /** ADR 0051: the arc step this run builds; read from the plan's origin.json
+   * by startRun. Optional — build/fix runs have none. */
+  arc_step?: ArcStepIdentity;
   config: RailheadConfig;
   pause_on_failure: boolean;
   verbose: boolean;
@@ -321,6 +329,7 @@ export function createRunState(meta: RunMeta): RunState {
     status: "running",
     tickets_dir: meta.tickets_dir,
     docs_dir: meta.docs_dir ?? "docs",
+    arc_step: meta.arc_step,
     config: meta.config,
     pause_on_failure: meta.pause_on_failure,
     verbose: meta.verbose,

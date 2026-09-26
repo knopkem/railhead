@@ -324,6 +324,11 @@ export function buildGoalReviewPrompt(options: {
   /** ADR 0051: the arc's step summary with statuses — what earlier runs
    * delivered and what remains planned. */
   roadmapSummary?: string | null;
+  /** ADR 0051: the exact roadmap step this run builds (title, description,
+   * human feedback). The derived feature prompt is the goal, but the step is
+   * the source of truth it was derived from — a demand the derivation dropped
+   * must still be judged. */
+  arcStep?: { number: number; title: string; description: string; feedback: string | null } | null;
 }): PhaseMessages {
   const {
     originalPrompt,
@@ -352,6 +357,7 @@ export function buildGoalReviewPrompt(options: {
     featureMode,
     productBrief,
     roadmapSummary,
+    arcStep,
   } = options;
 
   const designBlock = designDoc
@@ -382,6 +388,7 @@ ${productBrief?.trim() || "(the arc's prose sections are absent in this repo's p
 
 The product arc (document order = step order; statuses show what earlier runs delivered):
 ${roadmapSummary?.trim() || "(no roadmap steps recorded)"}
+${arcStep ? `\nTHE ROADMAP STEP THIS RUN BUILDS: ${arcStep.number} — ${arcStep.title}\n${arcStep.description.trim() || "(no step description)"}${arcStep.feedback?.trim() ? `\nThe human REOPENED this step with feedback — a demand here that the build does not satisfy is a gap:\n${arcStep.feedback.trim()}` : ""}` : ""}
 
 Scope rules:
 - Judge the FEATURE's behaviors and how it integrates with the product that exists. Do NOT demand capabilities that belong to later roadmap steps — they are out of scope by design.

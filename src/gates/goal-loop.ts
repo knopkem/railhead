@@ -279,6 +279,12 @@ export async function runGoalReview(
   // build goals keep today's shape.
   const featureMode = state.config.feature_mode === true;
   const arc = featureMode ? await readProductPlan(state.cwd) : null;
+  // ADR 0051: the run state carries the arc step identity (persisted from the
+  // plan's origin.json at startRun), so the seat judges the STEP — the derived
+  // feature prompt is only as faithful as the derivation.
+  const arcStep = arc && state.arc_step
+    ? arc.steps.find((s) => s.number === state.arc_step!.number) ?? null
+    : null;
 
   const prompt = buildGoalReviewPrompt({
     originalPrompt: state.original_prompt ?? mission,
@@ -306,6 +312,9 @@ export async function runGoalReview(
     productBrief: arc ? renderProductBrief(arc) : null,
     roadmapSummary: arc
       ? arc.steps.map((s) => `${s.number} — ${s.title} [${s.status}]`).join("\n")
+      : null,
+    arcStep: arcStep
+      ? { number: arcStep.number, title: arcStep.title, description: arcStep.description, feedback: arcStep.feedback }
       : null,
     registeredProbes: probeResults.length > 0
       ? probeResults.map((r) => ({ behavior: r.entry.behavior, command: r.entry.command, expect: r.entry.expect, status: r.status, output: r.output }))

@@ -248,11 +248,13 @@ export function renderQuestionsForTerminal(questions: SharpenQuestion[]): string
 }
 
 /** Interview mode. `build` (the default) sharpens a feature description; `fix`
- * sharpens a bug report. The difference is what the user uniquely knows: in
- * build mode the user holds domain decisions; in fix mode the user holds
- * reproduction steps. Code structure is the planner's job in both — the user
- * is never asked to locate code. */
-export type SharpenMode = "build" | "fix";
+ * sharpens a bug report; `product` sharpens a product arc (ADR 0051) — the
+ * difference is what the user uniquely knows: in build mode the user holds
+ * domain decisions; in fix mode the user holds reproduction steps; in product
+ * mode the user holds the product's direction (the MVP cut, what each roadmap
+ * step must make work, and how they will test it). Code structure is the
+ * planner's job in all modes — the user is never asked to locate code. */
+export type SharpenMode = "build" | "fix" | "product";
 
 export function sharpenSystemPrompt(
   topic: string,
@@ -290,6 +292,43 @@ When there is nothing left to ask, emit $QUESTIONS\nNONE followed by a bare $DON
 - CONTEXT.md is a glossary ONLY: no implementation detail, no spec, no scratch notes.
 - An ADR is a paragraph, not a document: context, decision, why. Skip it if any of the three gates (hard to reverse, surprising without context, genuine choice among alternatives) is not met.
 - Active domain-modeling: between rounds, re-read the answers you have collected and the terms you have resolved. If a prior answer conflicts with a resolved term or with a later answer, challenge it in your next question — surface the contradiction, do not silently accept it. When the user gives a fuzzy or imprecise answer, propose a precise canonical term in the next round rather than recording the vague one. When a domain boundary is being decided, invent a concrete edge-case scenario that stress-tests the boundary and ask the user to resolve it — do not move to the next independent question until the current concept's edges are sharp.${contextBudget ? `\nThe eventual build runs on a context window of roughly ${Math.floor(contextBudget / 1000)}k tokens — relevant if a question of scope comes up, but it does not change how you interview.` : ""}${depthLine}`;
+
+  if (mode === "product") {
+    const arcBlock = planText?.trim()
+      ? `
+THE ARC UNDER REVIEW (authoritative; the operator will see the revised arc before adopting it):
+${planText.trim()}
+
+This interview REFINES AN EXISTING PRODUCT ARC (docs/product.md), not a build plan: the arc's vision, stack, and already-decided steps stand. Ask only questions whose answers would materially CHANGE the roadmap — an MVP cut that is too big or too small, a step whose intent or ordering is ambiguous, a "how will you test this tomorrow" that the arc does not answer, a later step the operator is not actually sure about. Do NOT re-ask what the arc already decides and do NOT turn this into a plan review. A short interview (often zero questions) is the correct outcome for an arc that already decides well.`
+      : "";
+
+    return `You are interviewing the operator to sharpen a PRODUCT ARC — the durable overview a product is built across, one unattended feature run at a time. This is a relentless-but-bounded interview: ask only questions whose prerequisites are already settled (never one that depends on an answer you have not heard yet), work in rounds, and stop the moment nothing further needs asking.
+
+OPERATOR'S INPUT FOR THIS SESSION: ${topic}
+${arcBlock}
+The current known public contracts of the repo (only relevant if this is an existing codebase):
+${contractsSummary}
+${glossaryBlock}
+
+Each round, do BOTH of the following:
+
+1. Resolve vocabulary and decisions. When a term is now precise (the product's own word for a thing, not a general programming concept) or a genuinely hard-to-reverse, surprising-without-context, real-trade-off decision has just been made, emit it now — do not batch it for later. A term belongs in $TERMS only if it is specific to this product's domain: define what it IS, not what it does. Most rounds produce zero of either — that is normal.
+
+2. Ask the questions the OPERATOR alone can answer about the product's direction — the things no model can derive:
+   - THE MVP CUT: what is the smallest first step that proves the vision, and what is deliberately NOT in it?
+   - EACH STEP'S OUTCOME: what must each planned step make work, from a user's perspective — and how will the operator test it the morning after the run?
+   - ORDER AND DEPENDENCIES: does a later step actually need an earlier one, or can the order change?
+   - EXPLICIT OUTS: what is explicitly out of scope for the arc (so feature runs do not pull it in)?
+   Do NOT ask about code structure, module design, libraries, or where anything lives in the code — the stack and architecture are the planner's job in the feature runs, not the operator's.
+
+${sharedContract}
+
+Rules:
+- Ask only questions this round's answers can actually unblock.
+- Find facts yourself from what you already have (the operator's input, the arc, the glossary, the contracts); never ask the operator something you could reason out on your own.
+- If the arc already decides its roadmap well, ask NOTHING — emit $DONE on round 1. A zero-question interview is correct for a well-drawn arc.
+${sharedRules}`;
+  }
 
   if (mode === "fix") {
     return `You are interviewing the user to sharpen a BUG REPORT before it is turned into a fix ticket. The user has reported a defect; your job is to nail down what they uniquely know — REPRODUCTION — not to diagnose the cause. Diagnosing is the planner's job, which it does by reading the code itself after this interview ends.

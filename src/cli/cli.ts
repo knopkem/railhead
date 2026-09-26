@@ -54,7 +54,7 @@ import type { TicketState, RunState } from "../core/state.ts";
 import { renderStatusTable, writeReport, elapsedLabel, nowClock, renderNextActionable, renderArcSummary } from "./overview.ts";
 import { runPlan, maybeGenerateAgentsMd, runSharpenSession, runProductSession, deriveFeaturePrompt } from "../plan/planner.ts";
 import { readPlanOrigin } from "../plan/plan-identity.ts";
-import { readProductPlan, writeProductPlan, firstOpenStep, setStepStatus, PRODUCT_DOC } from "../core/product.ts";
+import { readProductPlan, writeProductPlan, nextArcAction, setStepStatus, PRODUCT_DOC, type ProductStep } from "../core/product.ts";
 import {
   GRILL_DEPTH_OPTIONS,
   DEPTH_TARGET_QUESTIONS,
@@ -67,7 +67,7 @@ import {
 import { ensureProjectGitignore, ensureProjectOpenCodePermissions, frameworkIgnoreForVerify, frameworkExternalDirsForVerify } from "../core/project-assets.ts";
 import { isRenderedSurface } from "../config/interface.ts";
 import { renderTranscript } from "./transcript.ts";
-import { loadTickets, toTicketState } from "../core/ticket.ts";
+import { loadTickets, titleSlug, toTicketState } from "../core/ticket.ts";
 import { getDefaultModel, queryReasoningCapability, modelParameterClass, queryFreeModels, assignFreeModels, fetchModelsVerbose, createInitProber, type InitProbe } from "../core/models.ts";
 import { runScreenshotDiagnostic, renderDiagnoseResult } from "./diagnose.ts";
 import { describeVisionOutcome, ensureImplementerVision, ensureVisionForGates, recordVisionCapability, runVisionProbe, visionGateRequests, type VisionCapabilityRecord } from "../execute/vision-probe.ts";
@@ -180,14 +180,18 @@ function usage() {
        [--review ...] [--vision ...] [--goal ...] [--structural ...]
        [--sharpen|--no-sharpen] [--yolo] [--verbose] [-a]
        build ONE unattended feature of the product arc (ADR 0051). With no
-        description: the first todo roadmap step in docs/product.md is derived
-        into the feature prompt; --step N forces a step. On finish the step is
-        marked built — test it, flip it to done, or reopen it with feedback.
+        description: the first eligible roadmap step in docs/product.md is
+        derived into the feature prompt; a built-but-unverified step blocks
+        the next until you mark it done or reopen it; --step N forces a step.
+        On finish the step is marked built and the arc update is committed on
+        the run branch — test it, then answer done / leave / reopen.
   product "<overall vision | steering>" [--model M] [-a] [--verbose]
+       [--sharpen|--no-sharpen]
        condense (or steer) the product arc — docs/product.md: vision, traits,
         workflows, the decided stack, and the ordered roadmap of feature
-        steps. The arc persists across months of unattended feature runs;
-        shown before adoption unless -a/--auto.
+        steps. A sharpening interview (depth picker) questions the MVP cut and
+        each step's outcome before the full arc is shown for adoption; adoption
+        is explicit unless -a/--auto.
    init [--free] [-y]                     scaffold a default railhead.json in the current directory
         all five model seats (plan/implement/review/visual/goal) are asked up front and default to
         the opencode default; each is probed once for availability, context limit, vision and reasoning.
@@ -734,7 +738,7 @@ async function ensureVisionGates<M extends { visual: GateMode; goal: GateMode }>
   throw new Error(refusals.map((r) => `vision gate refused: ${r.reason}`).join("\n"));
 }
 
-async function cmdBuild(cwd: string, prefs: PlanArgs): Promise<RunOutcome | null> {
+async function cmdBuild(cwd: string, prefs: PlanArgs, internal: { arcStepNumber?: number; slug?: string } = {}): Promise<RunOutcome | null> {
   const { prompt, auto, cont, yolo: yoloFlag, verbose, modelOverride, mode, overrides, sharpen } = prefs;
   // Planner/interview mode vocabulary is `build` | `fix`; the CLI's build/fix
   // commands map onto it (sharpen/planner prompts differ in fix mode).
@@ -959,6 +963,10 @@ async function cmdBuild(cwd: string, prefs: PlanArgs): Promise<RunOutcome | null
     persistentWorker: config.persistent_worker === true,
     infraBackoffSec: config.infra_backoff_sec,
     artDirection: config.art_direction !== false,
+    // ADR 0051: a feature run carries the roadmap step it builds (origin.json)
+    // and a stable slug so reopen attempts land in the same plan namespace.
+    arcStepNumber: internal.arcStepNumber,
+    slug: internal.slug,
     // ADR 0041: non-auto runs review the completed plan (PLAN.md) with the
     // user and replan on their feedback until they accept — the human review
     // replaces the goal-coverage audit. Auto runs keep the audit and skip
@@ -1126,13 +1134,73 @@ interface RunOutcome {
 }
 
 /**
+ * ADR 0051: run-end arc transaction. A FINISHED feature run marks its roadmap
+ * step `built` (recording the run id) and commits the marker lines on the
+ * current branch — the record must never sit uncommitted in the worktree.
+ * Runs here, not in `cmdFeature`, so `resume`/`run` finish the transaction
+ * too. Idempotent: non-feature runs and already-built/done steps are no-ops.
+ */
+async function finalizeArcStep(
+  cwd: string,
+  runId: string,
+  state: RunState,
+): Promise<{ number: number; title: string } | null> {
+  const identity = state.arc_step;
+  if (state.status !== "finished" || !identity) return null;
+  const arc = await readProductPlan(cwd);
+  const step = arc?.steps.find((s) => s.number === identity.number);
+  if (!step || step.status !== "todo") return null;
+  await setStepStatus(cwd, step.number, { status: "built", runId });
+  await git.commitPaths(cwd, [PRODUCT_DOC], `railhead: arc — step ${step.number} (${step.title}) built (${runId})`);
+  console.log(`arc: step ${step.number} — ${step.title} is built (run ${runId}); the arc update is committed on ${state.branch}.`);
+  return { number: step.number, title: step.title };
+}
+
+/**
+ * ADR 0051: the human verification gate, as a prompt. After a finished feature
+ * run the operator decides the step's fate in place — done, leave built for
+ * later, or reopen with feedback the next attempt folds in — instead of
+ * hand-editing the arc. The decision is committed immediately, so the arc
+ * record is never left dirty in the worktree.
+ */
+async function promptStepVerification(cwd: string, stepNumber: number): Promise<void> {
+  const arc = await readProductPlan(cwd);
+  const step = arc?.steps.find((s) => s.number === stepNumber);
+  if (!step) return;
+  const answer = (await askText(
+    `Did step ${step.number} ("${step.title}") do what you wanted? [done / leave / reopen <feedback>]`,
+    "leave",
+  )).trim();
+  const lower = answer.toLowerCase();
+  if (lower === "done" || lower === "d") {
+    await setStepStatus(cwd, step.number, { status: "done", runId: step.runId });
+    await git.commitPaths(cwd, [PRODUCT_DOC], `railhead: arc — step ${step.number} (${step.title}) done`);
+    console.log(`arc: step ${step.number} marked done — \`railhead feature\` builds the next step when you are ready.`);
+    return;
+  }
+  if (lower.startsWith("reopen")) {
+    const feedback = answer.replace(/^reopen\b/i, "").trim();
+    await setStepStatus(cwd, step.number, {
+      status: "todo",
+      runId: step.runId,
+      feedback: feedback || "Reopened without notes — re-run the step and compare against what was built.",
+    });
+    await git.commitPaths(cwd, [PRODUCT_DOC], `railhead: arc — step ${step.number} (${step.title}) reopened`);
+    console.log(`arc: step ${step.number} reopened with feedback — run \`railhead feature\` to rebuild it.`);
+    return;
+  }
+  console.log(`step ${step.number} left as built. Test it later, then mark it done or reopen it with feedback in ${PRODUCT_DOC}.`);
+}
+
+/**
  * ADR 0051: `railhead feature` — one unattended feature run against the
- * product arc. Without a description, the first `todo` roadmap step is
- * derived into the feature prompt; with `--step N`, that step instead. When
- * the run finishes, the step is marked `built` in the arc — the human tests
- * the outcome the next morning, flips it to `done`, or reopens it with
- * feedback that the next attempt folds in. A one-off description bypasses
- * the arc entirely (like `build`, in feature posture).
+ * product arc. Without a description, the first eligible `todo` roadmap step
+ * is derived into the feature prompt (a `built`-but-unverified step blocks
+ * the next; `--step N` overrides with a warning). When the run finishes, the
+ * step is marked `built` (committed on the run branch) — the human tests the
+ * outcome the next morning and answers done / leave / reopen-with-feedback.
+ * A one-off description bypasses the arc entirely (like `build`, in feature
+ * posture).
  */
 async function cmdFeature(cwd: string, prefs: PlanArgs): Promise<void> {
   const description = prefs.prompt.trim();
@@ -1145,14 +1213,32 @@ async function cmdFeature(cwd: string, prefs: PlanArgs): Promise<void> {
     throw new Error(`no product arc (${PRODUCT_DOC}) — pass a feature description, or design the arc with \`railhead product "<your product vision>"\` first`);
   }
   const wanted = prefs.step;
-  const step = wanted !== null ? arc.steps.find((s) => s.number === wanted) : firstOpenStep(arc);
-  if (!step) {
-    throw new Error(wanted !== null
-      ? `step ${wanted} does not exist in ${PRODUCT_DOC} (found: ${arc.steps.map((s) => s.number).join(", ") || "none"})`
-      : `every roadmap step is built or done — add the next step with \`railhead product "<steering>"\``);
-  }
-  if (step.status !== "todo") {
-    throw new Error(`step ${step.number} — ${step.title} is ${step.status}, not todo. Reopen it with your feedback in ${PRODUCT_DOC} to rebuild it.`);
+  let step: ProductStep;
+  if (wanted !== null) {
+    // ADR 0051: `--step N` is the explicit override. It may skip ahead, but
+    // the human gate is the point — say plainly which earlier step is not done.
+    const found = arc.steps.find((s) => s.number === wanted);
+    if (!found) {
+      throw new Error(`step ${wanted} does not exist in ${PRODUCT_DOC} (found: ${arc.steps.map((s) => s.number).join(", ") || "none"})`);
+    }
+    step = found;
+    if (step.status !== "todo") {
+      throw new Error(`step ${step.number} — ${step.title} is ${step.status}, not todo. Reopen it with your feedback in ${PRODUCT_DOC} to rebuild it.`);
+    }
+    const blocking = arc.steps.find((s) => s.number < step.number && s.status !== "done");
+    if (blocking) {
+      console.warn(`[arc] warning: step ${blocking.number} — ${blocking.title} is ${blocking.status}; building step ${step.number} out of order (--step ${step.number}) skips the human verification gate for it.`);
+    }
+  } else {
+    // Strict frontier: a built-but-unverified step blocks the steps after it.
+    const action = nextArcAction(arc);
+    if (action.kind === "extend") {
+      throw new Error(`every roadmap step is built or done — add the next step with \`railhead product "<steering>"\``);
+    }
+    if (action.kind === "verify") {
+      throw new Error(`step ${action.step.number} — ${action.step.title} is built and awaits your verification. Test it, then flip it to done (or reopen it with feedback) in ${PRODUCT_DOC}; \`railhead feature --step N\` can override.`);
+    }
+    step = action.step;
   }
   if (!step.description.trim()) {
     throw new Error(`step ${step.number} ("${step.title}") has no description — write one in ${PRODUCT_DOC} so the derivation has material`);
@@ -1162,7 +1248,7 @@ async function cmdFeature(cwd: string, prefs: PlanArgs): Promise<void> {
   console.log(`arc: deriving the feature prompt for step ${step.number} — ${step.title}`)
   const prompt = await deriveFeaturePrompt({
     cwd,
-    step: { number: step.number, title: step.title, description: step.description, feedback: step.feedback },
+    step: { number: step.number, title: step.title, description: step.description, feedback: step.feedback, runId: step.runId },
     plan: arc,
     model: models.plan ?? null,
     maxContextTokens: config.max_context_tokens ?? undefined,
@@ -1179,15 +1265,25 @@ async function cmdFeature(cwd: string, prefs: PlanArgs): Promise<void> {
   // per-ticket commits stay pure feature diffs (stage-by-path only — never
   // weaving in-progress worktree changes into the commit).
   await git.commitPaths(cwd, [PRODUCT_DOC], `railhead: product arc — step ${step.number} (${step.title})`);
-  const end = await cmdBuild(cwd, { ...prefs, prompt, mode: "feature" });
+  const end = await cmdBuild(cwd, { ...prefs, prompt, mode: "feature" }, {
+    arcStepNumber: step.number,
+    // Stable per-step namespace: a reopened step's next attempt reuses the
+    // same `.scratch/<slug>/` plan docs and `run/<slug>` branch instead of
+    // fragmenting a new one per derivation.
+    slug: `step-${String(step.number).padStart(2, "0")}-${titleSlug(step.title)}`,
+  });
   if (!end) {
     console.log(`arc: step ${step.number} ran under \`railhead run\` — flip it to built in ${PRODUCT_DOC} once the run finishes.`);
     return;
   }
   if (end.state.status === "finished") {
-    await setStepStatus(cwd, step.number, { status: "built", runId: end.runId });
-    console.log(`arc: step ${step.number} — ${step.title} is built (run ${end.runId}).`);
-    console.log(`Test it, then either flip it to done in ${PRODUCT_DOC}, or reopen it with your feedback and run \`railhead feature\` again.`);
+    // ADR 0051: the human gate, as a prompt. Under -a the operator is not at
+    // the terminal, so the step stays built with instructions.
+    if (prefs.auto) {
+      console.log(`Test it, then either flip it to done in ${PRODUCT_DOC}, or reopen it with your feedback and run \`railhead feature\` again.`);
+    } else {
+      await promptStepVerification(cwd, step.number);
+    }
   } else {
     console.log(`arc: step ${step.number} NOT marked built — the run ended with status "${end.state.status}". Inspect with \`railhead status\`, fix what stopped it, then run \`railhead feature\` again.`);
   }
@@ -1207,15 +1303,70 @@ async function cmdProduct(cwd: string, args: ProductArgs): Promise<void> {
   const models = resolveModels(config, args.modelOverride ? ["--model", args.modelOverride] : []);
   const existing = await readProductPlan(cwd);
   console.log(existing ? "product session — steering the existing arc" : "product session — authoring the product arc");
-  const plan = await runProductSession({
+
+  // ADR 0051: the post-condense arc interview (same discipline and depth picker
+  // as the build pipeline's planning interview). It sharpens the roadmap — the
+  // MVP cut, each step's outcome and morning-after test — before the operator
+  // adopts the arc. `-a`/`--auto` defaults to no interview; `--sharpen` opts in
+  // with auto-answered questions (depth "skip").
+  const configCap = config.sharpen_max_rounds ?? DEFAULT_SHARPEN_MAX_ROUNDS;
+  let runSharpen: boolean;
+  if (configCap <= 0) {
+    runSharpen = false;
+  } else if (args.sharpen !== null) {
+    runSharpen = args.sharpen;
+  } else if (!args.auto) {
+    runSharpen = await askYesNo(
+      "Run a sharpening interview on the arc? (questions only the operator can answer: the MVP cut, each step's outcome, how you will test it)",
+      true,
+    );
+  } else {
+    runSharpen = false;
+  }
+  let refine: ((arcMarkdown: string) => Promise<string | null>) | undefined;
+  if (runSharpen) {
+    const depth: SharpenDepth = args.auto ? "skip" : await askPick("How deep should the arc interview go?", GRILL_DEPTH_OPTIONS, 0);
+    const isSkip = depth === "skip";
+    refine = async (arcMarkdown: string) => {
+      const session = await runSharpenSession({
+        cwd,
+        model: models.plan,
+        maxContextTokens: config.max_context_tokens,
+        maxRounds: depthToMaxRounds(depth, configCap),
+        depthTarget: DEPTH_TARGET_QUESTIONS[depth],
+        verbose: args.verbose,
+        persistentWorker: config.persistent_worker === true,
+        infraBackoffSec: config.infra_backoff_sec,
+        mode: "product",
+        topic: args.instruction,
+        planText: arcMarkdown,
+        ask: isSkip
+          ? (q: SharpenQuestion) => Promise.resolve(q.recommended || "(no recommendation given)")
+          : (q: SharpenQuestion) => askAnswer(q.recommended || "(no recommendation given)"),
+        onQuestion: isSkip ? undefined : (_q: SharpenQuestion, rendered: string) => console.log("\n" + rendered),
+      });
+      if (session.exchanges.length === 0) {
+        console.log(`arc interview (${depth}): no questions — the arc already decides what the interview would ask`);
+        return null;
+      }
+      console.log(`arc interview (${depth})${isSkip ? " (auto-answered)" : ""}: ${session.exchanges.length} question(s) answered across ${session.rounds} round(s)`);
+      return renderPlanInterviewAnswers(session.exchanges);
+    };
+  }
+
+  const session = await runProductSession({
     cwd,
     instruction: args.instruction,
     model: models.plan ?? null,
     maxContextTokens: config.max_context_tokens ?? undefined,
     verbose: args.verbose,
+    refine,
   });
   console.log();
-  console.log(renderArcSummary(plan));
+  // Adoption must be of the arc's PROSE, not just its step titles: the operator
+  // is about to have every future feature run steer against this file.
+  console.log(session.markdown.trimEnd());
+  for (const w of session.warnings) console.warn(`[product] ${w}`);
   console.log();
   if (!args.auto) {
     const adopt = await askYesNo(`Adopt this arc into ${PRODUCT_DOC}? (every future \`railhead feature\` steers against it)`, true);
@@ -1224,8 +1375,9 @@ async function cmdProduct(cwd: string, args: ProductArgs): Promise<void> {
       return;
     }
   }
-  await writeProductPlan(cwd, plan);
+  await writeProductPlan(cwd, session.plan);
   console.log(`wrote ${PRODUCT_DOC}.`);
+  console.log(renderArcSummary(session.plan));
   console.log(`next: \`railhead feature\` builds the first todo step unattended. Commit ${PRODUCT_DOC} whenever the arc changes.`);
 }
 
@@ -1354,6 +1506,7 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } 
   console.log("\n" + renderStatusTable(final));
   console.log(`total time: ${elapsedLabel(final.started_at, final.updated_at)}`);
   console.log(`report: .railhead/${runId}/report.md`);
+  await finalizeArcStep(cwd, runId, final);
   return { runId, state: final };
 }
 
@@ -1522,6 +1675,7 @@ async function resumeRun(
   await writeReport(cwd, runId, final);
   console.log("\n" + renderStatusTable(final));
   console.log(`total time: ${elapsedLabel(final.started_at, final.updated_at)}`);
+  await finalizeArcStep(cwd, runId, final);
   return final;
 }
 

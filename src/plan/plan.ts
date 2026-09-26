@@ -60,6 +60,44 @@ function artDirectionTicketsBlock(input: PlanStageInput): string {
   return input.artDirection === false ? "" : `\n\n${ART_DIRECTION_TICKETS_REQUEST}`;
 }
 
+// ADR 0051/0052: in feature mode the product already has a look (the held
+// coherence charter is normative). The greenfield rules above would have every
+// feature re-author the art direction and own "everything the user sees" —
+// exactly the cross-run drift the charter exists to prevent. These scoped
+// variants ask only about the feature's NEW surface and never restyle chrome
+// the product already has. When no charter exists yet, the feature's surface
+// may establish one.
+function featureArtDirectionDesignRequest(heldCharter: boolean): string {
+  const charterLine = heldCharter
+    ? "The product's coherence contract (docs/coherence.md) is DECIDED and normative — honor it exactly; do NOT restate, re-decide, or restyle the product's existing visual identity."
+    : "No coherence contract exists yet — this feature's surface may establish it; author the `## Coherence contract` section and keep it terse and normative.";
+  return `The FEATURE ART DIRECTION requirement: IF the $INTERFACE you declare is a rendered surface (browser-ui, canvas, or native — not terminal or none), add an \`## Art direction\` section to $DESIGN scoped to THIS FEATURE's new surface ONLY: how it extends the product's existing look and what is genuinely new (its layout within the existing model, any new tokens it needs, how it reuses the shared chrome). ${charterLine} This section is DIRECTION for the art work on this feature, not a checklist the build is scored against, and it must not be turned into per-pixel acceptance criteria. Pure model/library/CLI builds (interface terminal/none): omit the section entirely.`;
+}
+
+function featureArtDirectionTicketsRequest(heldCharter: boolean): string {
+  const ownershipLine = heldCharter
+    ? "Do NOT split the surface work into per-element tickets, and do NOT claim ownership of the existing product's look: existing chrome, tokens, and screens are built and governed by docs/coherence.md."
+    : "Do NOT split the surface work into per-element tickets; the ticket owns only the new surface, and the coherence contract the design authors governs the rest.";
+  const extendLine = heldCharter
+    ? "A feature that only EXTENDS an existing surface (a new field, a new result row, a new state on a screen that exists) needs NO open-ended ticket — its look is already governed by the charter."
+    : "A feature that only EXTENDS an existing surface (a new field, a new result row, a new state on a screen that exists) needs NO open-ended ticket — its look follows the contract the design authors.";
+  return `The FEATURE ART DIRECTION requirement: IF this feature declares a rendered surface AND introduces a genuinely NEW surface (a new screen, panel, or visual system the product does not have yet), emit exactly ONE open-ended craft ticket scoped to THAT surface:
+- Emit one ticket with "open_ended": true. Its "what" is a CREATION goal for the new surface, honoring the product's coherence contract — NOT a verification task, and NOT an invitation to rework the rest of the product's look. Leave "criteria" empty, or limit it to "the app builds and runs".
+- ${ownershipLine}
+- ${extendLine}
+- The builder for this ticket iterates: run the app, capture a screenshot, read it, judge it against the section's direction and the coherence contract, and improve it until it meets the goal. Say so in "what".
+- Give it a "group" so its commit is a review checkpoint.
+Do not emit an open-ended ticket for a terminal/none interface.`;
+}
+
+function featureArtDirectionDesignBlock(input: PlanStageInput): string {
+  return input.artDirection === false ? "" : `\n\n${featureArtDirectionDesignRequest(Boolean(input.existingCharter?.trim()))}`;
+}
+
+function featureArtDirectionTicketsBlock(input: PlanStageInput): string {
+  return input.artDirection === false ? "" : `\n\n${featureArtDirectionTicketsRequest(Boolean(input.existingCharter?.trim()))}`;
+}
+
 export const QUALITY_PREFERENCES = `Quality preferences (apply when choosing technologies and structuring the plan — break ties in this direction, not as hard rules):
 - Prefer fewer dependencies: the stdlib or platform solution over a third-party package that must be installed, pinned, and learned. Add a dependency only when it saves significant work the stdlib cannot do.
 - Prefer small, focused modules with clear interfaces (deep modules: small surface, large impl). Avoid god-objects and catch-all utility files.
@@ -83,7 +121,7 @@ function glossaryBlock(existingGlossary?: string): string {
 
 const VERIFY_BLOCK = `Emit a $VERIFY block first: the shell commands that prove a ticket works (the project's build and test commands). These run after every implementer attempt across the whole project, so list ONLY commands that should pass once ANY single ticket is correctly implemented — not project-final integration checks. Per-ticket criteria belong inside each ticket, not here. Use the single word NONE if there is genuinely no automated check (very rare; almost every project has at least a build/typecheck command).`;
 
-const FEATURE_VERIFY_BLOCK = `Emit a $VERIFY block first: the shell commands that prove this feature's tickets work. The project ALREADY HAS a working verify suite — the railhead gates every ticket against the project's configured commands and refuses to start a run when that baseline is red. Emit THOSE commands (the run keeps gating with them), extended only by genuinely new checks this feature itself introduces; never weaken, rename, or drop an existing entry. List ONLY commands that should pass once ANY single ticket of this feature is correctly implemented — not product-final integration checks. Per-ticket criteria belong inside each ticket, not here. Use the single word NONE only if this feature adds no runnable check to an already-existing suite (very rare).`;
+const FEATURE_VERIFY_BLOCK = `Emit a $VERIFY block first: the project's EXISTING verify commands, copied as the project declares them. The project ALREADY HAS a working verify suite — the railhead gates every ticket against the project's configured commands and refuses to start a run when that baseline is red. Do NOT add new checks that only pass once the feature is complete: under ADR 0006 every ticket must leave the whole suite green, so a new check belongs in a ticket's own criteria (as a probe), never in the global gate; the final hardening ticket transcribes confirmed behaviours into the project's test stack at the end. Never weaken, rename, or drop an existing entry. List ONLY commands that should pass once ANY single ticket of this feature is correctly implemented — not product-final integration checks. Per-ticket criteria belong inside each ticket, not here. Use the single word NONE only if the project genuinely has no automated check.`;
 
 const INTERFACE_BLOCK = `Then emit an $INTERFACE line: how a USER operates this deliverable — a property of the thing being built, never of the language it is written in. Emit the marker, then EXACTLY ONE token on its own line — one of <browser-ui | canvas | native | terminal | none>:
 - browser-ui — a DOM app the user operates by pointing and typing (buttons, fields, menus)
@@ -258,8 +296,8 @@ ${charter.trim()}`;
 
 export function planFeatureDesignSystemPrompt(input: PlanStageInput): string {
   const charterTail = input.existingCharter?.trim()
-    ? artDirectionDesignBlock(input)
-    : `${COHERENCE_CHARTER_REQUEST}${artDirectionDesignBlock(input)}`;
+    ? featureArtDirectionDesignBlock(input)
+    : `${COHERENCE_CHARTER_REQUEST}${featureArtDirectionDesignBlock(input)}`;
   return `You are a software planner deciding how ONE FEATURE lands in an EXISTING product. The repo already runs: an entry point, a working build, and a verify suite that is green before every run starts. You do not write tickets yet: a separate pass decomposes the validated plan into tickets. Your job is to decide what THIS FEATURE IS inside that product — the experience it adds, the quality bar it clears, and how it integrates with the system that exists — so the ticket pass can order the integration.
 
 The current known public contracts of the repo (decided; new work should BUILD ON these, not duplicate them):
@@ -314,7 +352,7 @@ Rules:
 - Order the tickets so each one's prerequisites come before it.
 - ${FEATURE_SPINE_FIRST_ORDER}
 
-${QUALITY_PREFERENCES}${artDirectionTicketsBlock(input)}
+${QUALITY_PREFERENCES}${featureArtDirectionTicketsBlock(input)}
 
 ${TICKET_ARRAY_SPEC}`;
 }
@@ -379,11 +417,31 @@ export function buildPlanGatePrompt(options: {
   contractsSummary?: string;
   /** The ticket titles/what in plan order, so the seat can walk ownership. */
   tickets: { number: string; title: string; what: string; criteria: string[] }[];
+  /** ADR 0051: feature mode — the product's decided prose, so the gate knows
+   * what is settled (stack, conventions) and must not be re-demanded. */
+  productBrief?: string | null;
+  /** ADR 0051: the exact roadmap step this plan builds. The gate judges the
+   * step's demands plus integration; later steps are out of scope. */
+  arcStep?: { number: number; title: string; description: string; feedback: string | null } | null;
 }): string {
-  const { originalPrompt, planMarkdown, contractsSummary, tickets } = options;
+  const { originalPrompt, planMarkdown, contractsSummary, tickets, productBrief, arcStep } = options;
   const ticketLines = tickets.length
     ? tickets.map((t) => `- ${t.number} ${t.title}: ${t.what}`).join("\n")
     : "(the plan emitted no tickets)";
+  const featureBlock = productBrief?.trim() || arcStep
+    ? `\nPRODUCT CONTEXT — this plan builds ONE step of a larger product (read this before walking ownership):
+${productBrief?.trim() || "(the product arc's prose is absent)"}
+
+THE STEP THIS PLAN BUILDS${arcStep ? `: ${arcStep.number} — ${arcStep.title}` : ""}
+${arcStep?.description?.trim() || "(no step description)"}${arcStep?.feedback?.trim() ? `\nThe human REOPENED this step with feedback — these are hard constraints the plan must satisfy:\n${arcStep.feedback.trim()}` : ""}
+
+Feature-mode ownership rules:
+- A demand the STEP makes that no ticket delivers is a gap; a capability belonging to a LATER roadmap step is out of scope by design — do not flag it.
+- The stack, conventions, and existing architecture are DECIDED: do not demand a re-decision, scaffolding, or a second entry point.
+- Integration with the existing product is in scope: a plan that regresses or ignores the seams it must dock into is a gap.
+
+`
+    : "";
   return `You are the PLAN GATE in an unattended build. A planner produced the plan below; no code has been written yet. Your one job: walk the ORIGINAL GOAL's demands (every feature, behaviour, constraint, and quality adjective) and decide whether the plan OWNS each of them — a named ticket whose deliverable produces it, or an explicit plan mechanism.
 
 You are not judging wording, style, or ticket size. You are looking for SCOPE GAPS: a demand the goal makes that no ticket or plan mechanism delivers — the class of gap that otherwise surfaces half an hour into a run when a reviewer flags a missing owner. A demand mapped to a vague deliverable ("polish later", "handle it in the UI ticket") is a gap.
@@ -394,7 +452,7 @@ ${originalPrompt}
 THE PLAN AS THE HUMAN WILL READ IT:
 ${planMarkdown}
 
-${contractsSummary ? `CURRENT CONTRACTS (what already exists in the repo):\n${contractsSummary}\n\n` : ""}TICKET OWNERSHIP MAP (the walk list — what each ticket produces):
+${contractsSummary ? `CURRENT CONTRACTS (what already exists in the repo):\n${contractsSummary}\n\n` : ""}${featureBlock}TICKET OWNERSHIP MAP (the walk list — what each ticket produces):
 ${ticketLines}
 
 Also apply the ordering rule: the first one or two groups must deliver a launchable, visibly correct vertical slice, not only invisible plumbing. A plan whose entire visible surface arrives in its last group is a gap.
@@ -455,6 +513,32 @@ ${priorPlanText}
 Revise the plan so every answer is genuinely honored: name the concrete deliverable (module, technique, artifact, measured property) each answer demands, and make the architecture cover it. Do not argue with the answers in prose.
 
 Re-emit the COMPLETE plan in the same output shape ($VERIFY, $INTERFACE, $SMOKE, $DESIGN, $ARCHITECTURE), each block exactly once, with $END after each markdown block.`;
+}
+
+/** ADR 0051: the revision call after the product-arc interview. The operator's
+ * answers change the arc; the session re-emits the COMPLETE arc in the on-disk
+ * shape, preserving step numbers, statuses, run ids, and prose the answers do
+ * not touch. */
+export function buildProductRevisionPrompt(opts: {
+  instruction: string;
+  priorArcMarkdown: string;
+  findings: string[];
+}): string {
+  const { instruction, priorArcMarkdown, findings } = opts;
+  return `The product arc was refined in an interview with the operator; their answers below change or add to it.
+
+THE OPERATOR'S ORIGINAL INPUT:
+${instruction}
+
+THE OPERATOR'S ANSWERS:
+${findings.map((f, i) => `${i + 1}. ${f}`).join("\n")}
+
+YOUR CURRENT ARC:
+${priorArcMarkdown}
+
+Revise the arc so every answer is genuinely honored: re-scope the affected roadmap step(s), adjust their order, and fold the answers into the step descriptions and the decided prose. Keep every step number, status, run id, and untouched paragraph EXACTLY as it is — this is a revision, not a rewrite. Do not argue with the answers in prose.
+
+Re-emit the COMPLETE arc in the same output shape — the $PRODUCT marker, the arc, then $END.`;
 }
 
 /** The user-driven revision call (interactive plan review): hand the plan
@@ -911,19 +995,34 @@ export interface FeatureStepPromptInput {
   contractsSummary?: string;
   existingCharter?: string;
   existingGlossary?: string;
+  /** The project's rolling architectural-state digest (ADR 0018) — what the
+   * repo actually looks like now, so integration points are grounded. */
+  projectDigest?: string;
+  /** Project learnings (tooling/environment facts from prior phases). */
+  learnings?: string;
+  /** The previous run's report, when the step was reopened after a build. */
+  priorAttempt?: string | null;
 }
 
 export function buildFeatureStepPrompt(input: FeatureStepPromptInput): string {
   const feedbackBlock = input.feedback?.trim()
     ? `\n\nThe step was REOPENED by the human with this feedback — fold it in as hard constraints on the feature prompt:\n${input.feedback.trim()}\n`
     : "";
-  return `You turn ONE roadmap step of a product arc into the feature prompt that \`railhead feature\` will plan from and build unattended. Write it as the operator would have written it if they had to write a prompt themselves — complete, self-contained, and specific to this step. It must not require knowledge beyond the arc.
+  const stateBlock = input.projectDigest?.trim() || input.learnings?.trim()
+    ? `\nThe project's CURRENT STATE (use it to name real integration points — do not invent seams):
+${input.projectDigest?.trim() ? `\nArchitectural state:\n${input.projectDigest.trim()}\n` : ""}${input.learnings?.trim() ? `\nEnvironment/tooling learnings:\n${input.learnings.trim()}\n` : ""}`
+    : "";
+  const priorBlock = input.priorAttempt?.trim()
+    ? `\nThe PREVIOUS attempt at this step (the human tested it and reopened the step) — the prompt must say what to keep and what to change:
+${input.priorAttempt.trim()}\n`
+    : "";
+  return `You turn ONE roadmap step of a product arc into the feature prompt that \`railhead feature\` will plan from and build unattended. Write it as the operator would have written it if they had to write a prompt themselves — complete, self-contained, and specific to this step. It must not require knowledge beyond the arc and the repo state below.
 
 The product's decided context (the stack and all conventions are SETTLED — the prompt inherits them, never proposes new ones):
 ${input.productBrief}
 ${input.existingGlossary?.trim() ? `\nThe project's domain glossary (CONTEXT.md) — use these words exactly:\n${input.existingGlossary.trim()}\n` : ""}
 ${input.contractsSummary ? `\nThe repo's known public contracts (decided; the feature must build on these):\n${input.contractsSummary}\n` : ""}
-${input.existingCharter?.trim() ? `\nThe product's coherence contract is DECIDED and rides along automatically — the prompt need not restate visual tokens, only surface-specific direction the contract does not cover.\n` : ""}
+${input.existingCharter?.trim() ? `\nThe product's coherence contract is DECIDED and rides along automatically — the prompt need not restate visual tokens, only surface-specific direction the contract does not cover.\n` : ""}${stateBlock}${priorBlock}
 The arc so far (document order IS execution order):
 ${input.roadmapSummary}
 
@@ -931,11 +1030,13 @@ The roadmap step to turn into a feature prompt — ${input.stepNumber} — ${inp
 
 ${input.stepDescription}${feedbackBlock}
 
-Rules for the prompt text:
-- State what the step makes work END-TO-END from the user's perspective — the behavior a person tests the morning after the run, not an implementation list.
-- Name the integration points the feature relies on (the existing app shell, the contracts it consumes) as "build on X", so the planner sees the seams a feature must dock into.
-- Say what is explicitly OUT of scope (later steps) so the unattended run does not pull the whole product in.
-- Concrete and checkable where the step implies acceptance; do not invent scope beyond the step. Prototype-quality is acceptable — the arc's early steps exist to be TESTED by the human.
+Rules for the prompt text — it must contain these five parts, in order, clearly labeled:
+1. Goal: one sentence on what this step adds to the product.
+2. The behaviour: what the user can do end-to-end when this step is built, and the literal check the operator will run the morning after the run to confirm it.
+3. Integration points: the existing modules/screens/seams this feature docks into, named from the contracts and project state above ("build on X") — never invented names.
+4. Out of scope: the later roadmap steps and anything this step deliberately does not cover, so the unattended run does not pull the whole product in.
+5. Verified by: the observable acceptance — what a person can see working, plus any edge case the step implies.
+Keep it concrete and checkable; do not invent scope beyond the step. Prototype-quality is acceptable — the arc's early steps exist to be TESTED by the human.
 
 Emit your reply in EXACTLY this shape — the marker, the prompt text, then $END, no other prose, no code fences:
 

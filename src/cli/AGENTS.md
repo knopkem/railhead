@@ -4,7 +4,7 @@ The command entry point and everything that renders to a human.
 
 ## Seams
 
-- `cli.ts` — `main` dispatch (`init`/`build`/`fix`/`feature`/`product`/`run`/`resume`/`status`/`next`/`log`/`reset`/`diagnose`), interactive prompts, usage text, wiring of config/policy/recovery/run. Bundled by esbuild to `dist/cli.js`. `cmdFeature` owns the arc transaction: derive the first todo step → build → mark the step `built` only when the run finishes (run outcomes come back as `RunOutcome` from `cmdRun`/`cmdBuild`).
+- `cli.ts` — `main` dispatch (`init`/`build`/`fix`/`feature`/`product`/`run`/`resume`/`status`/`next`/`log`/`reset`/`diagnose`), interactive prompts, usage text, wiring of config/policy/recovery/run. Bundled by esbuild to `dist/cli.js`. `cmdFeature` enforces the strict arc frontier (a `built` step blocks the next; `--step N` overrides with a warning) and asks done / leave / reopen-with-feedback after a finished run; `finalizeArcStep` marks the step `built` and commits the arc update on the run branch from `cmdRun`/`resumeRun` (so `resume`/`run` finish the transaction too). `cmdProduct` runs the condense, the optional arc interview, and shows the full arc prose before adoption.
 - `overview.ts` — status table, run report (`buildReport`, `writeReport`), `renderNextActionable` (the next ready ticket in order), `renderArcSummary` (the product arc's status view), and `nowClock`.
 - `live.ts` — one-line live event rendering during a run.
 - `transcript.ts` — full phase transcript for `railhead log`.
