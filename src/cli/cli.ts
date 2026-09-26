@@ -19,8 +19,10 @@ import {
   presetGateModes,
   presetRunsSharpen,
   queryOpencodeContextLimit,
+  querySeatContextWindows,
   resolveModels,
   resolveStepBudget,
+  seatContextCeilings,
   updateConfig,
   warnIfOversightModelIsLocal,
   type GateMode,
@@ -51,6 +53,7 @@ import {
 import type { TicketState, RunState } from "../core/state.ts";
 import { renderStatusTable, writeReport, elapsedLabel, nowClock, renderNextActionable } from "./overview.ts";
 import { runPlan, maybeGenerateAgentsMd, runSharpenSession } from "../plan/planner.ts";
+import { readPlanOrigin } from "../plan/plan-identity.ts";
 import {
   GRILL_DEPTH_OPTIONS,
   DEPTH_TARGET_QUESTIONS,
@@ -66,8 +69,9 @@ import { renderTranscript } from "./transcript.ts";
 import { loadTickets, toTicketState } from "../core/ticket.ts";
 import { getDefaultModel, queryReasoningCapability, modelParameterClass, queryFreeModels, assignFreeModels, fetchModelsVerbose, createInitProber, type InitProbe } from "../core/models.ts";
 import { runScreenshotDiagnostic, renderDiagnoseResult } from "./diagnose.ts";
-import { describeVisionOutcome, ensureImplementerVision, ensureVisionForGates, recordVisionCapability, runVisionProbe, visionGateRequests } from "../execute/vision-probe.ts";
+import { describeVisionOutcome, ensureImplementerVision, ensureVisionForGates, recordVisionCapability, runVisionProbe, visionGateRequests, type VisionCapabilityRecord } from "../execute/vision-probe.ts";
 import { configureProvider } from "../execute/provider-health.ts";
+import { configureContextGuard } from "../execute/executor.ts";
 import { resumeRefusal } from "../core/halt.ts";
 
 export async function main(argv: string[]): Promise<void> {
@@ -297,6 +301,21 @@ export function visionCapabilityWarnings(seats: readonly InitSeatProbe[]): strin
 /** Judgment seats are 27B+ minimum per ADR 0015; `extract` is the narrow seat (9B OK). */
 const JUDGMENT_SEATS = ["plan", "implement", "review", "visual", "goal"] as const;
 const JUDGMENT_MIN_B = 27;
+
+/** Operator-facing lines for the implement seat's probe result. The gates'
+ * probe is announced by `ensureVisionGates`; this seat's is otherwise silent,
+ * and a silent "blind" is exactly how a false negative disabled the visual
+ * self-check for a whole run. Pure. */
+export function implementerVisionLines(record: VisionCapabilityRecord | null): string[] {
+  if (!record) return [];
+  if (record.reads_images) {
+    return [`vision probe: implement model ${record.model} can read images (verified ${record.verified_at})`];
+  }
+  if (record.probe_inconclusive) {
+    return [`vision probe: implement model ${record.model} could not be verified (no image block came back) — visual self-checks stay off`];
+  }
+  return [`vision probe: implement model ${record.model} cannot read images — visual self-checks will be skipped`];
+}
 
 function warnIfWeakerThanImplement(
   seat: "review" | "goal",
@@ -595,7 +614,11 @@ async function cmdInit(cwd: string, yes: boolean = false, free: boolean = false)
     }
     process.stderr.write(`FAILED — ${describeVisionOutcome(outcome)}\n`);
     if (role === "implement") {
-      console.log(`warning: the implementer cannot read screenshots — visual self-checks will be skipped; configure a vision-capable model.implement if you want them.`);
+      if (outcome.inconclusive) {
+        console.log(`warning: the vision probe could not verify the implementer's image reading (no image block came back) — visual self-checks stay off until a probe passes.`);
+      } else {
+        console.log(`warning: the implementer cannot read screenshots — visual self-checks will be skipped; configure a vision-capable model.implement if you want them.`);
+      }
     } else {
       console.log(`warning: ${role} review will be REFUSED at plan/run time until model.${role} can read images (or ${role}_review.mode is "off").`);
     }
@@ -719,11 +742,11 @@ async function cmdBuild(cwd: string, prefs: PlanArgs): Promise<void> {
   if (contextBudget == null) {
     const defaultBudget = detectedLimit ?? DEFAULT_CONTEXT_TOKENS;
     const hint = detectedLimit
-      ? ` (detected from opencode: ${(detectedLimit / 1000).toFixed(0)}k)`
-      : ` (default: ${(DEFAULT_CONTEXT_TOKENS / 1000).toFixed(0)}k — see ADR 0014)`;
+      ? ` (opencode's model limit.context: ${(detectedLimit / 1000).toFixed(0)}k — lower it there to leave your server headroom)`
+      : ` (default: ${(DEFAULT_CONTEXT_TOKENS / 1000).toFixed(0)}k — no opencode model limit detected; see ADR 0014)`;
     if (auto) {
       contextBudget = defaultBudget;
-      console.log(`context budget: ${(contextBudget / 1000).toFixed(0)}k${detectedLimit ? " (detected)" : " (default)"}${detectedLimit ? "" : " — no max_context_tokens in railhead.json"}`);
+      console.log(`context budget: ${(contextBudget / 1000).toFixed(0)}k ${detectedLimit ? "(opencode's model limit.context — lower it there to leave your server headroom)" : "(default — no opencode model limit detected)"}`);
     } else {
       contextBudget = await askNumber(
         `No max context given${hint}. Set the context budget (tokens)?`,
@@ -883,8 +906,12 @@ async function cmdBuild(cwd: string, prefs: PlanArgs): Promise<void> {
 
   // Issue #134: install the declared provider health probe and warn about
   // disabled timeouts before planning spawns any phase; `runLoop` installs
-  // the same config for the run half.
-  configureProvider(config.provider, cwd);
+  // the same config for the run half. The warning is scoped to the providers
+  // the resolved seats actually reach.
+  configureProvider(config.provider, cwd, models);
+  // ADR 0014 amendment: the plan phases honor the same request-ceiling guard
+  // mode as the run phases (telemetry-only unless `context_guard: "kill"`).
+  configureContextGuard(config.context_guard);
   const { outDir, tickets: ordered, verify } = await runPlan({
     cwd,
     prompt: enrichedPrompt,
@@ -1067,16 +1094,18 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } 
 
   const config = await loadConfig(cwd);
   if (maxRetriesRaw) config.max_retries = Number(maxRetriesRaw);
-  // Issue #134: install the declared provider health probe and warn once about
-  // providers whose request timeouts are all disabled — the shape that let the
-  // snake run's wedged request reach the stall guard.
-  configureProvider(config.provider, cwd);
   // Per-gate cadence overrides (--review/--vision/--goal/--structural, issue
   // #73). --review with a gate-mode value is a code-review override; with a
   // model name it is the review-seat model override (legacy) — the model-seat
   // filter below drops only the gate-mode uses so both keep working.
   const { overrides } = args;
   applyModelOverrides(config.model, modelSeatFlags(rest));
+  const visionModels = resolveModels(config, modelSeatFlags(rest));
+  // Issue #134: install the declared provider health probe and warn once about
+  // providers whose request timeouts are all disabled — the shape that let the
+  // snake run's wedged request reach the stall guard. The warning is scoped to
+  // models a resolved seat actually uses.
+  configureProvider(config.provider, cwd, visionModels);
 
   const gateModes = {} as Partial<Record<GateName, GateMode>>;
   for (const gate of GATES.map(([g]) => g)) {
@@ -1098,7 +1127,6 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } 
     visual: (config.visual_review?.mode ?? "off") as GateMode,
     goal: (config.goal_review?.mode ?? "off") as GateMode,
   };
-  const visionModels = resolveModels(config, modelSeatFlags(rest));
   if (opts.fromPlan !== true) {
     visionModes = await ensureVisionGates(cwd, visionModes, visionModels, config);
   }
@@ -1109,7 +1137,8 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } 
   // current-version record and skips models a gate probe already covered.
   if (isRenderedSurface(config.projectInterface)) {
     const probed = new Set(visionGateRequests(visionModes, visionModels).map((r) => r.model).filter((m): m is string => m !== null));
-    await ensureImplementerVision({ cwd, model: visionModels.implement, skip: probed, maxContextTokens: config.max_context_tokens });
+    const implVision = await ensureImplementerVision({ cwd, model: visionModels.implement, skip: probed, maxContextTokens: config.max_context_tokens });
+    for (const line of implementerVisionLines(implVision)) console.log(line);
   }
 
   const branch = assembleBranch(cwd, ticketsDir);
@@ -1198,8 +1227,8 @@ async function cmdResume(cwd: string, runIdArg?: string): Promise<void> {
   // config frozen at startRun, and reading only that silently discards any edit
   // made between cancel and resume.
   state.config = await loadConfig(cwd);
-  configureProvider(state.config.provider, cwd);
   state._models = resolveModels(state.config, []);
+  configureProvider(state.config.provider, cwd, state._models);
   await detectContextLimit(state);
   // ADR 0036: a resume that still owes a vision-dependent gate gets the same
   // refusal as a fresh run — an interrupted run is not a reason to judge blind.
@@ -1213,7 +1242,8 @@ async function cmdResume(cwd: string, runIdArg?: string): Promise<void> {
   resumeModes = await ensureVisionGates(cwd, resumeModes, state._models, state.config);
   if (isRenderedSurface(state.config.projectInterface)) {
     const probed = new Set(visionGateRequests(resumeModes, state._models).map((r) => r.model).filter((m): m is string => m !== null));
-    await ensureImplementerVision({ cwd, model: state._models.implement, skip: probed, maxContextTokens: state.config.max_context_tokens });
+    const implVision = await ensureImplementerVision({ cwd, model: state._models.implement, skip: probed, maxContextTokens: state.config.max_context_tokens });
+    for (const line of implementerVisionLines(implVision)) console.log(line);
   }
   await resumeRun(cwd, runId, dir, state);
 }
@@ -1232,16 +1262,26 @@ function printHaltRefusal(path: string, reason: string): void {
  * `state._effectiveContextTokens` so the run loop uses the real ceiling, not
  * a stale config value that may exceed what the model actually supports. */
 async function detectContextLimit(state: import("../core/state.ts").RunState): Promise<void> {
-  const implModel = state._models?.implement ?? null;
-  const detected = implModel !== null && implModel !== DEFAULT_MODEL
-    ? await queryOpencodeContextLimit(implModel)
-    : await queryOpencodeContextLimit(null);
+  const models = state._models;
+  const windows = models ? await querySeatContextWindows(models) : {};
+  const detected = windows.implement ?? null;
   const { budget, source } = effectiveContextTokens(state.config.max_context_tokens, detected);
   state._effectiveContextTokens = budget;
+  state._seatContextTokens = models ? seatContextCeilings(models, windows, state.config.max_context_tokens) : undefined;
   if (source === "model") {
-    console.log(`context budget: ${(budget / 1000).toFixed(0)}k (clamped to model's actual context window)`);
-  } else if (source === "config" && state.config.max_context_tokens && detected !== null && state.config.max_context_tokens > detected) {
-    console.log(`WARNING: railhead.json max_context_tokens (${state.config.max_context_tokens}) exceeds the model's actual context window (${detected}) — using ${budget} instead.`);
+    if (state.config.max_context_tokens && detected !== null && state.config.max_context_tokens > detected) {
+      console.log(`WARNING: railhead.json max_context_tokens (${state.config.max_context_tokens}) exceeds the model's actual context window (${detected}) — using ${budget} instead.`);
+    } else {
+      console.log(`context budget: ${(budget / 1000).toFixed(0)}k (from opencode's model limit.context — lower it there to leave your server headroom)`);
+    }
+  } else if (source === "default") {
+    console.log(`context budget: ${(budget / 1000).toFixed(0)}k (default — no opencode model limit detected)`);
+  }
+  const perSeat = Object.entries(state._seatContextTokens ?? {})
+    .filter(([, seatBudget]) => seatBudget !== budget)
+    .map(([seat, seatBudget]) => `${seat} ${Math.round(seatBudget! / 1000)}k`);
+  if (perSeat.length > 0) {
+    console.log(`request ceilings (per seat, from each model's window): ${perSeat.join(", ")}`);
   }
 }
 
@@ -1260,11 +1300,12 @@ async function resumeRun(
   state: RunState,
 ): Promise<void> {
   const head = await git.headCommit(cwd).catch(() => "");
+  const origin = await readPlanOrigin(join(state.tickets_dir, "..")).catch(() => null);
+  const subjects = new Set(head ? await git.commitSubjectsSince(cwd, origin?.base_sha ?? null) : []);
   const commitLockup = new Map<string, string>();
   for (const t of state.tickets) {
     if (t.status !== "in_progress" && t.status !== "ready") continue;
-    const exists = await git.commitMessageExists(cwd, `${t.number} — ${t.title}`);
-    if (exists && head) commitLockup.set(t.file, head);
+    if (head && subjects.has(`${t.number} — ${t.title}`)) commitLockup.set(t.file, head);
   }
   let recovered = reconcileCommittedButUnsaved(state, (t) => commitLockup.get(t.file));
 

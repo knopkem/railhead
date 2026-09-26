@@ -15,7 +15,7 @@ import { loadTickets, toTicketState, renderTicket, type Ticket } from "../core/t
 import { readPlanOrigin, checkPlanOrigin, readPlanWallMs } from "../plan/plan-identity.ts";
 import { replanFromCheckpoint } from "../gates/replan.ts";
 import type { BlockReport } from "../core/blocked.ts";
-import { describeExecFailure, executeOpendCode, executeFreshPhase, killActiveChild, withPersistentWorker, startPersistentWorker, stopPersistentWorker } from "./executor.ts";
+import { describeExecFailure, executeOpendCode, executeFreshPhase, killActiveChild, withPersistentWorker, startPersistentWorker, stopPersistentWorker, configureContextGuard } from "./executor.ts";
 import { baseSessionId, ensureBaseSession, forkPhase } from "./base-session.ts";
 import { setProviderHealth } from "./provider-health.ts";
 import { withFailureLadder, withFailureLadderOnThrow, PhaseFailure, evidenceFromResult, SPIRAL_COMPACTION_THRESHOLD, type FailureEvidence } from "./failure-ladder.ts";
@@ -32,7 +32,7 @@ import { review, reviewSummary, severityOf, stripCompileClaimsWhenGreen, changed
 import { kickoffPerTicketVisualReview, joinPendingVisualReview, visualReviewLoop } from "../gates/visual-loop.ts";
 import { addPendingCheckpoint } from "../core/pending-checkpoints.ts";
 import { runCommandFromVerify } from "../gates/visual.ts";
-import { buildInteractionSmokePrompt, parseInteractionSmokeVerdict } from "../gates/interaction-smoke.ts";
+import { buildInteractionSmokePrompt, parseInteractionSmokeVerdict, type InteractionSmokeScope } from "../gates/interaction-smoke.ts";
 import { interactionSmokePassGap, parseToolCalls } from "../gates/evidence.ts";
 import { touchesVisualSurface } from "../context/surface.ts";
 import { goalReviewAtCheckpoint, goalReviewAtRunEnd, goalCheckpointsToFire } from "../gates/goal-loop.ts";
@@ -43,7 +43,7 @@ export { detectGroupCheckpoints } from "../gates/goal-loop.ts";
 // Re-exported so run.ts's historical surface (and run.test.ts's import) keeps
 // working — the function's home is corrective.ts.
 export { nextTicketNumber } from "../gates/corrective.ts";
-import { CEILING_FRACTION, DEFAULT_MAX_REPLANS, DEFAULT_MODEL, codeReviewRunsMidRun, contextBudget, effectiveContextTokens, firesAtRunEnd, firesMidRun, goalFiresCheckpointsMidRun, interactionSmokeEnabled, queryOpencodeContextLimit, resolveModels, severityTriggersRetry, visualFiresAtRunEnd, type CheckpointGranularity } from "../config/config.ts";
+import { DEFAULT_MAX_REPLANS, DEFAULT_MODEL, codeReviewRunsMidRun, contextBudget, effectiveContextTokens, firesAtRunEnd, firesMidRun, goalFiresCheckpointsMidRun, interactionSmokeEnabled, querySeatContextWindows, resolveModels, seatContextBudget, seatContextCeilings, severityTriggersRetry, visualFiresAtRunEnd, type CheckpointGranularity } from "../config/config.ts";
 import { analyzePhase, summarizePhaseFiles } from "../core/telemetry.ts";
 import { advanceRetry, INITIAL_COUNTERS, type GateCounters, type GateLimits } from "../gates/gate.ts";
 import { ensureProjectGitignore, ensureProjectOpenCodePermissions, frameworkExternalDirsForVerify, detectFramework, frameworkSmokeRun, RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
@@ -181,20 +181,24 @@ export async function startRun(options: RunOptions): Promise<{ runId: string; st
   const state = createRunState(meta);
   state._models = resolveModels(options.config, []);
 
-  const implModel = state._models.implement;
-  const detected = implModel !== null && implModel !== DEFAULT_MODEL
-    ? await queryOpencodeContextLimit(implModel)
-    : await queryOpencodeContextLimit(null);
+  const windows = await querySeatContextWindows(state._models);
+  const detected = windows.implement ?? null;
   const { budget: effectiveBudget, source } = effectiveContextTokens(options.config.max_context_tokens, detected);
   state._effectiveContextTokens = effectiveBudget;
-  if (source === "default") {
-    const window = detected !== null ? `${(detected / 1000).toFixed(0)}k` : "nominal";
-    console.log(`request ceiling: ${(effectiveBudget / 1000).toFixed(0)}k — the largest request a phase may send (default ${Math.round(CEILING_FRACTION * 100)}% of the model's ${window} window)`);
-  } else if (source === "config") {
+  state._seatContextTokens = seatContextCeilings(state._models, windows, options.config.max_context_tokens);
+  if (source === "config") {
     console.log(`request ceiling: ${(effectiveBudget / 1000).toFixed(0)}k (from railhead.json)`);
+  } else if (source === "model" && options.config.max_context_tokens && detected !== null && options.config.max_context_tokens > detected) {
+    console.log(`WARNING: railhead.json request_ceiling_tokens (${options.config.max_context_tokens}) exceeds the model's ${(detected / 1000).toFixed(0)}k window — clamping to ${(effectiveBudget / 1000).toFixed(0)}k. A request ceiling is a request size, not server capacity; set it below the window.`);
+  } else if (source === "model") {
+    console.log(`request ceiling: ${(effectiveBudget / 1000).toFixed(0)}k — the model's configured limit (lower opencode's model limit.context for server headroom)`);
   } else {
-    console.log(`WARNING: railhead.json request_ceiling_tokens (${options.config.max_context_tokens}) exceeds the model's ${(detected! / 1000).toFixed(0)}k window — clamping to ${(effectiveBudget / 1000).toFixed(0)}k. A request ceiling is a request size, not server capacity; set it below the window.`);
+    console.log(`request ceiling: ${(effectiveBudget / 1000).toFixed(0)}k (default — no opencode model limit detected; set a model limit.context or railhead.json request_ceiling_tokens)`);
   }
+  const perSeat = Object.entries(state._seatContextTokens)
+    .filter(([, budget]) => budget !== effectiveBudget)
+    .map(([seat, budget]) => `${seat} ${Math.round(budget! / 1000)}k`);
+  if (perSeat.length > 0) console.log(`per-seat request ceilings: ${perSeat.join(", ")}`);
 
   const runId = newRunId();
   const ledger = ledgerDir(options.cwd, runId);
@@ -218,10 +222,13 @@ export async function startRun(options: RunOptions): Promise<{ runId: string; st
   // rather than recognized as already done.
   const head = await git.headCommit(options.cwd).catch(() => "");
   if (head) {
+    // Scoping matters on long-lived repos: only the plan's own commits (its
+    // base_sha..HEAD range) may satisfy a ticket title, never commits that
+    // happened to carry the same "NN — Title" years earlier.
+    const subjects = new Set(await git.commitSubjectsSince(options.cwd, origin?.base_sha ?? null));
     const commitLockup = new Map<string, string>();
     for (const t of state.tickets) {
-      const exists = await git.commitMessageExists(options.cwd, `${t.number} — ${t.title}`);
-      if (exists) commitLockup.set(t.file, head);
+      if (subjects.has(`${t.number} — ${t.title}`)) commitLockup.set(t.file, head);
     }
     const reconciled = reconcileCommittedButUnsaved(state, (t) => commitLockup.get(t.file));
     state.tickets = reconciled.tickets;
@@ -343,6 +350,9 @@ async function runLoopInner(state: RunState, ledger: string, onUpdate?: () => vo
   // for every phase in this process. The startup timeout warnings are logged
   // once by the CLI, which owns process-startup diagnostics.
   setProviderHealth(state.config.provider);
+  // ADR 0014 amendment: install the run's request-ceiling guard mode (the
+  // default is telemetry-only; `context_guard: "kill"` opts into the kill).
+  configureContextGuard(state.config.context_guard);
   const cleanupSignals = installSignalHandlers(state, ledger);
   // gh: replay the gates a prior stop left owed — a per-ticket visual review
   // the process died before joining, and any post-commit group checkpoint the
@@ -502,7 +512,7 @@ async function runLoopInner(state: RunState, ledger: string, onUpdate?: () => vo
   await writeState(ledger, state);
   const summaryResult = await withFailureLadderOnThrow(
     () => writeRunSummary(state, ledger),
-    { backoff: state.config.infra_backoff_sec, budget: contextBudget(state), restartWorker: ladderRestart(state) },
+    { backoff: state.config.infra_backoff_sec, budget: seatContextBudget(state, "extract"), restartWorker: ladderRestart(state) },
   );
   if (!summaryResult.ok) {
     console.log(`[${nowClock()}] run summary: ${summaryResult.rung.diagnosis} — continuing`);
@@ -550,11 +560,20 @@ const MIN_TICKET_WALL_MS = 30 * 60 * 1000;
  * against a 30m floor). */
 const WALL_BUDGET_INVOCATION_MULTIPLE = 2;
 
+/** ADR 0040 (amendment 3): the step budget is sized in invocation windows so
+ * the capacity verdict's prescribed remedy can actually run. Two checkpoint-
+ * less invocations reach the capacity verdict (one context fill each), and
+ * that verdict's fix — a fresh session from the last green commit — is itself
+ * one more invocation. The old 2× budget made the recovery unreachable: the
+ * spriteforge spine ticket capped twice, compacted once per invocation, and
+ * the budget stopped it before the fresh session could run. */
+const TICKET_STEP_BUDGET_MULTIPLE = 3;
+
 /** ADR 0040: whether this ticket has exhausted its cumulative builder budget.
- * Steps derive from `max_phase_steps` (itself scaled from the context size);
- * the wall derivation is `max(plan-phase wall, 30m floor, 2 × slowest builder
- * invocation)`. Explicit config wins; `0` disables either; returning null
- * means "within budget".
+ * Steps derive from `max_phase_steps` (itself scaled from the context size) at
+ * `TICKET_STEP_BUDGET_MULTIPLE`; the wall derivation is `max(plan-phase wall,
+ * 30m floor, 2 × slowest builder invocation)`. Explicit config wins; `0`
+ * disables either; returning null means "within budget".
  *
  * Amended: the WALL check reads time since the last green verify (falling
  * back to the cumulative total before any invocation has landed). The budget
@@ -565,7 +584,7 @@ export function ticketBudgetStop(state: RunState, ticket: TicketState): string |
   const cfg = state.config;
   const stepBudget = cfg.ticket_step_budget === 0
     ? null
-    : cfg.ticket_step_budget ?? (cfg.max_phase_steps ? cfg.max_phase_steps * 2 : null);
+    : cfg.ticket_step_budget ?? (cfg.max_phase_steps ? cfg.max_phase_steps * TICKET_STEP_BUDGET_MULTIPLE : null);
   const planWallMs = readPlanWallMs(join(state.cwd, ".railhead", "plan-latest"));
   const wallMs = cfg.ticket_wall_sec === 0
     ? null
@@ -1003,7 +1022,7 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
     if (!v.ok) {
       const summarizeResult = await withFailureLadderOnThrow(
         () => summarizeIfNeeded(state, ledger, `${verifyPhase}-summarize`, compressVerifyOutput(verifyBlob, state.config.verify), "verify"),
-        { backoff: state.config.infra_backoff_sec, budget: contextBudget(state), restartWorker: ladderRestart(state) },
+        { backoff: state.config.infra_backoff_sec, budget: seatContextBudget(state, "extract"), restartWorker: ladderRestart(state) },
       );
       const summarizedBlob = summarizeResult.ok ? summarizeResult.value : compressVerifyOutput(verifyBlob, state.config.verify);
 
@@ -1184,7 +1203,7 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
       if (!s.ok && !s.notFound) {
         const smokSummarizeResult = await withFailureLadderOnThrow(
           () => summarizeIfNeeded(state, ledger, `${smokePhase}-summarize`, compressVerifyOutput(smokeBlob, state.config.smoke), "smoke"),
-          { backoff: state.config.infra_backoff_sec, budget: contextBudget(state), restartWorker: ladderRestart(state) },
+          { backoff: state.config.infra_backoff_sec, budget: seatContextBudget(state, "extract"), restartWorker: ladderRestart(state) },
         );
         const summarizedBlob = smokSummarizeResult.ok ? smokSummarizeResult.value : compressVerifyOutput(smokeBlob, state.config.smoke);
         const r = advanceRetry(counters, { type: "verify_failed", output: summarizedBlob }, limits);
@@ -1222,11 +1241,13 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
         const isPhase = `${ticket.number}-${String(attempt).padStart(2, "0")}-interact`;
         const runHint = runCommandFromVerify(state.config.verify, allParsed);
         const hints = state.config.visual_review?.interaction_hints ?? state.config.goal_review?.interaction_hints ?? null;
+        const scope = interactionSmokeScopeFor(parsed, allParsed, state);
         const prompt = buildInteractionSmokePrompt({
           runCommandHint: runHint,
           verifyCommands: state.config.verify,
           interactionHints: hints,
           projectInterface: iface,
+          scope,
         });
         const smokeRetry = await withFailureLadderOnThrow(
           () => runReviewAgent({
@@ -1245,9 +1266,9 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
             maxSteps: state.config.max_phase_steps,
             stallTimeoutSec: state.config.stall_timeout_sec,
             maxStepModelSec: state.config.max_step_model_sec,
-            maxContextTokens: contextBudget(state),
+            maxContextTokens: seatContextBudget(state, "visual"),
           }),
-          { backoff: state.config.infra_backoff_sec, budget: contextBudget(state), restartWorker: ladderRestart(state) },
+          { backoff: state.config.infra_backoff_sec, budget: seatContextBudget(state, "visual"), restartWorker: ladderRestart(state) },
         );
         const agentOutcome = smokeRetry.ok
           ? smokeRetry.value
@@ -1279,7 +1300,8 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
             prevFeedback = r.step.next === "implement" ? (r.step as { feedback: string }).feedback : null;
             continue; // next build attempt
           } else {
-            ticket.logs.push(`interact ${isPhase}: inconclusive — agent produced no verdict (app could not be driven); not a failure`);
+            const noSurface = agentOutcome.transcript.includes("$SMOKE_INCONCLUSIVE");
+            ticket.logs.push(`interact ${isPhase}: inconclusive — ${noSurface ? "no interactive surface built yet" : "agent produced no verdict (app could not be driven)"}; not a failure`);
           }
         } else {
           ticket.logs.push(`interact ${isPhase}: ${agentOutcome.detail}`);
@@ -1337,13 +1359,13 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
         await writeState(ledger, state);
       }
 
-      const threshold = contextBudget(state) * REVIEW_MODE_THRESHOLD_RATIO;
+      const threshold = seatContextBudget(state, "review") * REVIEW_MODE_THRESHOLD_RATIO;
       const useReadMode = threshold > 0 && estimateTokens(diff) > threshold;
       // Issue #46: middle band — too large to inline, not large enough for
       // read-mode. Write the diff to a ledger file and hand the reviewer a
       // path + stat. The caller owns the threshold decision (mirroring
       // read-mode); review() writes the file and routes to the read agent.
-      const fileThreshold = contextBudget(state) * DIFF_FILE_THRESHOLD_RATIO;
+      const fileThreshold = seatContextBudget(state, "review") * DIFF_FILE_THRESHOLD_RATIO;
       const useDiffFile = !useReadMode && fileThreshold > 0 && estimateTokens(diff) > fileThreshold;
       const reviewStat = (useReadMode || useDiffFile) ? await git.diffStat(state.cwd, ticket.start_commit ?? "HEAD~1").catch(() => "") : undefined;
       const diffFilePath = useDiffFile ? join(ledger, "events", `${rvPhase}.diff`) : undefined;
@@ -1379,8 +1401,9 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
           stallTimeoutSec: state.config.stall_timeout_sec,
           maxStepModelSec: state.config.max_step_model_sec,
           fixMode: !!state.config.fix_mode,
-          maxContextTokens: contextBudget(state),
+          maxContextTokens: seatContextBudget(state, "review"),
           readMode: useReadMode,
+          inheritTools: state.config.code_review?.inherit_tools ?? true,
           stat: reviewStat,
           files: useReadMode ? sourceFiles : undefined,
           diffFile: diffFilePath,
@@ -1395,7 +1418,7 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
         }),
         {
           backoff: state.config.infra_backoff_sec,
-          budget: contextBudget(state),
+          budget: seatContextBudget(state, "review"),
           restartWorker: ladderRestart(state),
           onRung: (rung) => {
             console.log(`[${nowClock()}]   ${ticket.number} review: ${rung.diagnosis}`);
@@ -1559,7 +1582,12 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
 
   // Hard fail: retry budget exhausted, or a [BLOCKER] finding survived the attempt cap.
   const lastDiff = await git.workingDiff(state.cwd).catch(() => "");
-  if (lastDiff) await git.cleanWorktree(state.cwd, protectedPaths(state.cwd, state.tickets_dir));
+  if (lastDiff) {
+    const cleaned = await git.cleanWorktree(state.cwd, protectedPaths(state.cwd, state.tickets_dir));
+    if (cleaned.untrackedArchivePath) {
+      console.log(`[${nowClock()}] untracked work wiped — byte-for-byte copies archived to ${cleaned.untrackedArchivePath}`);
+    }
+  }
   ticket.status = "failed";
   if (implementPhaseFiles.size > 0) ticket.context = await summarizePhaseFiles(ledger, implementPhaseFiles);
   ticket.logs.push("FAILED: retries exhausted");
@@ -1654,6 +1682,28 @@ function toBuilderTicket(parsed: Ticket): BuilderTicket {
     body: parsed.what,
     criteria: parsed.criteria,
     openEnded: parsed.open_ended === true,
+  };
+}
+
+/** Scope the interaction smoke to the boundary it closes: the closed group's
+ * claims plus which tickets exist yet. Without this the fresh judge reads the
+ * design intent (the finished app) and fails a correct scaffold group for a
+ * canvas a later group owns — the retry then over-implements the next ticket's
+ * work. */
+function interactionSmokeScopeFor(parsed: Ticket, allParsed: Ticket[], state: RunState): InteractionSmokeScope {
+  const committed = new Set(state.tickets.filter((t) => t.status === "committed").map((t) => t.file));
+  const group = parsed.group ?? null;
+  return {
+    group,
+    groupTickets: allParsed
+      .filter((t) => (group !== null ? t.group === group : t.file === parsed.file))
+      .map((t) => ({ number: t.number, title: t.title, what: t.what, criteria: t.criteria })),
+    frontier: allParsed.map((t) => ({
+      number: t.number,
+      title: t.title,
+      group: t.group ?? null,
+      built: t.file === parsed.file || committed.has(t.file),
+    })),
   };
 }
 

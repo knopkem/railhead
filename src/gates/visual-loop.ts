@@ -14,7 +14,7 @@ import { pushLearnings, readLearnings } from "../context/learnings.ts";
 import { eventPath, writeState } from "../core/ledger.ts";
 import { hasVisualEvidence, hasInteractionEvidence, parseToolCalls, BUILD_TEST_EXCLUDE_RE } from "./evidence.ts";
 import { requiresRealInputEvidence, type ProjectInterface } from "../config/interface.ts";
-import { contextBudget, firesAtRunEnd, firesMidRun, DEFAULT_VISUAL_ROUND_WALL_SEC } from "../config/config.ts";
+import { seatContextBudget, firesAtRunEnd, firesMidRun, DEFAULT_VISUAL_ROUND_WALL_SEC } from "../config/config.ts";
 import { detectGameCanvas, RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
 import { nowClock } from "../cli/overview.ts";
 import { readVisionCapabilityFor } from "../execute/vision-probe.ts";
@@ -113,7 +113,7 @@ export async function runVisualReview(options: {
     // not steps — each step of a timeout spiral eats ~60s, so a step budget
     // of hundreds is hours. Absent/null → the one-hour safety net; 0 disables.
     phaseWallSec: state.config.visual_review?.round_wall_sec ?? DEFAULT_VISUAL_ROUND_WALL_SEC,
-    maxContextTokens: contextBudget(state),
+    maxContextTokens: seatContextBudget(state, "visual"),
     // Issue #60: kill the subprocess at the next step boundary once the first
     // complete $VISUAL_PASS/$VISUAL_FAIL ... $END block appears, instead of
     // letting a model that keeps re-emitting its verdict loop until the step
@@ -291,7 +291,7 @@ export async function visualReviewLoop(
       }),
       {
         backoff: state.config.infra_backoff_sec,
-        budget: contextBudget(state),
+        budget: seatContextBudget(state, "visual"),
         restartWorker: state.config.persistent_worker === true
           ? async () => { await stopPersistentWorker(); await startPersistentWorker({ cwd: state.cwd }); }
           : async () => {},
@@ -463,7 +463,7 @@ export function kickoffPerTicketVisualReview(
     })),
     {
       backoff: state.config.infra_backoff_sec,
-      budget: contextBudget(state),
+      budget: seatContextBudget(state, "visual"),
       restartWorker: state.config.persistent_worker === true
         ? async () => { await stopPersistentWorker(); await startPersistentWorker({ cwd: state.cwd }); }
         : async () => {},

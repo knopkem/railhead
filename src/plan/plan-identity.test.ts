@@ -10,6 +10,7 @@ describe("checkPlanOrigin (#47)", () => {
     prompt: "build a thing",
     created_at: "2026-08-31T12:00:00Z",
     ticket_files: ["01-a.md", "02-b.md", "03-c.md"],
+    base_sha: "cafe0001",
     ...over,
   });
 
@@ -78,16 +79,51 @@ describe("writePlanOrigin / readPlanOrigin (#47)", () => {
         prompt: "build something",
         created_at: "2026-08-31T12:00:00Z",
         ticket_files: ["01-a.md", "02-b.md"],
+        base_sha: "deadbeef1234",
       };
       await writePlanOrigin(dir, origin);
       const written = JSON.parse(await (await import("node:fs/promises")).readFile(join(dir, "origin.json"), "utf8"));
       expect(written.slug).toBe("test-plan");
       expect(written.ticket_files).toEqual(["01-a.md", "02-b.md"]);
+      expect(written.base_sha).toBe("deadbeef1234");
 
       const readBack = await readPlanOrigin(dir);
       expect(readBack).not.toBeNull();
       expect(readBack!.slug).toBe("test-plan");
       expect(readBack!.ticket_files).toEqual(["01-a.md", "02-b.md"]);
+      expect(readBack!.base_sha).toBe("deadbeef1234");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a null base_sha (greenfield: no commits at plan time) round-trips", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "railhead-origin-"));
+    try {
+      await writePlanOrigin(dir, {
+        slug: "fresh",
+        prompt: "p",
+        created_at: "2026-08-31T12:00:00Z",
+        ticket_files: ["01-a.md"],
+        base_sha: null,
+      });
+      expect((await readPlanOrigin(dir))!.base_sha).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a legacy origin.json without base_sha reads as null instead of throwing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "railhead-origin-"));
+    try {
+      await writeFile(
+        join(dir, "origin.json"),
+        JSON.stringify({ slug: "old", prompt: "p", created_at: "2025-01-01T00:00:00Z", ticket_files: ["01-a.md"] }),
+        "utf8",
+      );
+      const origin = await readPlanOrigin(dir);
+      expect(origin).not.toBeNull();
+      expect(origin!.base_sha).toBeNull();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

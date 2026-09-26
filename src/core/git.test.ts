@@ -5,7 +5,7 @@ import { afterEach, describe, it, expect } from "vitest";
 import {
   cleanWorktree,
   commit,
-  commitMessageExists,
+  commitSubjectsSince,
   commitOrReuseHead,
   ensureInitialCommit,
   initGit,
@@ -181,24 +181,49 @@ describe("commitOrReuseHead", () => {
   });
 });
 
-describe("commitMessageExists", () => {
-  // Resume reconciliation treats a ticket whose commit message exists as
-  // committed. Recovery checkpoints in-flight work under
-  // "NN — Title (checkpoint)" — a prefix of the real message. A substring or
-  // prefix match would let a checkpoint (work never gated) masquerade as a
-  // committed ticket on the next resume, silently skipping its gate.
-  it("does not match a checkpoint commit whose message only prefixes the ticket message", async () => {
+describe("commitSubjectsSince", () => {
+  // Ticket pre-marking treats an exact subject match as "already committed".
+  // Recovery checkpoints in-flight work under "NN — Title (checkpoint)" — a
+  // prefix of the real message. A substring or prefix match would let a
+  // checkpoint (work never gated) masquerade as a committed ticket,
+  // silently skipping its gate.
+  it("exact-match territory: lists full subjects so a checkpoint prefix never satisfies the plain title", async () => {
     const cwd = await freshRepo();
     await writeFile(join(cwd, "work.txt"), "wip\n");
     await commit(cwd, "01 — Add greet (checkpoint)");
-    expect(await commitMessageExists(cwd, "01 — Add greet")).toBe(false);
+    const subjects = await commitSubjectsSince(cwd, null);
+    expect(subjects).toContain("01 — Add greet (checkpoint)");
+    expect(subjects.some((m) => m === "01 — Add greet")).toBe(false);
   });
 
-  it("matches the exact ticket commit and ignores trailing whitespace", async () => {
+  it("with a base sha it lists only the commits on top of it (the plan's own commits)", async () => {
     const cwd = await freshRepo();
-    await writeFile(join(cwd, "work.txt"), "done\n");
-    await commit(cwd, "01 — Add greet");
-    expect(await commitMessageExists(cwd, "01 — Add greet")).toBe(true);
+    await writeFile(join(cwd, "a.txt"), "a\n");
+    await commit(cwd, "01 — First");
+    await writeFile(join(cwd, "b.txt"), "b\n");
+    const base = await commit(cwd, "02 — Second");
+    await writeFile(join(cwd, "c.txt"), "c\n");
+    await commit(cwd, "03 — Third");
+    const subjects = await commitSubjectsSince(cwd, base);
+    expect(subjects).toEqual(["03 — Third"]);
+  });
+
+  it("with a null base it returns the last commits overall", async () => {
+    const cwd = await freshRepo();
+    await writeFile(join(cwd, "a.txt"), "a\n");
+    await commit(cwd, "01 — First");
+    await writeFile(join(cwd, "b.txt"), "b\n");
+    await commit(cwd, "02 — Second");
+    const subjects = await commitSubjectsSince(cwd, null);
+    expect(subjects).toContain("01 — First");
+    expect(subjects).toContain("02 — Second");
+  });
+
+  it("returns an empty list on a repo with no commits", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "git-empty-"));
+    dirs.push(dir);
+    await initGit(dir);
+    expect(await commitSubjectsSince(dir, null)).toEqual([]);
   });
 });
 
@@ -285,6 +310,47 @@ describe("cleanWorktree", () => {
     const result = await cleanWorktree(cwd, ["railhead.json"]);
 
     expect(result.stashed).toBe(false);
+  });
+
+  it("archives unprotected untracked files (including binaries) beside the stash, then wipes them from the worktree", async () => {
+    // `git apply` can restore a text diff, but a diff carries no binary
+    // content: an existing product repo's untracked assets (images,
+    // databases) would be destroyed by `git clean -fd` on the hard-fail
+    // path with no backup anywhere.
+    const cwd = await freshRepo();
+    await writeFile(join(cwd, "tracked.txt"), "v1\n");
+    await commit(cwd, "baseline");
+    await writeFile(join(cwd, "tracked.txt"), "v2\n");
+    await mkdir(join(cwd, "assets"));
+    await writeFile(join(cwd, "untracked-code.js"), "const kept = 1;\n");
+    await writeFile(join(cwd, "assets", "logo.bin"), Buffer.from([0, 1, 2, 0xff]));
+    await writeFile(join(cwd, "opencode.json"), "{}\n");
+
+    const result = await cleanWorktree(cwd, ["opencode.json", ".railhead"]);
+
+    expect(result.untrackedArchivePath).toBeTruthy();
+    expect(result.untrackedArchivePath).toContain(".railhead");
+    expect(await readFile(join(result.untrackedArchivePath!, "untracked-code.js"), "utf8")).toContain("const kept");
+    expect(
+      await readFile(join(result.untrackedArchivePath!, "assets", "logo.bin")),
+    ).toEqual(Buffer.from([0, 1, 2, 0xff]));
+    // The worktree is indeed wiped...
+    await expect(readFile(join(cwd, "untracked-code.js"), "utf8")).rejects.toThrow();
+    await expect(readFile(join(cwd, "assets", "logo.bin"))).rejects.toThrow();
+    // ...the protected file survived in place (never archived, never cleaned)...
+    expect(await readFile(join(cwd, "opencode.json"), "utf8")).toBe("{}\n");
+    // ...and the tracked change went through the normal diff stash.
+    expect(result.stashed).toBe(true);
+  });
+
+  it("does not create an untracked archive when the tree is clean", async () => {
+    const cwd = await freshRepo();
+    await writeFile(join(cwd, "baseline.txt"), "v1\n");
+    await commit(cwd, "baseline");
+
+    const result = await cleanWorktree(cwd, ["railhead.json"]);
+
+    expect(result.untrackedArchivePath).toBeNull();
   });
 });
 

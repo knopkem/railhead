@@ -770,6 +770,39 @@ node -e 'console.log(JSON.stringify({type:"text",part:{type:"text",text:process.
     }
   });
 
+  it("runs on the tool-bearing observe seat when the review inherits tools, and on the isolated reviewer otherwise (code_review.inherit_tools)", async () => {
+    const env = await makeFakeOpencodeEcho();
+    try {
+      const inherited = await review({
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "01-01-review",
+        model: null,
+        ticketFile: "01-a.md",
+        ticketBody: "work",
+        criteria: ["c1"],
+        diff: "diff --git a/x b/x",
+        inheritTools: true,
+      });
+      expect(inherited.transcript).toMatch(/--agent railhead-observe\b/);
+
+      const restricted = await review({
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "01-02-review",
+        model: null,
+        ticketFile: "01-a.md",
+        ticketBody: "work",
+        criteria: ["c1"],
+        diff: "diff --git a/x b/x",
+      });
+      expect(restricted.transcript).toMatch(/--agent railhead-review\b/);
+      expect(restricted.transcript).not.toMatch(/--agent railhead-observe\b/);
+    } finally {
+      process.env.PATH = env.restorePath;
+    }
+  });
+
   it("writes the diff to a ledger file and hands the reviewer a path+stat when diffFile is set (#46)", async () => {
     const env = await makeFakeOpencodeEcho();
     try {

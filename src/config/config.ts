@@ -67,6 +67,18 @@ export function parseCheckpointGranularity(s: string | null | undefined): Checkp
   return (CHECKPOINT_GRANULARITIES as readonly string[]).includes(v ?? "") ? (v as CheckpointGranularity) : null;
 }
 
+/** ADR 0014 amendment: what a phase does when it crosses 95% of its request
+ * ceiling. `"kill"` stops the subprocess; `"telemetry"` logs the crossing and
+ * lets compaction own the fill. */
+export type ContextGuardMode = "kill" | "telemetry";
+
+/** Validate a `context_guard` value; null when absent or unrecognized, so the
+ * caller falls back to the default rather than letting a typo arm a kill. */
+export function parseContextGuard(s: string | null | undefined): ContextGuardMode | null {
+  const v = s?.trim().toLowerCase();
+  return v === "kill" || v === "telemetry" ? v : null;
+}
+
 /** The model each phase actually runs on, after config + flag fallbacks.
  * `null` = skip the phase; `DEFAULT_MODEL` = opencode's own default;
  * any other string = that named model is passed via `--model`. */
@@ -78,6 +90,12 @@ export interface ResolvedModels {
   extract: string | null;
   goal: string | null;
 }
+
+/** A model seat's name (the keys of {@link ResolvedModels}). */
+export type SeatName = keyof ResolvedModels;
+
+/** Every seat, in a stable order for detection, reporting, and resolution. */
+export const SEAT_ORDER = ["plan", "implement", "review", "visual", "goal", "extract"] as const satisfies readonly SeatName[];
 
 export interface RailheadConfig {
   verify: string[];
@@ -142,13 +160,23 @@ export interface RailheadConfig {
   infra_backoff_sec: number[];
   /** Largest single request (prompt + output reserve) a phase may send, in
    * tokens. Issue #81: this is a REQUEST ceiling — the planner slices tickets
-   * to it and the executor kills phases approaching it — not the server's
-   * capacity, which is shared with invisible foreign KV. Defaults to
-   * `CEILING_FRACTION` × the model's nominal context window. */
+   * to it and the executor watches every phase against it (killing only under
+   * `context_guard: "kill"`, the opt-in) — not the server's capacity, which
+   * is shared with invisible foreign KV. It is the IMPLEMENT seat's budget
+   * (init derives it from the implement model); every judging seat resolves
+   * its own model's configured opencode limit instead, so a small implementer
+   * never caps a larger reviewer (ADR 0014 amendment). */
   request_ceiling_tokens?: number;
   /** Legacy alias for `request_ceiling_tokens` (kept so an existing
    * railhead.json keeps working). */
   max_context_tokens?: number;
+  /** ADR 0014 amendment: what a phase does when it crosses 95% of its request
+   * ceiling. `"kill"` stops the subprocess; `"telemetry"` (default, also when
+   * absent) logs the crossing and lets compaction own the fill. The ceiling is
+   * the model's configured opencode limit, so a crossing is near the real
+   * bound and compaction is the right manager — the kill discarded a goal
+   * review's verdict mid-probe (run-20260925-2006). */
+  context_guard?: ContextGuardMode;
   /**
    * Hard cap on the number of opencode step_start events a single phase
    * (implement, review, contracts, plan, visual) may emit before the railhead
@@ -207,7 +235,8 @@ export interface RailheadConfig {
    * ADR 0040: cumulative `step_start` count a single TICKET may consume across
    * every builder invocation (ladder rungs, resumes, blocks) before the ticket
    * is stopped and surfaced. Unlike `max_phase_steps` (per process), this does
-   * not reset. `null`/absent = `2 × max_phase_steps`; `0` disables.
+   * not reset. `null`/absent = `3 × max_phase_steps` (two windows reach the
+   * capacity verdict, the third is its fresh-session recovery); `0` disables.
    */
   ticket_step_budget?: number | null;
   /**
@@ -560,6 +589,15 @@ export interface StructuralReviewConfig {
  * redundant with per-ticket review and its findings had no teeth. */
 export interface CodeReviewConfig {
   mode: GateMode;
+  /**
+   * Whether the per-ticket reviewer inherits the project's ordinary toolset
+   * (the same observe seat visual/goal/structural use) or runs on the isolated
+   * reviewer agent that denies every tool. `true` (the default) is the bypass:
+   * the reviewer may read, search, and run read-only commands to verify the
+   * diff instead of judging the prompt alone. `false` restores the sandboxed
+   * diff-only seat. Absent = the default (`true`).
+   */
+  inherit_tools?: boolean;
 }
 
 /** Whether a given finding severity should trigger a retry in the per-ticket
@@ -685,20 +723,11 @@ export const DEFAULT_INFRA_BACKOFF_SEC = [60, 300, 900, 1800];
  * builder resumes across the cap, so hitting it is wasteful, never fatal. */
 const FALLBACK_STEP_BUDGET = 120;
 
-/** Fraction of the model's nominal context window used as the request ceiling
- * when the user sets no explicit value. Issue #81: the pool is never empty on
- * a content-keyed-KV server — retained dead-session KV occupies it invisibly
- * to every railhead ledger — so a request at ~100% of the nominal window cannot
- * survive a warm pool. 0.6 lands on ADR 0014's 64k-on-100k operating point
- * from a safety argument (headroom below raw capacity is load-bearing, not
- * waste) instead of the throughput argument. */
-export const CEILING_FRACTION = 0.6;
-
-/** Default request ceiling when none is configured and the opencode model
- * limit can't be retrieved, so the fraction-based default has nothing to
- * multiply. Issue #79: 64k — ADR 0014's working-context operating point, not
- * the model's whole window. Users can set a ceiling higher or lower
- * explicitly. */
+/** Default request ceiling when no model limit can be detected and no explicit
+ * ceiling is configured. Issue #79: 64k — ADR 0014's working-context operating
+ * point, not a guess at the model's whole window. With detection working, the
+ * ceiling is the model's configured opencode limit (ADR 0014 amendment: the
+ * safety margin lives in `limit.context`, not in a second harness fraction). */
 export const DEFAULT_CONTEXT_TOKENS = 64_000;
 
 /**
@@ -729,6 +758,7 @@ export const DEFAULT_CONFIG: RailheadConfig = {
   max_attempts: null,
   infra_backoff_sec: DEFAULT_INFRA_BACKOFF_SEC,
   max_phase_steps: FALLBACK_STEP_BUDGET,
+  context_guard: "telemetry",
   verify_timeout_sec: null,
   stall_timeout_sec: DEFAULT_STALL_TIMEOUT_SEC,
   max_step_model_sec: DEFAULT_MAX_STEP_MODEL_SEC,
@@ -743,7 +773,7 @@ export const DEFAULT_CONFIG: RailheadConfig = {
   fix_mode: false,
   art_direction: true,
   model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: DEFAULT_MODEL, visual: null, extract: null, goal: null },
-  code_review: { mode: "off" },
+  code_review: { mode: "off", inherit_tools: true },
   visual_review: { mode: "off", max_rounds: null, round_wall_sec: null, interaction_hints: null },
   goal_review: { mode: "off", fallback_cadence: 4, max_rounds: null, max_replans: DEFAULT_MAX_REPLANS, interaction_hints: null },
   structural_review: { mode: "off" },
@@ -803,6 +833,7 @@ export async function loadConfig(cwd: string): Promise<RailheadConfig> {
       infra_backoff_sec: j.infra_backoff_sec ?? DEFAULT_CONFIG.infra_backoff_sec,
       max_context_tokens: j.request_ceiling_tokens ?? j.max_context_tokens,
       max_phase_steps: resolveStepBudget(j.request_ceiling_tokens ?? j.max_context_tokens, j.max_phase_steps),
+      context_guard: parseContextGuard(j.context_guard) ?? DEFAULT_CONFIG.context_guard,
       verify_timeout_sec: j.verify_timeout_sec ?? DEFAULT_CONFIG.verify_timeout_sec,
       smoke_timeout_sec: j.smoke_timeout_sec ?? DEFAULT_CONFIG.smoke_timeout_sec,
       stall_timeout_sec: j.stall_timeout_sec ?? DEFAULT_CONFIG.stall_timeout_sec,
@@ -837,7 +868,12 @@ export async function loadConfig(cwd: string): Promise<RailheadConfig> {
         goal: model.goal ?? null,
       },
       code_review: hasKeys(codeReview)
-        ? { mode: modeOf(codeReview, DEFAULT_CONFIG.code_review!.mode, () => DEFAULT_CONFIG.code_review!.mode) }
+        ? {
+            mode: modeOf(codeReview, DEFAULT_CONFIG.code_review!.mode, () => DEFAULT_CONFIG.code_review!.mode),
+            inherit_tools: codeReview.inherit_tools === undefined
+              ? DEFAULT_CONFIG.code_review!.inherit_tools
+              : codeReview.inherit_tools === true,
+          }
         : DEFAULT_CONFIG.code_review,
       visual_review: hasKeys(visualReview)
         ? {
@@ -1075,14 +1111,18 @@ export async function queryOpencodeContextLimit(modelName: string | null): Promi
 /**
  * Compute the effective request ceiling: the largest single request the
  * railhead will let a phase send, resolved from the user's explicit value (or
- * the legacy `max_context_tokens` alias) against the model's nominal context
- * window. The model's real limit is ground truth only as a clamp — the
- * ceiling is a *fraction* of it (issue #81): foreign KV occupancy on the
- * server is unobservable, so a request near the whole window cannot survive a
- * warm pool. When the user sets nothing, the ceiling is `CEILING_FRACTION` ×
- * the detected window (falling back to `DEFAULT_CONTEXT_TOKENS` when
- * detection fails). An explicit value is honored as-is, clamped to the
- * window.
+ * the legacy `max_context_tokens` alias) against the model's context window.
+ *
+ * The model's window is ground truth (ADR 0014 amendment, 2026-09-25): the
+ * detected number is opencode's EFFECTIVE `limit.context` for the model —
+ * config overrides included — so the safety margin against a warm KV pool
+ * belongs there, set by the operator (e.g. 80k when the server's hard limit is
+ * 100k), not compounded by a second harness fraction. `opencode models
+ * --verbose` is the source, so an operator-tuned limit is what both opencode's
+ * compaction and the railhead see. When the user sets nothing, the ceiling is
+ * the detected limit verbatim; an explicit value is honored as-is, clamped to
+ * the window. Detection failure falls back to `DEFAULT_CONTEXT_TOKENS` (or the
+ * explicit value).
  *
  * Returns `{ budget, source }` so the caller can log which value won.
  */
@@ -1094,7 +1134,7 @@ export function effectiveContextTokens(
     if (configBudget && configBudget > 0) {
       return { budget: Math.min(configBudget, detectedLimit), source: configBudget <= detectedLimit ? "config" : "model" };
     }
-    return { budget: Math.round(detectedLimit * CEILING_FRACTION), source: "default" };
+    return { budget: detectedLimit, source: "model" };
   }
   if (configBudget && configBudget > 0) return { budget: configBudget, source: "config" };
   return { budget: DEFAULT_CONTEXT_TOKENS, source: "default" };
@@ -1110,4 +1150,69 @@ export function contextBudget(state: {
   config: { max_context_tokens?: number | null };
 }): number {
   return state._effectiveContextTokens ?? state.config.max_context_tokens ?? DEFAULT_CONTEXT_TOKENS;
+}
+
+/** One seat's request ceiling, falling back to the run's implement-derived
+ * budget when no per-seat value was resolved (a state loaded from disk, or a
+ * seat with no configured model). */
+export function seatContextBudget(
+  state: {
+    _seatContextTokens?: Partial<Record<SeatName, number>> | null;
+    _effectiveContextTokens?: number | null;
+    config: { max_context_tokens?: number | null };
+  },
+  seat: SeatName,
+): number {
+  return state._seatContextTokens?.[seat] ?? contextBudget(state);
+}
+
+/** Per-seat request ceilings. The operator's `request_ceiling_tokens` is the
+ * IMPLEMENT seat's budget — init derives it from the implement model — and
+ * every judging seat resolves ITS OWN model's configured opencode limit
+ * verbatim (ADR 0014 amendment: the margin lives in `limit.context`, so no
+ * second fraction). Applying the smallest seat's window to all seats is what
+ * killed a 200k-window goal review at 95k: the implementer's 100k budget
+ * capped it before opencode's compaction could ever run. A seat whose window
+ * was not detected falls back to the operator ceiling (or the default). Pure. */
+export function seatContextCeilings(
+  models: ResolvedModels,
+  windows: Partial<Record<SeatName, number | null>>,
+  configCeiling: number | null | undefined,
+): Partial<Record<SeatName, number>> {
+  const out: Partial<Record<SeatName, number>> = {};
+  for (const seat of SEAT_ORDER) {
+    if (models[seat] === null) continue;
+    const window = windows[seat] ?? null;
+    out[seat] = seat === "implement" || window === null
+      ? effectiveContextTokens(configCeiling ?? undefined, window).budget
+      : Math.round(window);
+  }
+  return out;
+}
+
+/** One `opencode models --verbose` pass gives every distinct seat model's
+ * context window (deduplicated). A failed query or an unknown model reads as
+ * null, so {@link seatContextCeilings} falls back to the operator ceiling for
+ * that seat. */
+export async function querySeatContextWindows(models: ResolvedModels): Promise<Partial<Record<SeatName, number | null>>> {
+  const distinct = [...new Set(SEAT_ORDER.map((s) => models[s]).filter((m): m is string => m !== null && m !== DEFAULT_MODEL))];
+  const out: Partial<Record<SeatName, number | null>> = {};
+  if (distinct.length === 0) return out;
+  let raw = "";
+  try {
+    raw = execFileSync("opencode", ["models", "--verbose"], {
+      encoding: "utf8",
+      timeout: 10_000,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch {
+    return out;
+  }
+  const byModel = new Map<string, number | null>(distinct.map((m) => [m, parseModelContextLimit(raw, m)]));
+  for (const seat of SEAT_ORDER) {
+    const model = models[seat];
+    if (model === null) continue;
+    out[seat] = model === DEFAULT_MODEL ? null : byModel.get(model) ?? null;
+  }
+  return out;
 }

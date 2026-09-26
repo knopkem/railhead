@@ -1,7 +1,7 @@
 import type { RunState, StructuralReviewRecord, TicketState } from "../core/state.ts";
 import { isFinished } from "../core/state.ts";
 import { loadTickets } from "../core/ticket.ts";
-import { contextBudget, firesMidRun } from "../config/config.ts";
+import { seatContextBudget, firesMidRun } from "../config/config.ts";
 import { reviewSummary, runReviewAgent } from "./reviewer.ts";
 import { baseSessionId } from "../execute/base-session.ts";
 import { processCorrectiveFindings, type RunTicket } from "./corrective.ts";
@@ -115,7 +115,7 @@ export async function runStructuralReview(
     maxSteps: state.config.max_phase_steps,
     stallTimeoutSec: state.config.stall_timeout_sec,
     maxStepModelSec: state.config.max_step_model_sec,
-    maxContextTokens: contextBudget(state),
+    maxContextTokens: seatContextBudget(state, "goal"),
   });
   if (agentOutcome.status === "fatal") {
     const message = `structural review unavailable — ${agentOutcome.detail}`;

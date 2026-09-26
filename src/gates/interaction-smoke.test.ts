@@ -1,8 +1,20 @@
 import { describe, it, expect } from "vitest";
 import { joinPhaseMessages, type PhaseMessages } from "../context/preamble.ts";
 const promptText = (m: PhaseMessages): string => joinPhaseMessages(m);
-const smokePrompt = (o: Parameters<typeof buildInteractionSmokePrompt>[0]): string => promptText(buildInteractionSmokePrompt(o));
-import { buildInteractionSmokePrompt, parseInteractionSmokeVerdict } from "./interaction-smoke.ts";
+import { buildInteractionSmokePrompt, parseInteractionSmokeVerdict, type InteractionSmokeScope } from "./interaction-smoke.ts";
+
+type SmokeOptions = Omit<Parameters<typeof buildInteractionSmokePrompt>[0], "scope">;
+
+const SCOPE: InteractionSmokeScope = {
+  group: "spine",
+  groupTickets: [{ number: "02", title: "spine shell", what: "mount the bench", criteria: ["dragging paints pixels"] }],
+  frontier: [
+    { number: "01", title: "scaffold", group: "scaffold", built: true },
+    { number: "02", title: "spine shell", group: "spine", built: true },
+    { number: "03", title: "palette", group: "studio", built: false },
+  ],
+};
+const smokePrompt = (o: SmokeOptions): string => promptText(buildInteractionSmokePrompt({ ...o, scope: SCOPE }));
 
 describe("parseInteractionSmokeVerdict", () => {
   it("parses a pass", () => {
@@ -17,6 +29,10 @@ describe("parseInteractionSmokeVerdict", () => {
 
   it("is inconclusive with no marker", () => {
     expect(parseInteractionSmokeVerdict("no verdict here")).toEqual({ verdict: "inconclusive", findings: [] });
+  });
+
+  it("treats the explicit no-surface marker as inconclusive, never pass or fail", () => {
+    expect(parseInteractionSmokeVerdict("$SMOKE_INCONCLUSIVE\n$END")).toEqual({ verdict: "inconclusive", findings: [] });
   });
 });
 
@@ -57,5 +73,20 @@ describe("buildInteractionSmokePrompt", () => {
     expect(p).toMatch(/HTTP 200.*NOT evidence/is);
     expect(p).toMatch(/unwired rectangle/);
     expect(p).toMatch(/must never be your basis for a pass/i);
+  });
+
+  it("scopes the judge to the built frontier and names the closed group's claims (v2 issue 01)", () => {
+    const p = smokePrompt({ runCommandHint: "npm run dev", verifyCommands: [] });
+    expect(p).toContain("- [built] 01 scaffold (group scaffold)");
+    expect(p).toContain("- [built] 02 spine shell (group spine)");
+    expect(p).toContain("- [pending] 03 palette (group studio)");
+    expect(p).toContain('This gate closes group "spine"');
+    expect(p).toContain("dragging paints pixels");
+  });
+
+  it("forbids failing a pending feature and offers the no-surface inconclusive verdict", () => {
+    const p = smokePrompt({ runCommandHint: "npm run dev", verifyCommands: [] });
+    expect(p).toMatch(/never try to operate it and never fail for its absence/i);
+    expect(p).toContain("$SMOKE_INCONCLUSIVE");
   });
 });

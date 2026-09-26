@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile, writeFile, stat } from "node:fs/promises";
+import { copyFile, mkdir, readFile, writeFile, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, isAbsolute } from "node:path";
 import { realpath } from "node:fs/promises";
@@ -48,10 +48,14 @@ export function lastCommitMessage(cwd: string): Promise<string> {
   return git(cwd, ["log", "-1", "--format=%s"]);
 }
 
-/** True if a commit whose message exactly matches `subject` exists in history. */
-export async function commitMessageExists(cwd: string, subject: string): Promise<boolean> {
-  const out = await git(cwd, ["log", "--format=%s", "-n", "1000"]).catch(() => "");
-  return out.split("\n").some((line) => line.trim() === subject);
+/** The commit subjects a plan can own: those on top of `baseSha` (the
+ * plan-time HEAD recorded in origin.json), or the last `limit` subjects
+ * overall when the plan predates the base-sha record (null). */
+export async function commitSubjectsSince(cwd: string, baseSha: string | null, limit = 1000): Promise<string[]> {
+  const args = ["log", "--format=%s", "-n", String(limit)];
+  if (baseSha) args.push(`${baseSha}..HEAD`);
+  const out = await git(cwd, args).catch(() => "");
+  return out.split("\n").map((s) => s.trim()).filter(Boolean);
 }
 
 /** True when the repo has at least one commit (HEAD resolves). */
@@ -82,6 +86,12 @@ export interface CleanWorktreeResult {
   stashed: boolean;
   /** Path to the stash file when `stashed` is true, null otherwise. */
   stashPath: string | null;
+  /** Archive directory holding byte-for-byte copies of every unprotected
+   *  untracked file, null when there was nothing to archive. A unified diff
+   *  cannot carry binary content, so an existing product repo's untracked
+   *  assets would otherwise be destroyed by `git clean -fd` with no backup
+   *  anywhere. */
+  untrackedArchivePath: string | null;
 }
 
 /**
@@ -106,6 +116,47 @@ export interface CleanWorktreeResult {
  * the protected tracked files before the reset and write them back after, so
  * plan-time config survives every implement retry. See ADR 0011.
  */
+/** Untracked files are archived one-by-one into a directory beside the stash
+ * diff. The limits keep a sloppy .gitignore (megabytes of unignored build
+ * output) from stalling the hard-fail path; over-limit files are skipped, the
+ * diff stash still covers them as "binary files differ" hunks. */
+const UNTRACKED_ARCHIVE_FILE_LIMIT = 2000;
+const UNTRACKED_ARCHIVE_BYTE_LIMIT = 512 * 1024 * 1024;
+
+async function archiveUntracked(
+  cwd: string,
+  protectedNames: Set<string>,
+  archiveDir: string,
+): Promise<string | null> {
+  const out = await git(cwd, ["ls-files", "--others", "--exclude-standard"]).catch(() => "");
+  const files = out
+    .split("\n")
+    .map((f) => f.trim())
+    .filter(Boolean)
+    .filter((f) => !isProtectedFile(f, protectedNames));
+  if (files.length === 0) return null;
+  let bytes = 0;
+  let copied = 0;
+  for (const rel of files) {
+    if (copied >= UNTRACKED_ARCHIVE_FILE_LIMIT || bytes > UNTRACKED_ARCHIVE_BYTE_LIMIT) break;
+    let size = 0;
+    try {
+      size = (await stat(join(cwd, rel))).size;
+    } catch {
+      continue;
+    }
+    try {
+      await mkdir(join(archiveDir, rel, ".."), { recursive: true });
+      await copyFile(join(cwd, rel), join(archiveDir, rel));
+    } catch {
+      continue;
+    }
+    bytes += size;
+    copied++;
+  }
+  return archiveDir;
+}
+
 export async function cleanWorktree(
   cwd: string,
   protectedPaths: string[],
@@ -113,6 +164,7 @@ export async function cleanWorktree(
   const diff = await workingDiff(cwd).catch(() => "");
   const realWork = diffExcludesProtected(diff, protectedPaths);
   let stashPath: string | null = null;
+  let untrackedArchivePath: string | null = null;
   if (realWork.trim()) {
     const railheadDir = join(cwd, ".railhead");
     try {
@@ -120,13 +172,19 @@ export async function cleanWorktree(
     } catch { /* may already exist */ }
     stashPath = join(railheadDir, `stash-${Date.now()}.diff`);
     await writeFile(stashPath, diff, "utf8");
+    const protectedNames = new Set(protectedPaths.map((p) => p.replace(/^[/\\]/, "")));
+    untrackedArchivePath = await archiveUntracked(
+      cwd,
+      protectedNames,
+      stashPath.replace(/\.diff$/, "-untracked"),
+    );
   }
   const snapshots = await snapshotProtectedTracked(cwd, protectedPaths);
   await git(cwd, ["reset", "--hard", "HEAD"]);
   const excludes = protectedPaths.map((p) => ["-e", p]).flat();
   await git(cwd, ["clean", "-fd", ...excludes]);
   await restoreProtectedTracked(cwd, snapshots);
-  return { stashed: stashPath !== null, stashPath };
+  return { stashed: stashPath !== null, stashPath, untrackedArchivePath };
 }
 
 /** Check whether a working diff contains changes to any file that is NOT

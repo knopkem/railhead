@@ -7,6 +7,7 @@ import {
   probeProviderHealth,
   resetProviderHealthForTest,
   setProviderHealth,
+  usedModelRefs,
 } from "./provider-health.ts";
 
 /** A throwaway local HTTP server — these tests exercise the real fetch path
@@ -93,6 +94,20 @@ describe("probeProviderHealth (#134)", () => {
     const verdict = await probeProviderHealth({ url: "/status" }, null);
     expect(verdict.ok).toBe(false);
     expect(verdict.detail).toContain("no provider.base_url");
+  });
+});
+
+describe("usedModelRefs (#134)", () => {
+  it("collects non-null seat refs, keeps the default sentinel, and drops skipped seats", () => {
+    const refs = usedModelRefs({
+      plan: "opencode/mimo-v2.6-flash-free",
+      implement: "spark/local",
+      review: null,
+      visual: "spark/local",
+      extract: "default",
+      goal: null,
+    });
+    expect([...refs].sort()).toEqual(["default", "opencode/mimo-v2.6-flash-free", "spark/local"]);
   });
 });
 

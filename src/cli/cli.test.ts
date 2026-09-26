@@ -2,9 +2,10 @@ import { mkdtemp, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, expect, vi } from "vitest";
-import { parseLogArgs, describeModel, ensureInitialized, modelParameterClass, modelTierWarnings, initRailheadConfig, minDetectedContext, contextOverrideWarnings, visionCapabilityWarnings, type InitSeatProbe } from "./cli.ts";
+import { parseLogArgs, describeModel, ensureInitialized, modelParameterClass, modelTierWarnings, initRailheadConfig, minDetectedContext, contextOverrideWarnings, visionCapabilityWarnings, implementerVisionLines, type InitSeatProbe } from "./cli.ts";
 import { DEFAULT_MODEL } from "../config/config.ts";
 import type { CapabilityInfo } from "../core/models.ts";
+import type { VisionCapabilityRecord } from "../execute/vision-probe.ts";
 
 describe("parseLogArgs", () => {
   it("with both args, treats them as an explicit run id and phase", () => {
@@ -336,5 +337,39 @@ describe("visionCapabilityWarnings", () => {
   it("never warns for the core seats (plan/implement/review) regardless of vision", () => {
     expect(visionCapabilityWarnings([seat("plan", { found: true, vision: false })])).toEqual([]);
     expect(visionCapabilityWarnings([seat("review", { found: true, vision: false })])).toEqual([]);
+  });
+});
+
+/** A persisted probe record for the implement seat's reporting lines. */
+const probeRecord = (over: Partial<VisionCapabilityRecord> = {}): VisionCapabilityRecord => ({
+  model: "splash/local",
+  reads_images: true,
+  saw_image_block: true,
+  answer_correct: true,
+  self_reported_no_read: false,
+  probe_inconclusive: false,
+  verified_at: "2026-01-01T00:00:00.000Z",
+  probe_version: 2,
+  ...over,
+});
+
+describe("implementerVisionLines", () => {
+  it("announces a verified implementer — the seat's probe result must not be silent", () => {
+    expect(implementerVisionLines(probeRecord())[0]).toMatch(/implement model splash\/local can read images/);
+  });
+
+  it("announces a measured-blind implementer as skipped", () => {
+    const lines = implementerVisionLines(probeRecord({ reads_images: false, answer_correct: false }));
+    expect(lines[0]).toMatch(/cannot read images/);
+  });
+
+  it("says the probe could not verify an inconclusive record instead of claiming blindness", () => {
+    const lines = implementerVisionLines(probeRecord({ reads_images: false, answer_correct: false, saw_image_block: false, probe_inconclusive: true }));
+    expect(lines[0]).toMatch(/could not be verified/);
+    expect(lines[0]).not.toMatch(/cannot read images/);
+  });
+
+  it("is silent when no record was produced (skipped, unconfigured, or non-surface)", () => {
+    expect(implementerVisionLines(null)).toEqual([]);
   });
 });

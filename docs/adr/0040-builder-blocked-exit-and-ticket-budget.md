@@ -246,3 +246,28 @@ previously wrote only to `ticket.logs`, which is why the run's log read
 `timeout(1)`'s kill code — is treated as the success it is for a
 run-until-killed app, identical to `runSmoke`'s own `timedOut` path. A panic
 signature in the output still fails first.
+
+## Amendment 3 (2026-09-25): the step budget leaves room for the capacity recovery
+
+The spriteforge run `run-20260925-2006` exposed a self-contradiction in the
+defaults. Ticket 02 (spine shell + canvas + pencil) ran two capped
+invocations of 120 steps, each filling ~85k of its 100k window and compacting
+once — one compaction per invocation, i.e. normal fill management, not a
+spiral. On the second invocation the accumulated phase file reached two
+compactions, so the capacity verdict fired at rung 3: a fresh session from
+the last green commit is cheaper than another compaction cycle. But
+`ticket_step_budget` defaulted to `2 × max_phase_steps` — exactly the two
+invocations already spent — so the budget check at the next attempt boundary
+stopped the ticket before the fresh session the verdict prescribes could
+ever run. The recovery was structurally unreachable in the very case it
+exists for.
+
+The default step budget is now `3 × max_phase_steps`. The third window is the
+capacity recovery's own invocation: two checkpoint-less windows reach the
+verdict, and one more gives its remedy a chance to run. The wall budget keeps
+its `2 × slowest invocation` derivation — it bounds checkpoint-less time, and
+the observed incident bound it last (27.4m against 32.9m) — and explicit
+`ticket_step_budget` / `ticket_wall_sec` still win, so an operator can raise
+or disable either. A ticket that spends the third window without a green
+verify stops as before, now with a fresh session's output in the ledger
+rather than a dead-end diagnosis.

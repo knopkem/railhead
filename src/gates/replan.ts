@@ -7,7 +7,7 @@ import { parsePlanJson } from "../plan/plan.ts";
 import { numberTickets, toTicketState, renderTicket, type PlanTicket } from "../core/ticket.ts";
 import { resetPhase, writeState, extractPlanText } from "../core/ledger.ts";
 import { describeExecFailure, executeOpendCode } from "../execute/executor.ts";
-import { contextBudget } from "../config/config.ts";
+import { seatContextBudget } from "../config/config.ts";
 import { loadContracts, summarizeContracts } from "../core/contracts.ts";
 import { readDigest } from "../context/digest.ts";
 import * as git from "../core/git.ts";
@@ -219,7 +219,7 @@ export async function replanFromCheckpoint(
     maxSteps: state.config.max_phase_steps,
     stallTimeoutSec: state.config.stall_timeout_sec,
     maxStepModelSec: state.config.max_step_model_sec,
-    maxContextTokens: contextBudget(state),
+    maxContextTokens: seatContextBudget(state, "plan"),
   });
 
   if (result.status === "transient") {

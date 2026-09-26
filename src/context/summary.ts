@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describeExecFailure, executeOpendCode } from "../execute/executor.ts";
 import { SPIRAL_COMPACTION_THRESHOLD } from "../execute/failure-ladder.ts";
 import { extractAssistantText } from "../core/ledger.ts";
-import { contextBudget } from "../config/config.ts";
+import { seatContextBudget } from "../config/config.ts";
 import type { RunState } from "../core/state.ts";
 
 /** Threshold (in characters) above which verify/smoke output is summarized
@@ -104,7 +104,7 @@ export async function summarizeIfNeeded(
     maxSteps: state.config.max_phase_steps,
     stallTimeoutSec: state.config.stall_timeout_sec,
     maxStepModelSec: state.config.max_step_model_sec,
-    maxContextTokens: contextBudget(state),
+    maxContextTokens: seatContextBudget(state, "extract"),
   });
   if (result.status === "transient") throw new Error(`summarize: ${describeExecFailure(result)}`);
   if (result.status !== "ok") return blob;
@@ -166,7 +166,7 @@ export async function writeRunSummary(state: RunState, ledger: string): Promise<
     maxSteps: state.config.max_phase_steps,
     stallTimeoutSec: state.config.stall_timeout_sec,
     maxStepModelSec: state.config.max_step_model_sec,
-    maxContextTokens: contextBudget(state),
+    maxContextTokens: seatContextBudget(state, "extract"),
   });
   if (result.status === "transient") throw new Error(`run summary: ${describeExecFailure(result)}`);
   if (result.status !== "ok") return;

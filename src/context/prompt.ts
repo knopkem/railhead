@@ -65,9 +65,13 @@ If your environment exposes browser/tab tools (${"`"}chrome-devtools_*${"`"}, ${
  * policy never blocks them. The visual/goal review agents need to redirect
  * dev-server output and read it back; writing to /tmp triggers an auto-reject
  * in non-yolo mode, which makes the review go inconclusive (ADR 0009: no
- * evidence must never be coerced into a pass). */
+ * evidence must never be coerced into a pass). Browser-MCP file outputs (a
+ * screenshot's filePath) follow the same rule for a separate reason: the MCP
+ * server validates output paths against the roots its client declares, so a
+ * /tmp path is rejected even with yolo permissions — that grant is opencode's
+ * external_directory rule, invisible to the MCP server. */
 export const SCRATCH_FILE_DISCIPLINE = `## Scratch files
-When you need to redirect command output to a file (e.g. capturing a dev server's startup log), write it under .railhead/ in this repo — never to /tmp or other external paths. The railhead pre-grants /tmp as a fallback, but .railhead/ is always safe and keeps everything self-contained. For example: ${"`"}npx vite &>.railhead/server.log & sleep 2; cat .railhead/server.log${"`"}.
+When you need to write a scratch file — a command's redirected output, a screenshot — write it under .railhead/ in this repo, never to /tmp or other external paths. Shell redirects to /tmp are pre-granted as a fallback, but browser/MCP tools that take an output path only write inside this workspace (or the OS temp dir, not /tmp), so keep those under .railhead/ too. For example: ${"`"}npx vite &>.railhead/server.log & sleep 2; cat .railhead/server.log${"`"}.
 
 Never remove or modify the .railhead/ directory itself or anything under .railhead/run-* — that is the railhead's own run state (its ledger), not scratch. Clean only the specific scratch files you created (e.g. .railhead/server.log), never with a recursive delete of .railhead/.`;
 
@@ -128,8 +132,12 @@ export async function buildReviewerPrompt(options: {
   diffStat?: string;
   /** Issue #50: rolling project digest. See ADR 0018. */
   digest?: string | null;
+  /** When true the reviewer runs on the tool-bearing observe seat
+   * (`code_review.inherit_tools`), so the frame grants read/search/read-only
+   * commands to verify the diff instead of claiming the seat is tool-less. */
+  inheritTools?: boolean;
 }): Promise<PhaseMessages> {
-  const { ticketFile, ticketBody, criteria, diff, priorFindings, contracts, learnings, fixMode, attempt, designDoc, architectureDoc, surface, coherenceDoc, lintOutput, diffFile, diffStat, digest } = options;
+  const { ticketFile, ticketBody, criteria, diff, priorFindings, contracts, learnings, fixMode, attempt, designDoc, architectureDoc, surface, coherenceDoc, lintOutput, diffFile, diffStat, digest, inheritTools } = options;
   const criteriaBlock = criteria.length
     ? criteria.map((c) => `- [ ] ${c}`).join("\n")
     : "- (no acceptance criteria listed)";
@@ -184,7 +192,15 @@ An acceptance criterion that names a concrete third-party package/artifact (or a
 - Do NOT block for the named artifact's absence when the diff meets the capability the criterion actually describes.
 - If the diff substitutes or drops a plan-named artifact and the project's decision record (DECISIONS.md) does not yet document that choice, raise [MAJOR]: the plan record still asserts the phantom name; it must record the substitution so later tickets and reviews stop fighting it. Name both the plan's claim and what the code actually uses.`;
 
-  const roleBlock = `You are the Reviewer for one ticket of an unattended build. You are read-only: critique the diff, never edit files. You have no read, search, or command tools — every file a review needs is already in this prompt (the ticket body, its acceptance criteria, and the diff), so do not try to explore the repository; answer in the exact format requested below.
+  const reviewerFrame = inheritTools
+    ? `You are the Reviewer for one ticket of an unattended build. You are read-only in effect: never edit files or change the repository. You have the project's ordinary tools — use read, search, or read-only commands to verify anything the diff leaves ambiguous, but stay inside this ticket's scope and never mutate state.`
+    : `You are the Reviewer for one ticket of an unattended build. You are read-only: critique the diff, never edit files. You have no read, search, or command tools — every file a review needs is already in this prompt (the ticket body, its acceptance criteria, and the diff), so do not try to explore the repository; answer in the exact format requested below.`;
+
+  const repoWideCheck = inheritTools
+    ? `A criterion phrased as a repo-wide check ("grep finds no X outside Y", "no other module contains Z") is verifiable with your tools: search the repo and judge it on what you find — met if it holds, a finding if it fails. Do not run anything that writes to the repository.`
+    : `A criterion phrased as a repo-wide check you cannot run ("grep finds no X outside Y", "no other module contains Z") is judged from the diff alone: your tools are diff-only by design, and no substitute tool family is available. If the diff is consistent with the criterion, treat it as met; if the diff itself violates it, report it. Never attempt to gather repo-wide evidence by other means.`;
+
+  const roleBlock = `${reviewerFrame}
 The purpose of review is to confirm the acceptance criteria are COMPLETELY met and the change basically works — not to police code style or polish. Ignore minor quality nits; only surface issues that genuinely matter.
 
 TICKET FILE: ${ticketFile}
@@ -228,7 +244,7 @@ Do NOT flag code the ticket explicitly asked for, even if it looks like it could
 
 Do NOT report compilation, build, or typecheck failures. The railhead runs verify (build + tests) for you and only invokes review after it passes — if verify is green, the code compiles by definition. A claim that "X will not compile" or "X fails to typecheck" cannot be true at review time and historically wastes retries on a non-existent failure. Report only correctness, logic, wiring, and completeness issues you can see in the diff itself.
 
-A criterion phrased as a repo-wide check you cannot run ("grep finds no X outside Y", "no other module contains Z") is judged from the diff alone: your tools are diff-only by design, and no substitute tool family is available. If the diff is consistent with the criterion, treat it as met; if the diff itself violates it, report it. Never attempt to gather repo-wide evidence by other means.
+${repoWideCheck}
 
 Do a COMPLETE, sweeping review in this single pass — catch EVERY real must-fix now. Reread the whole diff and hunt for all correctness gaps and criteria failures. Do not stop at the first problem found; list them all at once. Running many small review rounds is expensive, so prefer surfacing them together.
 
@@ -373,8 +389,13 @@ export async function buildReviewerReadModePrompt(options: {
   lintOutput?: string | null;
   /** Issue #50: rolling project digest. See ADR 0018. */
   digest?: string | null;
+  /** When true the reviewer runs on the tool-bearing observe seat
+   * (`code_review.inherit_tools`), so the frame grants read/search/read-only
+   * commands to verify the change instead of limiting the seat to the listed
+   * files. */
+  inheritTools?: boolean;
 }): Promise<PhaseMessages> {
-  const { ticketFile, ticketBody, criteria, stat, files, priorFindings, contracts, learnings, fixMode, attempt, designDoc, architectureDoc, surface, coherenceDoc, lintOutput, digest } = options;
+  const { ticketFile, ticketBody, criteria, stat, files, priorFindings, contracts, learnings, fixMode, attempt, designDoc, architectureDoc, surface, coherenceDoc, lintOutput, digest, inheritTools } = options;
   const criteriaBlock = criteria.length
     ? criteria.map((c) => `- [ ] ${c}`).join("\n")
     : "- (no acceptance criteria listed)";
@@ -411,7 +432,15 @@ export async function buildReviewerReadModePrompt(options: {
 
   const fileList = files.map((f) => `- ${f}`).join("\n");
 
-  const roleBlock = `You are the Reviewer for one ticket of an unattended build. You have read access to the touched source files — use the read tool to examine each one. Do NOT edit, run commands, or explore the repo beyond the files listed below.
+  const reviewerFrame = inheritTools
+    ? `You are the Reviewer for one ticket of an unattended build. You are read-only in effect: never edit files or change the repository. Use the read and search tools to examine the touched files and anything they depend on, and run read-only commands to confirm behavior; keep the review scoped to this ticket.`
+    : `You are the Reviewer for one ticket of an unattended build. You have read access to the touched source files — use the read tool to examine each one. Do NOT edit, run commands, or explore the repo beyond the files listed below.`;
+
+  const repoWideCheck = inheritTools
+    ? `A criterion phrased as a repo-wide check ("grep finds no X outside Y", "no other module contains Z") is verifiable with your tools: search the repo and judge it on what you find — met if it holds, a finding if it fails. Do not run anything that writes to the repository.`
+    : `A criterion phrased as a repo-wide check you cannot run ("grep finds no X outside Y", "no other module contains Z") is judged from the files this prompt lists: you have no search or command tools, and no substitute tool family is available. If those files are consistent with the criterion, treat it as met; if one of them violates it, report it.`;
+
+  const roleBlock = `${reviewerFrame}
 The purpose of review is to confirm the acceptance criteria are COMPLETELY met and the change basically works — not to police code style or polish. Ignore minor quality nits; only surface issues that genuinely matter.
 
 TICKET FILE: ${ticketFile}
@@ -454,7 +483,7 @@ Severity rule (issue #71): a smell NEVER blocks the ticket on its own. List a sm
 
 Do NOT report compilation, build, or typecheck failures. The railhead runs verify (build + tests) for you and only invokes review after it passes — if verify is green, the code compiles by definition.
 
-A criterion phrased as a repo-wide check you cannot run ("grep finds no X outside Y", "no other module contains Z") is judged from the files this prompt lists: you have no search or command tools, and no substitute tool family is available. If those files are consistent with the criterion, treat it as met; if one of them violates it, report it.
+${repoWideCheck}
 
 Do a COMPLETE, sweeping review in this single pass — catch EVERY real must-fix now. Read every listed file and hunt for all correctness gaps and criteria failures. Do not stop at the first problem found; list them all at once.
 

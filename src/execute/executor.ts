@@ -7,7 +7,7 @@ import { estimateTokens } from "./diff-filter.ts";
 import { streamedTokenCost } from "./token-meter.ts";
 import { CHECKPOINT_RE, endsWithCheckpoint, readCheckpointTicket } from "../core/checkpoint.ts";
 import { endsWithBlockReport, parseBlockReport, type BlockReport } from "../core/blocked.ts";
-import { DEFAULT_STALL_TIMEOUT_SEC, DEFAULT_MAX_STEP_MODEL_SEC, DEFAULT_MODEL } from "../config/config.ts";
+import { DEFAULT_STALL_TIMEOUT_SEC, DEFAULT_MAX_STEP_MODEL_SEC, DEFAULT_MODEL, type ContextGuardMode } from "../config/config.ts";
 import type { FailureEvidence } from "./failure-ladder.ts";
 import type { FirstStepCache } from "../core/telemetry.ts";
 import { haltReason } from "../core/halt.ts";
@@ -366,16 +366,16 @@ export interface ExecOptions {
    * sent. Without it a fork would re-send the joined prompt after the base's
    * copy (duplicated prefix). Ignored unless `session` + `fork`. */
   task?: string | null;
-  /** Issue #84 (ADR 0022 §5): how the request-ceiling kill guards behave.
-   * `"kill"` (default) is the ADR 0014/#81/#82 regime — the railhead kills a
-   * phase whose finished-step peak or streaming in-flight estimate crosses 95%
-   * of `maxContextTokens`; gate phases stay on it. `"telemetry"` is the
-   * durable-builder regime — those guards pass through as telemetry only
-   * (peak/in-flight still tracked and surfaced), because opencode's compaction
-   * owns fill management and a railhead kill would only race the compacter.
-   * The #78 model-time floor (`maxStepModelSec`) is NOT relaxed by this flag:
-   * it stays the builder's thrash health check. */
-  guardMode?: "kill" | "telemetry";
+  /** Issue #84 (ADR 0022 §5, amended ADR 0014): how the request-ceiling kill
+   * guards behave. Absent = the run's installed `context_guard` (default
+   * `"telemetry"`: peaks/in-flight are still tracked and surfaced, but the
+   * phase keeps running because opencode's compaction owns fill management
+   * and the ceiling sits below the model's real window). `"kill"` restores
+   * the ADR 0014/#81/#82 regime — a finished-step peak or streaming in-flight
+   * estimate crossing 95% of `maxContextTokens` stops the subprocess. The #78
+   * model-time floor (`maxStepModelSec`) is NOT relaxed by either mode: it
+   * stays the phase's thrash health check. */
+  guardMode?: ContextGuardMode;
   /** Render a live, human-readable progress stream to the railhead stderr.
    * When false, only the heartbeat (elapsed/step/peak summary) prints. */
   live?: boolean;
@@ -426,9 +426,11 @@ export interface ExecOptions {
   maxStepModelSec?: number | null;
   /** Hard cap on the model's context-window size in tokens (ADR 0014). The
    * railhead pre-flights the initial prompt against this cap (50% threshold —
-   * leaving room for model output + tool I/O) and kills mid-run if the
-   * finished-step `peakTokens` OR the streaming in-flight estimate (#82)
-   * exceeds 95% of it. `null` or `0` = no token-budget guard. */
+   * leaving room for model output + tool I/O) and watches the finished-step
+   * `peakTokens` OR the streaming in-flight estimate (#82) against it; the
+   * crossing kills only under `guardMode: "kill"` (the installed
+   * `context_guard`), otherwise it is logged. `null` or `0` = no token-budget
+   * guard. */
   maxContextTokens?: number | null;
   /** Kill the subprocess after this many consecutive identical errored tool
    * calls — a model stuck in a retry loop (same tool, same input, same error)
@@ -531,6 +533,24 @@ export const EDIT_LOOP_THRESHOLD = 3;
  * the pre-flight estimate must not exceed this fraction of the budget. */
 export const PROMPT_BUDGET_RATIO = 0.5;
 
+/** ADR 0014 amendment: the request-ceiling kill is opt-in. The default is
+ * telemetry-only — the ceiling is the model's configured opencode limit, and
+ * a crossing is ordinary fill that opencode's compaction owns; killing there
+ * discards a judging phase's verdict mid-work (run-20260925-2006's goal
+ * review died at 115,995/120,000 with its probe output in hand).
+ * `configureContextGuard` installs the run's config at run/plan start; an
+ * explicit per-call `guardMode` still wins (the builder pins telemetry). */
+let defaultGuardMode: ContextGuardMode = "telemetry";
+
+export function configureContextGuard(mode: ContextGuardMode | null | undefined): void {
+  defaultGuardMode = mode === "kill" ? "kill" : "telemetry";
+}
+
+/** Restore the default for tests that install a mode. */
+export function resetContextGuardForTest(): void {
+  defaultGuardMode = "telemetry";
+}
+
 /**
  * Run `opencode run --format json` in a fresh process, streaming the raw
  * JSON event lines into the ledger verbatim. When `live` is set, also renders
@@ -577,7 +597,7 @@ export async function executeOpendCode(
     stallTimeoutSec = DEFAULT_STALL_TIMEOUT_SEC,
     maxStepModelSec = DEFAULT_MAX_STEP_MODEL_SEC,
     maxContextTokens,
-    guardMode = "kill",
+    guardMode = defaultGuardMode,
     spinLoopThreshold = DEFAULT_SPIN_LOOP_THRESHOLD,
     maxToolTimeouts = DEFAULT_TOOL_TIMEOUT_LIMIT,
     toolTimeoutWindowSec = DEFAULT_TOOL_TIMEOUT_WINDOW_SEC,
@@ -601,8 +621,9 @@ export async function executeOpendCode(
   // QUOTED the checkpoint format in prose kill the phase at the next step
   // boundary, discarding a productive in-flight generation.
   const terminalAnchor = stopAfterMarker !== null;
-  // Issue #84: under the durable builder the request-ceiling kill guards are
-  // telemetry-only (compaction owns fill; a railhead kill would race it).
+  // Issue #84: under `guardMode: "telemetry"` (the installed `context_guard`
+  // default) the request-ceiling kill guards are telemetry-only — compaction
+  // owns fill; a railhead kill would race it.
   const killGuards = guardMode !== "telemetry";
   // Uniform timestamp for EVERY emitted line (event renders, step markers,
   // errors, heartbeats) so no line reads as a bare orphan next to a clocked
@@ -706,11 +727,11 @@ export async function executeOpendCode(
           },
         };
       }
-      // Issue #84: the durable builder's ceiling is telemetry, not a refusal —
-      // a resumed session may legitimately open past the 50% pre-flight line
-      // and let compaction manage the fill. Log and proceed; the request is
-      // the model's to make.
-      sink(`${p}ℹ prompt estimated at ~${estimated} tokens exceeds ${threshold} (50% of ${maxContextTokens} budget) — telemetry only under the session builder; proceeding`);
+      // Issue #84: under telemetry the ceiling is not a refusal — a resumed
+      // session may legitimately open past the 50% pre-flight line and let
+      // compaction manage the fill. Log and proceed; the request is the
+      // model's to make.
+      sink(`${p}ℹ prompt estimated at ~${estimated} tokens exceeds ${threshold} (50% of ${maxContextTokens} budget) — telemetry only (context_guard is not "kill"); proceeding`);
     }
   }
 
@@ -782,6 +803,10 @@ export async function executeOpendCode(
   let stepToolMs = 0;
   let stepStart = Date.now();
   let budgetExceeded = false;
+  // Which guard fired a budget kill: the step cap and the request ceiling both
+  // set budgetExceeded, and callers deserve the real one, not a step-budget
+  // label on a 95%-of-context kill.
+  let budgetKillReason: string | null = null;
   let stalled = false;
   let modelStalled = false;
   let spinLoop = false;
@@ -1005,6 +1030,7 @@ export async function executeOpendCode(
             const p = livePrefix ? `${livePrefix} ` : "";
             if (killGuards) {
               sink(`${p}✖ peak tokens ${peakTokens} exceeded 95% of budget ${maxContextTokens} — killing before the next step runs`);
+              budgetKillReason = `request ceiling exceeded — peak ${peakTokens} tokens crossed 95% of the ${maxContextTokens}-token budget`;
               budgetExceeded = true;
               try { process.kill(-child.pid!, "SIGTERM"); } catch { child.kill("SIGTERM"); }
               return;
@@ -1012,7 +1038,7 @@ export async function executeOpendCode(
             // Issue #84: telemetry-only on the durable builder — compaction
             // owns the fill; the railhead only watches. Step bookkeeping below
             // still runs so the session progresses normally.
-            sink(`${p}ℹ peak tokens ${peakTokens} exceeded 95% of budget ${maxContextTokens} — telemetry only under the session builder`);
+            sink(`${p}ℹ peak tokens ${peakTokens} exceeded 95% of budget ${maxContextTokens} — telemetry only (context_guard is not "kill")`);
           }
           steps++;
           stepStart = Date.now();
@@ -1028,6 +1054,7 @@ export async function executeOpendCode(
           } catch { /* ignore */ }
           if (steps > stepCap) {
             budgetExceeded = true;
+            budgetKillReason = `exceeded step budget (${stepCap} steps)`;
             const p = livePrefix ? `${livePrefix} ` : "";
             sink(`${p}✖ step budget exceeded (${stepCap} steps) — killing opencode process`);
             // Kill the entire process group so shell-spawned children (cargo,
@@ -1153,12 +1180,13 @@ export async function executeOpendCode(
           const p = livePrefix ? `${livePrefix} ` : "";
           if (killGuards) {
             sink(`${p}✖ peak tokens ${peakTokens} exceeded 95% of budget ${maxContextTokens} — killing subprocess`);
+            budgetKillReason = `request ceiling exceeded — peak ${peakTokens} tokens crossed 95% of the ${maxContextTokens}-token budget`;
             try { process.kill(-child.pid!, "SIGTERM"); } catch { child.kill("SIGTERM"); }
             budgetExceeded = true;
             return;
           }
           // Issue #84: telemetry-only on the durable builder.
-          sink(`${p}ℹ peak tokens ${peakTokens} exceeded 95% of budget ${maxContextTokens} — telemetry only under the session builder`);
+          sink(`${p}ℹ peak tokens ${peakTokens} exceeded 95% of budget ${maxContextTokens} — telemetry only (context_guard is not "kill")`);
         }
         // Issue #82: arm the ceiling on the IN-FLIGHT ESTIMATE while a step is
         // running, not only on step_finish-reported peaks. The steps that
@@ -1175,12 +1203,13 @@ export async function executeOpendCode(
             const p = livePrefix ? `${livePrefix} ` : "";
             if (killGuards) {
               sink(`${p}✖ in-flight estimate ${estNow} tokens exceeded 95% of budget ${maxContextTokens} — killing mid-step before the next request is sent`);
+              budgetKillReason = `request ceiling exceeded — in-flight estimate ${estNow} tokens crossed 95% of the ${maxContextTokens}-token budget`;
               budgetExceeded = true;
               try { process.kill(-child.pid!, "SIGTERM"); } catch { child.kill("SIGTERM"); }
               return;
             }
             // Issue #84: telemetry-only on the durable builder.
-            sink(`${p}ℹ in-flight estimate ${estNow} tokens exceeded 95% of budget ${maxContextTokens} — telemetry only under the session builder`);
+            sink(`${p}ℹ in-flight estimate ${estNow} tokens exceeded 95% of budget ${maxContextTokens} — telemetry only (context_guard is not "kill")`);
           }
         }
         if (spinLoopThreshold && spinLoopThreshold > 0) {
@@ -1392,7 +1421,7 @@ export async function executeOpendCode(
     ? `model produced 0 tokens (connection or provider failure) — ${injected}`
     : "model produced 0 tokens (connection or provider failure)";
   const finalStatus: ExecStatus = halted ? "halted" : markerEarlyExit || blockEmitted ? "ok" : degradedTarget ? "degraded_target" : (spinLoop || editLoop) ? "spin_loop" : budgetExceeded ? "budget_exceeded" : stalled || modelStalled || wallClockExceeded ? "timeout" : zeroOutput ? "transient" : transientError && code !== 0 ? "transient" : code === 0 ? "ok" : "error";
-  const finalError = halted ? (haltReasonText ?? "halt file present") : modelStallMessage ?? wallClockMessage ?? (zeroOutput ? zeroOutputMessage : errorMessage);
+  const finalError = halted ? (haltReasonText ?? "halt file present") : modelStallMessage ?? wallClockMessage ?? (zeroOutput ? zeroOutputMessage : budgetKillReason ?? errorMessage);
   // Issue #133: a failed `--fork` invocation means the base could not be
   // branched — either this opencode predates the flag or the session is gone.
   // The prompt was never consumed, so the caller may re-run without the base.
@@ -1930,7 +1959,7 @@ function toolUseErrorTextOf(line: string): string | null {
  */
 export function describeExecFailure(result: Pick<ExecResult, "status" | "steps" | "code" | "errorMessage">): string {
   if (result.status === "transient") return `hit a transient provider error (${result.errorMessage ?? "unknown"})`;
-  if (result.status === "budget_exceeded") return `exceeded step budget (${result.steps} steps)`;
+  if (result.status === "budget_exceeded") return result.errorMessage ?? `exceeded step budget (${result.steps} steps)`;
   if (result.status === "timeout") {
     // Issue #78: distinguish a model-time kill (server thrashing at 0 tok/s)
     // from a silence kill so callers can route each to the right response —

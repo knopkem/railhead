@@ -13,7 +13,7 @@ import { isRenderedSurface, type ProjectInterface } from "../config/interface.ts
 import { numberTickets, writeTickets, type Ticket } from "../core/ticket.ts";
 import { writePlanOrigin } from "./plan-identity.ts";
 import { extractAssistantText, extractPlanText, initLedger, resetPhase, readStderrLines } from "../core/ledger.ts";
-import { readProjectDoc, writeProjectDoc } from "../core/git.ts";
+import { readProjectDoc, writeProjectDoc, headCommit } from "../core/git.ts";
 import { summarizePermissionRejections } from "../core/permissions.ts";
 import {
   appendContextTerms,
@@ -502,6 +502,7 @@ function hardenerTicket(): PlanTicket {
     prompt,
     created_at: new Date().toISOString(),
     ticket_files: ordered.map((t) => t.file),
+    base_sha: await headCommit(cwd).catch(() => null),
   });
   // The human-facing plan overview. Written for build plans only (fix mode is
   // one ticket — there is nothing to iterate on); the distilled

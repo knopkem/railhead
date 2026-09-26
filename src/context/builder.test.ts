@@ -440,6 +440,7 @@ describe("open-ended craft ticket — the art agent", () => {
     const p = builderPrompt({ session: {}, granularity: "product", tickets: [artTicket], verify: ["npm test"] });
     expect(p).toContain("OPEN-ENDED CRAFT ticket");
     expect(p).toMatch(/READ the screenshot back/i);
+    expect(p).toMatch(/capture a screenshot under \.railhead\//i);
     expect(p).toMatch(/Keep iterating until the artifact is genuinely good/i);
     expect(p).not.toMatch(/checkpoint the moment it is individually green/i);
   });
@@ -504,6 +505,7 @@ describe("surface cadence for visual tickets (v2 issue 01)", () => {
     const p = builderPrompt({ ...fresh, tickets: [surfaceTicket], visionCapability: capable });
     expect(p).toMatch(/verify this ticket with your own eyes/i);
     expect(p).toMatch(/READ the screenshot back/i);
+    expect(p).toMatch(/screenshot of the affected surface under \.railhead\//i);
     expect(p).toMatch(/visibly wrong is NOT green/i);
   });
 
@@ -511,6 +513,13 @@ describe("surface cadence for visual tickets (v2 issue 01)", () => {
     const p = builderPrompt({ ...fresh, tickets: [surfaceTicket], visionCapability: blind });
     expect(p).toMatch(/unable to read image pixels/i);
     expect(p).not.toMatch(/READ the screenshot back/i);
+  });
+
+  it("asks an unmeasured seat to try the read and report a failure — never that it was measured blind", () => {
+    const p = builderPrompt({ ...fresh, tickets: [surfaceTicket] });
+    expect(p).toMatch(/no current image-reading measurement/i);
+    expect(p).toMatch(/If the read returns no pixels, that is a tool failure/i);
+    expect(p).not.toMatch(/unable to read image pixels/i);
   });
 
   it("leaves a purely structural ticket on the ordinary cadence", () => {

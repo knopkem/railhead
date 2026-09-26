@@ -1,4 +1,5 @@
 import { evaluateHealthResponse, resolveHealthUrl, type ProviderConfig, type ProviderHealthConfig } from "../config/provider.ts";
+import { SEAT_ORDER, type ResolvedModels } from "../config/config.ts";
 import { disabledTimeoutWarnings } from "../core/provider-config.ts";
 import { nowClock } from "../cli/overview.ts";
 
@@ -90,15 +91,29 @@ export function resetProviderHealthForTest(): void {
 /** Install a run/plan's provider config and warn once per project per process
  *  about providers whose request timeouts are all disabled — the
  *  configuration that let the snake run's wedged request reach the stall
- *  guard. Best-effort; the same process can enter plan and run, so the scan
- *  runs once. */
+ *  guard. Only providers a resolved seat actually reaches are warned about,
+ *  so an engine configured in opencode for something else stays quiet.
+ *  Best-effort; the same process can enter plan and run, so the scan runs
+ *  once. */
 const warnedProjects = new Set<string>();
 
-export function configureProvider(provider: ProviderConfig | null | undefined, cwd: string): void {
+/** The resolved seat models a run can spawn, as model refs; a `null` seat is
+ *  skipped (no phase) and `DEFAULT_MODEL` stays the sentinel for the scan to
+ *  expand against the resolved opencode config. Pure. */
+export function usedModelRefs(models: ResolvedModels): ReadonlySet<string> {
+  const refs = new Set<string>();
+  for (const seat of SEAT_ORDER) {
+    const model = models[seat];
+    if (model !== null) refs.add(model);
+  }
+  return refs;
+}
+
+export function configureProvider(provider: ProviderConfig | null | undefined, cwd: string, models: ResolvedModels): void {
   setProviderHealth(provider);
   if (warnedProjects.has(cwd)) return;
   warnedProjects.add(cwd);
-  for (const warning of disabledTimeoutWarnings(cwd)) {
+  for (const warning of disabledTimeoutWarnings(cwd, usedModelRefs(models))) {
     console.log(`[${nowClock()}] ${warning}`);
   }
 }

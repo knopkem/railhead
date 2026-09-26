@@ -2,7 +2,7 @@ import { mkdtemp, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, expect } from "vitest";
-import { applyModelOverrides, DEFAULT_CONFIG, DEFAULT_CONTEXT_TOKENS, DEFAULT_INFRA_BACKOFF_SEC, DEFAULT_MAX_STEP_MODEL_SEC, DEFAULT_MODEL, DEFAULT_STALL_TIMEOUT_SEC, effectiveContextTokens, goalCheckpointActionFor, goalCheckpointIsAdvisory, goalFiresCheckpointsMidRun, interactionSmokeEnabled, loadConfig, parseCheckpointGranularity, parseGoalCheckpointAction, presetGateModes, resolveModels, parseModelContextLimit, updateConfig, warnIfOversightModelIsLocal } from "./config.ts";
+import { applyModelOverrides, DEFAULT_CONFIG, DEFAULT_CONTEXT_TOKENS, DEFAULT_INFRA_BACKOFF_SEC, DEFAULT_MAX_STEP_MODEL_SEC, DEFAULT_MODEL, DEFAULT_STALL_TIMEOUT_SEC, effectiveContextTokens, goalCheckpointActionFor, goalCheckpointIsAdvisory, goalFiresCheckpointsMidRun, interactionSmokeEnabled, loadConfig, parseCheckpointGranularity, parseGoalCheckpointAction, presetGateModes, resolveModels, parseModelContextLimit, seatContextBudget, seatContextCeilings, updateConfig, warnIfOversightModelIsLocal } from "./config.ts";
 
 async function makeCwd(body: string | null): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "cfg-"));
@@ -242,6 +242,16 @@ describe("loadConfig", () => {
     expect(cfg.on_block).toBe("continue");
   });
 
+  it("defaults context_guard to telemetry and accepts an explicit kill; a typo falls back to telemetry (ADR 0014 amendment)", async () => {
+    const dflt = await loadConfig(await makeCwd(null));
+    expect(dflt.context_guard).toBe("telemetry");
+    const kill = await loadConfig(await makeCwd('{"context_guard":"kill"}'));
+    expect(kill.context_guard).toBe("kill");
+    // A typo must not silently arm a kill switch.
+    const typo = await loadConfig(await makeCwd('{"context_guard":"kll"}'));
+    expect(typo.context_guard).toBe("telemetry");
+  });
+
   it("loads sharpen_max_rounds override", async () => {
     const cfg = await loadConfig(await makeCwd('{"sharpen_max_rounds":3}'));
     expect(cfg.sharpen_max_rounds).toBe(3);
@@ -278,6 +288,16 @@ describe("loadConfig", () => {
     expect(cfg.visual_review?.mode).toBe("off");
     expect(cfg.goal_review?.mode).toBe("off");
     expect(cfg.structural_review?.mode).toBe("off");
+  });
+
+  it("defaults code_review.inherit_tools to true (the reviewer runs on the ordinary tool-bearing seat like every other gate)", async () => {
+    const cfg = await loadConfig(await makeCwd(null));
+    expect(cfg.code_review?.inherit_tools).toBe(true);
+  });
+
+  it("preserves code_review.inherit_tools: false (restores the isolated tool-denied reviewer)", async () => {
+    const cfg = await loadConfig(await makeCwd(JSON.stringify({ code_review: { mode: "full", inherit_tools: false } })));
+    expect(cfg.code_review?.inherit_tools).toBe(false);
   });
 
   it("reads code_review.mode / visual_review.mode / goal_review.mode / structural_review.mode (#73)", async () => {
@@ -753,10 +773,10 @@ describe("effectiveContextTokens", () => {
     expect(source).toBe("config");
   });
 
-  it("uses the 0.6× ceiling when config is unset (not the whole window)", () => {
+  it("uses the model's detected limit verbatim when config is unset (ADR 0014 amendment: the margin lives in limit.context)", () => {
     const { budget, source } = effectiveContextTokens(undefined, 100000);
-    expect(budget).toBe(60000);
-    expect(source).toBe("default");
+    expect(budget).toBe(100000);
+    expect(source).toBe("model");
   });
 
   it("honors an explicit ceiling without applying the default fraction", () => {
@@ -775,6 +795,61 @@ describe("effectiveContextTokens", () => {
     const { budget, source } = effectiveContextTokens(undefined, null);
     expect(budget).toBe(DEFAULT_CONTEXT_TOKENS);
     expect(source).toBe("default");
+  });
+});
+
+describe("seatContextCeilings (ADR 0014 per-seat amendment)", () => {
+  const models = { plan: "plan/model", implement: "impl/model", review: "rev/model", visual: "vis/model", goal: "goal/model", extract: null };
+
+  it("does not cap a larger-window judging seat with the implementer's budget", () => {
+    const ceilings = seatContextCeilings(
+      { ...models, plan: null, review: null, visual: null },
+      { implement: 100000, goal: 200000 },
+      100000,
+    );
+    expect(ceilings.implement).toBe(100000);
+    expect(ceilings.goal).toBe(200000);
+  });
+
+  it("resolves each judging seat from its own configured limit verbatim (no harness fraction)", () => {
+    const ceilings = seatContextCeilings(
+      { ...models, plan: null, review: null, extract: "extract/model" },
+      { implement: 100000, visual: 150000, goal: 200000, extract: 50000 },
+      undefined,
+    );
+    expect(ceilings.implement).toBe(100000);
+    expect(ceilings.visual).toBe(150000);
+    expect(ceilings.goal).toBe(200000);
+    expect(ceilings.extract).toBe(50000);
+  });
+
+  it("falls back to the operator ceiling for a seat whose window was not detected", () => {
+    const ceilings = seatContextCeilings({ ...models, extract: null, visual: null }, { goal: null }, 80000);
+    expect(ceilings.goal).toBe(80000);
+  });
+
+  it("skips seats with no configured model", () => {
+    const ceilings = seatContextCeilings({ ...models, extract: null }, { implement: 100000 }, 100000);
+    expect(ceilings.extract).toBeUndefined();
+    expect(Object.keys(ceilings).sort()).toEqual(["goal", "implement", "plan", "review", "visual"]);
+  });
+});
+
+describe("seatContextBudget", () => {
+  const state = {
+    _seatContextTokens: { implement: 100000, goal: 200000 },
+    _effectiveContextTokens: 100000,
+    config: { max_context_tokens: 100000 },
+  };
+
+  it("prefers the seat's resolved ceiling", () => {
+    expect(seatContextBudget(state, "goal")).toBe(200000);
+    expect(seatContextBudget(state, "implement")).toBe(100000);
+  });
+
+  it("falls back to the implement-derived budget when the seat has no entry", () => {
+    expect(seatContextBudget(state, "visual")).toBe(100000);
+    expect(seatContextBudget({ _effectiveContextTokens: 90000, config: {} }, "goal")).toBe(90000);
   });
 });
 

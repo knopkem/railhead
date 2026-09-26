@@ -79,7 +79,8 @@ railhead diagnose screenshots [--model M]  check that a model can take a screens
   "verify_timeout_sec": null,     // kill a hung verify command (null = 600s)
   "stall_timeout_sec": null,      // kill a phase with no output (null = 3600s)
   "max_step_model_sec": null,     // kill a single step stuck in model time (null = 3600s)
-  "request_ceiling_tokens": null, // largest request a phase may send (null = 0.6× the model window)
+  "request_ceiling_tokens": null, // largest request a phase may send (null = the model's configured opencode limit.context)
+  "context_guard": "telemetry",   // "kill" stops a phase crossing 95% of its ceiling; default logs only
   "sharpen_max_rounds": 6,        // interview round cap (0 disables the interview)
   "infra_backoff_sec": [60, 300, 900, 1800],
   "model": {
@@ -199,9 +200,9 @@ The one critical setting is the **per-model context limit** — opencode cannot 
 }
 ```
 
-Set `request_ceiling_tokens` in `railhead.json` to bound the largest single request (prompt + output reserve) a phase may send. Leave it unset and Railhead uses **0.6× the model's window** — a value that survives a warm KV pool. Only set it below the window; never mirror the server's full capacity. After a run, `report.md` shows whether any ticket's peak context approached the ceiling.
+Set `request_ceiling_tokens` in `railhead.json` to bound the largest single request (prompt + output reserve) a phase may send. Leave it unset and Railhead uses **the model's configured opencode `limit.context`** — the effective limit opencode reports, config overrides included. That is where the safety margin belongs: on a warm KV server, set `limit.context` below the server's hard limit (e.g. `80000` when the hard limit is `100000`) and both opencode's compaction and Railhead's ceiling see the same number. Only set `request_ceiling_tokens` below the window; never mirror the server's full capacity. Crossings are logged, not killed, unless you set `context_guard: "kill"`. After a run, `report.md` shows whether any ticket's peak context approached the ceiling.
 
-**Set finite request timeouts.** A provider configured with `timeout: false`, `headerTimeout: false`, and `chunkTimeout: false` lets a wedged request run until Railhead's stall guard ends it (~an hour). Railhead warns at startup when it sees that triple. Pair it with the optional `provider.health` probe above: an unhealthy server then fails a phase in seconds — through the normal failure ladder — instead of stalling. The probe is operator-declared and vendor-neutral (an HTTP URL plus a pass rule over the JSON body); no server is auto-detected, and with no `provider` block nothing changes. A restarted provider only colds the prompt cache — the base session persists and the next phase re-warms it.
+**Set finite request timeouts.** A provider configured with `timeout: false`, `headerTimeout: false`, and `chunkTimeout: false` lets a wedged request run until Railhead's stall guard ends it (~an hour). Railhead warns at startup when a model one of the run's seats actually uses sits behind that triple — a provider only other tools touch stays quiet. Pair it with the optional `provider.health` probe above: an unhealthy server then fails a phase in seconds — through the normal failure ladder — instead of stalling. The probe is operator-declared and vendor-neutral (an HTTP URL plus a pass rule over the JSON body); no server is auto-detected, and with no `provider` block nothing changes. A restarted provider only colds the prompt cache — the base session persists and the next phase re-warms it.
 
 ## Design principles
 

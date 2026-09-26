@@ -7,6 +7,12 @@ export interface PlanOrigin {
   prompt: string;
   created_at: string;
   ticket_files: string[];
+  /** HEAD at plan time (null when the repo had no commits yet). A plan only
+   * owns the commits on top of this base, so ticket pre-marking scans
+   * base_sha..HEAD — a long-lived repo's older "N — title" commits can never
+   * satisfy a fresh plan's ticket titles. Legacy origin.json files without
+   * the field read as null (scan everything, the old behavior). */
+  base_sha: string | null;
 }
 
 const ORIGIN_FILE = "origin.json";
@@ -47,6 +53,7 @@ export async function readPlanOrigin(dir: string): Promise<PlanOrigin | null> {
     prompt: typeof obj.prompt === "string" ? obj.prompt : "",
     created_at: obj.created_at,
     ticket_files: (obj.ticket_files as unknown[]).filter((f): f is string => typeof f === "string"),
+    base_sha: typeof obj.base_sha === "string" && obj.base_sha ? obj.base_sha : null,
   };
 }
 

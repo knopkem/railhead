@@ -72,7 +72,7 @@ export interface GateFeedback {
  * railhead otherwise suppresses: one agent holding the whole visual goal and
  * refining freely. */
 const OPEN_ENDED_CADENCE = `You stop when you judge the artifact genuinely meets the goal. This is an OPEN-ENDED CRAFT ticket: there are NO structural acceptance criteria to check off — the rendered artifact IS the deliverable, and you are its judge. Work in a loop:
-1. Build and run the app, and capture a screenshot to a named path.
+1. Build and run the app, and capture a screenshot under .railhead/ (e.g. .railhead/screenshot-01.png).
 2. READ the screenshot back (you are vision-capable — the railhead verified it). Never judge from code alone.
 3. Judge it against this ticket's goal and the design intent. Name, concretely, what is weakest.
 4. Improve the weakest thing. Re-run, re-capture, re-read.
@@ -86,7 +86,7 @@ Do NOT stop at the first version that builds and runs. Keep iterating until the 
  * a blind seat is told to verify through DOM/state evidence instead of
  * pretending to look. */
 const SURFACE_CADENCE = `Before checkpointing, verify this ticket with your own eyes — its criteria touch the rendered surface:
-1. Build and run the app, capture a screenshot of the affected surface to a named path.
+1. Build and run the app, capture a screenshot of the affected surface under .railhead/ (e.g. .railhead/screenshot-01.png).
 2. READ the screenshot back (the railhead measured this seat's model as vision-capable; a read returning no pixels is a tool failure to report, never an accepted limitation).
 3. Judge what you see against this ticket's criteria and the Design intent injected below. Name the weakest thing.
 4. Fix the weakest thing and repeat until the criteria genuinely hold on the running artifact.
@@ -97,13 +97,22 @@ const SURFACE_CADENCE_BLIND = `Before checkpointing, verify this ticket against 
 2. Label any purely visual property you cannot check as unverified in your closing note rather than asserting it.
 Do not checkpoint a surface ticket whose observable behaviour you could not confirm through those channels.`;
 
+/** No current measurement (a fresh model, or a probe the toolchain defeated).
+ * The seat is told to TRY the read and report what happens — never that it was
+ * measured blind, which is the false claim a flaky probe used to produce. */
+const SURFACE_CADENCE_UNKNOWN = `Before checkpointing, verify this ticket against the running artifact — its criteria touch the rendered surface, and the railhead has no current image-reading measurement for this seat's model:
+1. Build and run the app, capture a screenshot of the affected surface under .railhead/ (e.g. .railhead/screenshot-01.png), and READ it back. If the read returns pixels, judge what you see against this ticket's criteria and the Design intent injected below, fix the weakest thing, and repeat until the criteria genuinely hold on the running artifact.
+2. If the read returns no pixels, that is a tool failure: report it, verify through the DOM/a11y tree, programmatic state reads, or console output instead, and label any purely visual property as unverified. Never claim a visual check the read did not deliver.
+A ticket whose criteria pass on paper but whose render is visibly wrong is NOT green — do not checkpoint it.`;
+
 /** The directive options that turn a ticket batch's cadence into the surface
- * self-check. `surface` is the classifier's verdict over the batch; `visionCapable`
- * is the railhead's measurement (null = unknown → treated as blind, the honest
- * default). */
+ * self-check. `surface` is the classifier's verdict over the batch;
+ * `visionCapable` is the railhead's measurement — true (verified pixels), false
+ * (measured blind), or null (no current measurement → the seat tries the read
+ * and reports the failure instead of being told it cannot see). */
 export interface CadenceOptions {
   surface: boolean;
-  visionCapable: boolean;
+  visionCapable: boolean | null;
 }
 
 /** Text shared by every builder message: the boundary-kill discipline that
@@ -112,7 +121,7 @@ export interface CadenceOptions {
 export function checkpointDirective(
   granularity: CheckpointGranularity,
   tickets: BuilderTicket[],
-  cadenceOptions: CadenceOptions = { surface: false, visionCapable: false },
+  cadenceOptions: CadenceOptions = { surface: false, visionCapable: null },
 ): string {
   const names = tickets.map((t) => `\`${t.number}\``).join(", ");
   const openEnded = tickets.some((t) => t.openEnded === true);
@@ -146,7 +155,12 @@ export function checkpointDirective(
   // the railhead's measured vision capability. The open-ended craft ticket
   // already carries the stronger loop via OPEN_ENDED_CADENCE.
   if (!openEnded && cadenceOptions.surface) {
-    cadence = `${cadence}\n\n${cadenceOptions.visionCapable ? SURFACE_CADENCE : SURFACE_CADENCE_BLIND}`;
+    const surfaceCheck = cadenceOptions.visionCapable === true
+      ? SURFACE_CADENCE
+      : cadenceOptions.visionCapable === false
+        ? SURFACE_CADENCE_BLIND
+        : SURFACE_CADENCE_UNKNOWN;
+    cadence = `${cadence}\n\n${surfaceCheck}`;
   }
   const doneCondition = openEnded
     ? "When you judge the artifact meets the goal AND the build/tests below pass on disk,"
@@ -418,7 +432,7 @@ export function buildBuilderPrompt(opts: {
   // gets the surface self-check, not just the one open-ended craft ticket.
   const cadenceOptions: CadenceOptions = {
     surface: tickets.some((t) => touchesVisualSurface(t)),
-    visionCapable: opts.visionCapability?.readsImages === true,
+    visionCapable: opts.visionCapability ? opts.visionCapability.readsImages : null,
   };
   // gh #105: under product granularity the caller surfaces the CURRENT ticket
   // only (the whole remaining queue used to be pre-listed, which invited
@@ -509,7 +523,7 @@ export function buildBuilderFindingsPrompt(opts: {
     : "(no findings listed)";
   const cadenceOptions: CadenceOptions = {
     surface: tickets.some((t) => touchesVisualSurface(t)),
-    visionCapable: opts.visionCapability?.readsImages === true,
+    visionCapable: opts.visionCapability ? opts.visionCapability.readsImages : null,
   };
   return {
     preamble: renderPreamble({ design: design ?? null, coherence: coherence ?? null }),

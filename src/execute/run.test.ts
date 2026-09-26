@@ -108,6 +108,11 @@ function kindOf(options: { phaseFile: string; agent?: string | null }): "base" |
   if (options.phaseFile.startsWith("structural-")) return "structural";
   if (options.phaseFile.startsWith("replan-")) return "replan";
   if (options.phaseFile.endsWith("-reconcile")) return "reconcile";
+  // The per-ticket code review runs on the tool-bearing observe seat by default
+  // (`code_review.inherit_tools`), so the phase-file suffix, not the agent
+  // name, is what identifies it. The `visual-*-review` rounds are already
+  // claimed by the visual branch above.
+  if (options.phaseFile.endsWith("-review")) return "review";
   return "implement";
 }
 
@@ -349,6 +354,41 @@ describe("processTicket", () => {
     expect(reviewPrompts).toHaveLength(1);
     expect(reviewPrompts[0]).toContain("src/index.js");
     expect(reviewPrompts[0]).not.toContain("package-lock.json");
+  });
+
+  it("review: runs on the ordinary observe seat by default and on the isolated reviewer when code_review.inherit_tools is false", async () => {
+    const cases: Array<{ label: string; config: RailheadConfig; agent: string }> = [
+      { label: "default (bypass enabled)", config: baseConfig(), agent: "railhead-observe" },
+      { label: "inherit_tools false", config: baseConfig({ code_review: { mode: "full", inherit_tools: false } }), agent: "railhead-review" },
+    ];
+    for (const c of cases) {
+      const cwd = await freshRepo();
+      const ticketsDir = ticketsDirOf(cwd);
+      const ledgerDir = join(cwd, ".railhead", "run-test");
+      await initLedger(ledgerDir);
+      const { state: ticketState } = await makeTicket(ticketsDir);
+      const state = await makeState(cwd, ticketsDir, c.config);
+      state.tickets = [ticketState];
+
+      const reviewAgents: Array<string | null | undefined> = [];
+      mockExec.mockImplementation(async (_prompt, options) => {
+        const kind = kindOf(options);
+        if (kind === "implement") {
+          await writeImplementedFile(cwd);
+          await emitText(ledgerDir, options.phaseFile, "DONE");
+        } else if (kind === "review") {
+          reviewAgents.push(options.agent);
+          await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
+        } else {
+          await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+        }
+        return okResult();
+      });
+
+      const outcome = await processTicket(state, ledgerDir, ticketState);
+      expect(outcome, c.label).toBe("ok");
+      expect(reviewAgents, c.label).toEqual([c.agent]);
+    }
   });
 
   it("verify failure retries with a clean worktree, then succeeds", async () => {
@@ -2858,7 +2898,8 @@ describe("goal review cadence (issue #73)", () => {
     state.tickets = group.map((t) => toTicketState(t));
 
     const interactPhases: string[] = [];
-    mockExec.mockImplementation(async (_prompt, options) => {
+    const interactPrompts: string[] = [];
+    mockExec.mockImplementation(async (prompt, options) => {
       const kind = kindOf(options);
       if (kind === "implement") {
         await writeImplementedFile(cwd);
@@ -2867,6 +2908,7 @@ describe("goal review cadence (issue #73)", () => {
         await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
       } else if (kind === "interact") {
         interactPhases.push(options.phaseFile);
+        interactPrompts.push(prompt);
         await emitText(ledgerDir, options.phaseFile, interactPhases.length === 1
           ? "$SMOKE_FAIL\n[BLOCKER] the canvas does not change after clicking New game\n$END"
           : "$SMOKE_PASS\n$END");
@@ -2882,6 +2924,11 @@ describe("goal review cadence (issue #73)", () => {
     // Never on the group's first ticket; on the boundary ticket only — twice,
     // because the blocking FAIL fed back and the retry passed.
     expect(interactPhases).toEqual(["02-01-interact", "02-02-interact"]);
+    // The judge is scoped to the boundary it closes: both group tickets are
+    // built, and the group's own claims are the artifact under test.
+    expect(interactPrompts[0]).toContain('This gate closes group "core"');
+    expect(interactPrompts[0]).toContain("- [built] 01 A (group core)");
+    expect(interactPrompts[0]).toContain("- [built] 02 B (group core)");
     expect(final.tickets.every((t) => t.status === "committed")).toBe(true);
     // The retry's $SMOKE_PASS carried no real-input/render evidence (it emitted
     // only text), so it was downgraded to inconclusive — a curl-only 200 never
@@ -3718,6 +3765,59 @@ describe("session builder (issue #95)", () => {
     expect(buildPrompts[1]).not.toContain("gate found problems");
   });
 
+  it("ADR 0040 amendment 3: a capacity verdict's fresh-session recovery gets its own invocation window under the default step budget", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    // 10 capped steps per invocation, default budget 3 × 10 = 30. The two
+    // capacity-failed invocations (10 + 10) leave the prescribed third
+    // (fresh-session) invocation runnable; under the old 2× default the
+    // recovery was unreachable at exactly 20/20 — the spriteforge spine
+    // ticket's shape: capped, compacted, and stopped before a fresh session
+    // could run.
+    const config = baseConfig({ max_phase_steps: 10, ticket_step_budget: null, ticket_wall_sec: 0, checkpoint_granularity: "ticket", infra_backoff_sec: [0] });
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+
+    let builds = 0;
+    const sessions: (string | null | undefined)[] = [];
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (options.phaseFile.endsWith("-build")) {
+        builds++;
+        sessions.push(options.session);
+        if (builds < 3) {
+          // Each capped invocation fills one context and compacts once; the
+          // rung-1 retry accumulates the second marker, reaching the capacity
+          // verdict (one compaction per invocation is normal fill management).
+          await appendEvent(ledgerDir, options.phaseFile, JSON.stringify({ type: "text", part: { type: "text", text: "(compacted)", metadata: { compaction_continue: true } } }));
+          return { status: "budget_exceeded" as const, code: null, signal: null, errorMessage: "exceeded step budget (10 steps)", durationMs: 1, steps: 10, peakTokens: 0, inFlightTokens: 0, estimateDriftTokens: 0, totalOutputTokens: 0, generationMs: 0, toolCalls: 10 };
+        }
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "$CHECKPOINT ticket=01");
+        return { ...okResult(10, 10), sessionId: "sess-fresh" };
+      }
+      if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    expect(final.tickets[0]!.status).toBe("committed");
+    expect(builds).toBe(3);
+    // The recovery invocation is a FRESH session — the capacity verdict
+    // dropped the capped one instead of resuming it.
+    expect(sessions[2]).toBeNull();
+    expect(final.builder!.restarts.some((r) => r.cause.includes("capacity"))).toBe(true);
+  });
+
   it("issue #106 (A): the FIRST advance of a fresh builder seeds full context blocks; a warm no-compaction resume sends standing pointers instead of re-injecting them", async () => {
     const cwd = await freshRepo();
     const ticketsDir = ticketsDirOf(cwd);
@@ -4418,6 +4518,7 @@ describe("spec-anchored reconciliation (gh #105)", () => {
       prompt: SPEC,
       created_at: new Date().toISOString(),
       ticket_files: ["01-add-greet.md"],
+      base_sha: null,
     });
   }
 
@@ -5307,14 +5408,16 @@ describe("ADR 0040 — blocked exit and per-ticket budget", () => {
     expect(ticketBudgetStop(explicit, ticketState)).toContain("wall budget exhausted");
   });
 
-  it("ticketBudgetStop: defaults scale from the plan — steps 2x max_phase_steps, wall measured from the plan ledger", async () => {
+  it("ticketBudgetStop: defaults scale from the plan — steps 3x max_phase_steps (a capacity recovery window), wall measured from the plan ledger", async () => {
     const cwd = await freshRepo();
     const ticketsDir = ticketsDirOf(cwd);
     const state = await makeState(cwd, ticketsDir, baseConfig({ max_phase_steps: 10, ticket_step_budget: null, ticket_wall_sec: null }));
     const { state: ticketState } = await makeTicket(ticketsDir);
-    // No plan ledger yet: the wall floor (30 min) applies; steps default 20.
+    // No plan ledger yet: the wall floor (30 min) applies; steps default 30.
     expect(ticketBudgetStop(state, ticketState)).toBeNull();
-    ticketState.build_steps_total = 20;
+    ticketState.build_steps_total = 29;
+    expect(ticketBudgetStop(state, ticketState)).toBeNull();
+    ticketState.build_steps_total = 30;
     expect(ticketBudgetStop(state, ticketState)).toContain("step budget exhausted");
     ticketState.build_steps_total = 0;
     // A measured plan span tighter than the floor is honored once it exceeds.

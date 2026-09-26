@@ -7,7 +7,7 @@ import { joinPhaseMessages } from "../context/preamble.ts";
 import { describeExecFailure, executeFreshPhase, startPersistentWorker, stopPersistentWorker } from "./executor.ts";
 import { forkPhase } from "./base-session.ts";
 import { extractAssistantText } from "../core/ledger.ts";
-import { contextBudget } from "../config/config.ts";
+import { seatContextBudget } from "../config/config.ts";
 import { withFailureLadderOnThrow } from "./failure-ladder.ts";
 import * as git from "../core/git.ts";
 import type { RunState, TicketState } from "../core/state.ts";
@@ -237,7 +237,7 @@ async function extractUnhandledFiles(
       maxSteps: state.config.max_phase_steps,
       stallTimeoutSec: state.config.stall_timeout_sec,
       maxStepModelSec: state.config.max_step_model_sec,
-      maxContextTokens: contextBudget(state),
+      maxContextTokens: seatContextBudget(state, "implement"),
     });
     if (result.status === "transient") throw new Error(`contract extract ${file}: ${describeExecFailure(result)}`);
     if (result.status === "ok") {
@@ -282,7 +282,7 @@ export async function updateContracts(
       () => extractUnhandledFiles(state, ledger, ticket, unhandled),
       {
         backoff: state.config.infra_backoff_sec,
-        budget: contextBudget(state),
+        budget: seatContextBudget(state, "implement"),
         restartWorker: state.config.persistent_worker === true
           ? async () => { await stopPersistentWorker(); await startPersistentWorker({ cwd: state.cwd }); }
           : async () => {},

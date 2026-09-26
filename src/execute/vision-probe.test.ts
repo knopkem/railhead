@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { inflateSync } from "node:zlib";
 import { mkdtemp, readFile, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,13 +7,18 @@ import { appendEvent } from "../core/ledger.ts";
 import {
   ANSWER_MARKER,
   NOREAD_MARKER,
-  PROBE_COLORS,
+  PROBE_BACKGROUND,
+  PROBE_BLOCKS,
+  PROBE_CELL_PX,
+  PROBE_GAP_PX,
+  PROBE_PALETTE,
   buildProbePng,
   capabilityFilePath,
   describeVisionOutcome,
   ensureVisionForGates,
   outcomeToRecord,
   parseProbeAnswer,
+  pickBestProbeOutcome,
   probePrompt,
   randomProbeSpec,
   readVisionCapabilities,
@@ -24,10 +29,14 @@ import {
   type VisionProbeOutcome,
 } from "./vision-probe.ts";
 
-/** The mocked executor's behavior: "see" decodes the generated probe PNG and
- * answers its true order; "blind" answers the correct order rotated by one
- * (guaranteed wrong for four distinct colors). */
-let probeBehavior: "see" | "blind" = "see";
+type Behavior = "see" | "blind" | "noread" | "inconclusive";
+
+/** The mocked executor's behavior. "see" decodes the generated probe PNG and
+ * answers its true set; "blind" answers a set with one color replaced by an
+ * absent one; "inconclusive" answers without a read, so no image block ever
+ * comes back. A queue overrides the default per call, to exercise the retry. */
+let probeBehavior: Behavior = "see";
+let probeQueue: Behavior[] = [];
 let probeCalls = 0;
 
 vi.mock("./executor.ts", async (importOriginal) => {
@@ -36,16 +45,48 @@ vi.mock("./executor.ts", async (importOriginal) => {
     ...mod,
     executeOpendCode: async (_prompt: string, options: { cwd: string; ledgerDir: string; phaseFile: string }) => {
       probeCalls++;
-      const png = await readFile(join(options.cwd, ".railhead", "vision-probe", "probe.png"));
-      const raw = inflateSync(pngChunks(png)[1]!.data);
+      const behavior = probeQueue.shift() ?? probeBehavior;
+      const imagePath = join(options.cwd, ".railhead", "vision-probe", "probe.png");
+      const png = await readFile(imagePath);
+      const chunks = pngChunks(png);
+      const width = chunks[0]!.data.readUInt32BE(0);
+      const raw = inflateSync(chunks[1]!.data);
+      const rowStride = 1 + width * 3;
+      const midY = PROBE_GAP_PX + Math.floor(PROBE_CELL_PX / 2);
       const names: string[] = [];
-      for (let cell = 0; cell < 4; cell++) {
-        const off = 1 + cell * 24 * 3;
+      for (let i = 0; i < PROBE_BLOCKS; i++) {
+        const x = PROBE_GAP_PX + i * (PROBE_CELL_PX + PROBE_GAP_PX) + Math.floor(PROBE_CELL_PX / 2);
+        const off = midY * rowStride + 1 + x * 3;
         const rgb = [raw[off], raw[off + 1], raw[off + 2]];
-        names.push(PROBE_COLORS.find((c) => c.rgb.every((v, i) => v === rgb[i]))!.name);
+        names.push(PROBE_PALETTE.find((c) => c.rgb.every((v, i2) => v === rgb[i2]))!.name);
       }
-      if (probeBehavior === "blind") names.push(names.shift()!);
-      await appendEvent(options.ledgerDir, options.phaseFile, JSON.stringify({ type: "text", part: { type: "text", text: `${ANSWER_MARKER} ${names.join(", ")}` } }));
+      if (behavior !== "inconclusive") {
+        await appendEvent(options.ledgerDir, options.phaseFile, JSON.stringify({
+          type: "tool_use",
+          part: {
+            type: "tool",
+            tool: "read",
+            state: {
+              status: "completed",
+              input: { filePath: imagePath },
+              output: "Image read successfully",
+              attachments: [{ type: "file", mime: "image/png", url: "data:image/png;base64,AAAA" }],
+            },
+          },
+        }));
+      }
+      let answer: string;
+      if (behavior === "noread") {
+        answer = NOREAD_MARKER;
+      } else if (behavior === "inconclusive") {
+        answer = "I could not read the file.";
+      } else {
+        const listed = behavior === "blind"
+          ? [PROBE_PALETTE.map((c) => c.name).find((n) => !names.includes(n))!, ...names.slice(1)]
+          : names;
+        answer = `${ANSWER_MARKER} count=${PROBE_BLOCKS} colors=${listed.join(",")}`;
+      }
+      await appendEvent(options.ledgerDir, options.phaseFile, JSON.stringify({ type: "text", part: { type: "text", text: answer } }));
       return { status: "ok" as const, code: 0, signal: null, errorMessage: null, durationMs: 1, steps: 2, peakTokens: 0, inFlightTokens: 0, estimateDriftTokens: 0, totalOutputTokens: 10, generationMs: 1, toolCalls: 1 };
     },
   };
@@ -72,13 +113,23 @@ const out = (over: Partial<VisionProbeOutcome> = {}): VisionProbeOutcome => ({
   answerColors: ["red", "green", "blue", "yellow"],
   expectedColors: ["red", "green", "blue", "yellow"],
   error: null,
+  inconclusive: false,
+  attempts: 1,
   ...over,
 });
 
+beforeEach(() => {
+  probeBehavior = "see";
+  probeQueue = [];
+  probeCalls = 0;
+});
+
 describe("randomProbeSpec", () => {
-  it("returns a permutation of all four color indices", () => {
+  it("draws four distinct indices from the palette", () => {
     const spec = randomProbeSpec(() => 0.5);
-    expect([...spec].sort()).toEqual([0, 1, 2, 3]);
+    expect(spec).toHaveLength(PROBE_BLOCKS);
+    expect(new Set(spec).size).toBe(PROBE_BLOCKS);
+    expect(spec.every((i) => i >= 0 && i < PROBE_PALETTE.length)).toBe(true);
   });
 
   it("is deterministic for a fixed rng", () => {
@@ -87,7 +138,9 @@ describe("randomProbeSpec", () => {
 });
 
 describe("buildProbePng", () => {
-  const spec = [2, 0, 3, 1];
+  const spec = [7, 2, 9, 0];
+  const width = PROBE_GAP_PX + spec.length * (PROBE_CELL_PX + PROBE_GAP_PX);
+  const height = 2 * PROBE_GAP_PX + PROBE_CELL_PX;
   const png = buildProbePng(spec);
 
   it("emits a valid PNG signature and chunk sequence", () => {
@@ -95,67 +148,93 @@ describe("buildProbePng", () => {
     expect(pngChunks(png).map((c) => c.type)).toEqual(["IHDR", "IDAT", "IEND"]);
   });
 
-  it("declares an 8-bit truecolor image sized to the spec", () => {
+  it("declares an 8-bit truecolor image with a gap around every block", () => {
     const ihdr = pngChunks(png)[0]!.data;
-    expect(ihdr.readUInt32BE(0)).toBe(spec.length * 24);
-    expect(ihdr.readUInt32BE(4)).toBe(24);
+    expect(ihdr.readUInt32BE(0)).toBe(width);
+    expect(ihdr.readUInt32BE(4)).toBe(height);
     expect(ihdr[8]).toBe(8);
     expect(ihdr[9]).toBe(2);
   });
 
   it("inflates to one filter byte plus RGB per pixel", () => {
     const raw = inflateSync(pngChunks(png)[1]!.data);
-    expect(raw.length).toBe(24 * (1 + spec.length * 24 * 3));
+    expect(raw.length).toBe(height * (1 + width * 3));
   });
 
-  it("paints each cell with its spec color", () => {
+  it("paints a white background and each block with its spec color", () => {
     const raw = inflateSync(pngChunks(png)[1]!.data);
-    const rowStride = 1 + spec.length * 24 * 3;
-    for (let cell = 0; cell < spec.length; cell++) {
-      const [r, g, b] = PROBE_COLORS[spec[cell]!]!.rgb;
-      const off = 1 + cell * 24 * 3;
-      expect([raw[off], raw[off + 1], raw[off + 2]]).toEqual([r, g, b]);
-      expect([raw[rowStride + off], raw[rowStride + off + 1], raw[rowStride + off + 2]]).toEqual([r, g, b]);
+    const rowStride = 1 + width * 3;
+    const px = (x: number, y: number) => {
+      const off = y * rowStride + 1 + x * 3;
+      return [raw[off], raw[off + 1], raw[off + 2]];
+    };
+    expect(px(0, 0)).toEqual([...PROBE_BACKGROUND]);
+    expect(px(width - 1, height - 1)).toEqual([...PROBE_BACKGROUND]);
+    for (let i = 0; i < spec.length; i++) {
+      const x = PROBE_GAP_PX + i * (PROBE_CELL_PX + PROBE_GAP_PX) + 1;
+      expect(px(x, PROBE_GAP_PX + 1)).toEqual([...PROBE_PALETTE[spec[i]!]!.rgb]);
     }
   });
 });
 
 describe("probePrompt", () => {
-  it("asks for the marked answer and the no-read self-report", () => {
-    const prompt = probePrompt(".railhead/vision-probe/probe.png");
-    expect(prompt).toContain(".railhead/vision-probe/probe.png");
+  it("forces a read of the given absolute path and names the answer fields", () => {
+    const prompt = probePrompt("/repo/.railhead/vision-probe/probe.png");
+    expect(prompt).toContain("/repo/.railhead/vision-probe/probe.png");
+    expect(prompt).toContain("MUST call the read tool");
     expect(prompt).toContain(ANSWER_MARKER);
-    expect(prompt).toContain(NOREAD_MARKER);
+    expect(prompt).toContain("count=");
+    expect(prompt).toContain("colors=");
   });
 
-  it("cannot leak the answer — the marker is never followed by a color list", () => {
-    const prompt = probePrompt(".railhead/vision-probe/probe.png");
-    expect(prompt).not.toMatch(new RegExp(`${ANSWER_MARKER}\\s+(?:red|green|blue|yellow)`, "i"));
+  it("no longer offers a no-read escape hatch", () => {
+    expect(probePrompt("/x/probe.png")).not.toContain(NOREAD_MARKER);
+  });
+
+  it("cannot leak the answer order-free — no palette name follows the marker on its line", () => {
+    const prompt = probePrompt("/x/probe.png");
+    const names = PROBE_PALETTE.map((c) => c.name).join("|");
+    expect(prompt).not.toMatch(new RegExp(`${ANSWER_MARKER}[^\\n]*(?:${names})`, "i"));
   });
 });
 
 describe("parseProbeAnswer", () => {
-  const spec = [2, 0, 3, 1];
-  const expected = ["blue", "red", "yellow", "green"];
+  const spec = [4, 0, 5, 3];
+  const expected = ["cyan", "red", "blue", "green"];
 
-  it("accepts the exact color sequence", () => {
-    const r = parseProbeAnswer(`${ANSWER_MARKER} ${expected.join(", ")}`, spec);
+  it("accepts the exact set in any order, with the count", () => {
+    const r = parseProbeAnswer(`${ANSWER_MARKER} count=4 colors=green, blue, cyan, red`, spec);
     expect(r.correct).toBe(true);
-    expect(r.colors).toEqual(expected);
+    expect(r.colors).toEqual(["green", "blue", "cyan", "red"]);
+    expect(r.count).toBe(4);
   });
 
-  it("rejects a wrong order — it proves the pixels were not read", () => {
-    const r = parseProbeAnswer(`${ANSWER_MARKER} red, blue, yellow, green`, spec);
-    expect(r.correct).toBe(false);
+  it("accepts a bare color list without the count/colors labels", () => {
+    const r = parseProbeAnswer(`${ANSWER_MARKER} red, cyan, green, blue`, spec);
+    expect(r.correct).toBe(true);
+    expect(r.count).toBe(4);
   });
 
-  it("rejects a guessed subset", () => {
-    expect(parseProbeAnswer(`${ANSWER_MARKER} blue, red`, spec).correct).toBe(false);
+  it("rejects a set containing a color that was not drawn", () => {
+    expect(parseProbeAnswer(`${ANSWER_MARKER} count=4 colors=green, blue, cyan, orange`, spec).correct).toBe(false);
+  });
+
+  it("rejects a duplicated color — three distinct names in four slots", () => {
+    expect(parseProbeAnswer(`${ANSWER_MARKER} count=4 colors=green, blue, blue, red`, spec).correct).toBe(false);
+  });
+
+  it("rejects a wrong count even when the set matches", () => {
+    expect(parseProbeAnswer(`${ANSWER_MARKER} count=5 colors=green, blue, cyan, red`, spec).correct).toBe(false);
+  });
+
+  it("maps vocabulary synonyms onto the palette's canonical names", () => {
+    const r = parseProbeAnswer(`${ANSWER_MARKER} count=4 colors=violet, red, blue, green`, [6, 0, 5, 3]);
+    expect(r.correct).toBe(true);
   });
 
   it("parses prose around the marked line", () => {
-    const r = parseProbeAnswer(`The colors are ${ANSWER_MARKER} Blue, RED, yellow and green.`, spec);
-    expect(r.colors).toEqual(expected);
+    const r = parseProbeAnswer(`I read the image. ${ANSWER_MARKER} count=4 colors= Blue, RED, green and cyan.`, spec);
+    expect(r.colors).toEqual(["blue", "red", "green", "cyan"]);
     expect(r.correct).toBe(true);
   });
 
@@ -169,6 +248,23 @@ describe("parseProbeAnswer", () => {
     const r = parseProbeAnswer("I cannot see the image.", spec);
     expect(r.colors).toEqual([]);
     expect(r.correct).toBe(false);
+  });
+});
+
+describe("pickBestProbeOutcome", () => {
+  const misread = out({ ok: false, answerCorrect: false, sawImageBlock: true });
+  const noImage = out({ ok: false, answerCorrect: false, sawImageBlock: false, inconclusive: true, answerColors: [] });
+  const good = out();
+
+  it("prefers a pass over a misread attempt over a no-image attempt", () => {
+    expect(pickBestProbeOutcome(noImage, misread)).toBe(misread);
+    expect(pickBestProbeOutcome(misread, good)).toBe(good);
+    expect(pickBestProbeOutcome(good, misread)).toBe(good);
+  });
+
+  it("keeps the later attempt on a tie", () => {
+    const later = out({ answerColors: ["red"] });
+    expect(pickBestProbeOutcome(misread, later)).toBe(later);
   });
 });
 
@@ -200,9 +296,16 @@ describe("outcomeToRecord", () => {
     expect(record.probe_version).toBeGreaterThan(0);
   });
 
-  it("records a blind model as reads_images=false", () => {
-    const record = outcomeToRecord(out({ ok: false, answerCorrect: false, sawImageBlock: false }));
+  it("records a delivered-but-misread model as a conclusive blind verdict", () => {
+    const record = outcomeToRecord(out({ ok: false, answerCorrect: false, sawImageBlock: true, inconclusive: false }));
     expect(record.reads_images).toBe(false);
+    expect(record.probe_inconclusive).toBe(false);
+  });
+
+  it("records a probe that never received an image as inconclusive, not blind", () => {
+    const record = outcomeToRecord(out({ ok: false, answerCorrect: false, sawImageBlock: false, inconclusive: true }));
+    expect(record.reads_images).toBe(false);
+    expect(record.probe_inconclusive).toBe(true);
   });
 });
 
@@ -246,6 +349,12 @@ describe("readVisionCapabilityFor", () => {
     expect(await readVisionCapabilityFor(cwd, "old/model")).toBeNull();
     expect(await readVisionCapabilityFor(cwd, "unmeasured/model")).toBeNull();
   });
+
+  it("treats an inconclusive record as no measurement, never as a blind claim", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "vision-probe-"));
+    await recordVisionCapability(cwd, out({ model: "flaky/model", ok: false, answerCorrect: false, sawImageBlock: false, inconclusive: true, answerColors: [] }));
+    expect(await readVisionCapabilityFor(cwd, "flaky/model")).toBeNull();
+  });
 });
 
 describe("capability record file", () => {
@@ -260,6 +369,12 @@ describe("capability record file", () => {
     expect(records.find((r) => r.model === "other/model")!.reads_images).toBe(false);
     const raw = JSON.parse(await readFile(capabilityFilePath(cwd), "utf8"));
     expect(raw.version).toBe(1);
+  });
+
+  it("persists the inconclusive flag", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "vision-probe-"));
+    await recordVisionCapability(cwd, out({ model: "flaky/model", ok: false, answerCorrect: false, sawImageBlock: false, inconclusive: true, answerColors: [] }));
+    expect((await readVisionCapabilities(cwd)).find((r) => r.model === "flaky/model")!.probe_inconclusive).toBe(true);
   });
 
   it("reads an absent record as no records", async () => {
@@ -292,13 +407,16 @@ describe("describeVisionOutcome", () => {
     expect(describeVisionOutcome(out({ ok: false, answerCorrect: false, error: "agent exited 1 — boom" }))).toContain("exited 1");
     expect(describeVisionOutcome(out({ ok: false, answerCorrect: false, selfReportedNoRead: true }))).toContain("cannot read image files");
   });
+
+  it("describes a pass as the named blocks", () => {
+    expect(describeVisionOutcome(out())).toContain("named all blocks correctly");
+  });
 });
 
 describe("ensureVisionForGates", () => {
-  it("collects a refusal per blind gate instead of throwing, probing a shared model once", async () => {
+  it("collects a refusal per blind gate, retrying the failed probe once", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "vision-probe-"));
     probeBehavior = "blind";
-    probeCalls = 0;
     const { records, refusals } = await ensureVisionForGates({
       cwd,
       requests: [
@@ -306,26 +424,42 @@ describe("ensureVisionForGates", () => {
         { gate: "goal", model: "test/model" },
       ],
     });
-    expect(probeCalls).toBe(1);
+    expect(probeCalls).toBe(2);
     expect(records).toHaveLength(1);
     expect(records[0]!.reads_images).toBe(false);
+    expect(records[0]!.probe_inconclusive).toBe(false);
     expect(refusals.map((r) => r.gate)).toEqual(["visual", "goal"]);
     expect(refusals[0]!.reason).toContain("failed the vision probe");
   });
 
-  it("returns no refusals when the seat model reads the probe", async () => {
+  it("a flaky first attempt that passes the retry records a verified model", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "vision-probe-"));
-    probeBehavior = "see";
-    probeCalls = 0;
+    probeQueue = ["blind", "see"];
+    const { records, refusals } = await ensureVisionForGates({ cwd, requests: [{ gate: "visual", model: "test/model" }] });
+    expect(probeCalls).toBe(2);
+    expect(refusals).toEqual([]);
+    expect(records[0]!.reads_images).toBe(true);
+  });
+
+  it("returns no refusals when the seat model reads the probe first try", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "vision-probe-"));
     const { records, refusals } = await ensureVisionForGates({ cwd, requests: [{ gate: "visual", model: "test/model" }] });
     expect(probeCalls).toBe(1);
     expect(refusals).toEqual([]);
     expect(records[0]!.reads_images).toBe(true);
   });
 
+  it("records a probe that never received an image as inconclusive, not as a blind model", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "vision-probe-"));
+    probeBehavior = "inconclusive";
+    const { records } = await ensureVisionForGates({ cwd, requests: [{ gate: "visual", model: "test/model" }] });
+    expect(probeCalls).toBe(2);
+    expect(records[0]!.probe_inconclusive).toBe(true);
+    expect(await readVisionCapabilityFor(cwd, "test/model")).toBeNull();
+  });
+
   it("a gate with no configured model is a refusal without spending a probe", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "vision-probe-"));
-    probeCalls = 0;
     const { refusals } = await ensureVisionForGates({ cwd, requests: [{ gate: "goal", model: null }] });
     expect(probeCalls).toBe(0);
     expect(refusals).toHaveLength(1);

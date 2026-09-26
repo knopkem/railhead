@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { describeExecFailure, executeOpendCode } from "../execute/executor.ts";
 import { extractAssistantText } from "../core/ledger.ts";
-import { contextBudget } from "../config/config.ts";
+import { seatContextBudget } from "../config/config.ts";
 import type { RunState } from "../core/state.ts";
 import { stripFencedRegions } from "../core/fences.ts";
 
@@ -430,7 +430,7 @@ async function mergeLearnings(
       maxSteps: 5,
       stallTimeoutSec: state.config.stall_timeout_sec,
       maxStepModelSec: state.config.max_step_model_sec,
-      maxContextTokens: contextBudget(state),
+      maxContextTokens: seatContextBudget(state, "extract"),
     });
     if (consolResult.status === "transient") throw new Error(`learnings consolidate: ${describeExecFailure(consolResult)}`);
     if (consolResult.status === "ok") {

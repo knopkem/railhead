@@ -24,7 +24,7 @@ This ADR records the *target* and the *principle the disciplines serve*. Specifi
 
 - **Hardware:** a 16GB-VRAM PC, GPU-only inference (no CPU offload).
 - **Primary model class:** ~27B dense at Q4 (heavy quantization acceptable if tool-calling stays reliable).
-- **Working context budget per phase: 64k tokens.** Picked as the operating point where the slowdown knee is hit only at phase-end (where the model is wrapping up), not mid-implementation (where it would slow down exactly when it most needs to be coherent).
+- **Working context budget per phase: 64k tokens.** Picked as the operating point where the slowdown knee is hit only at phase-end (where the model is wrapping up), not mid-implementation (where it would slow down exactly when it most needs to be coherent). (Amended 2026-09-25: the operating point is now whatever the operator sets as the model's opencode `limit.context`; 64k remains the detection-failure fallback — see the amendments below.)
 - **Secondary target (not the goal, the floor):** a 9B Q4 model on *narrow* railhead seats only (contract extraction, learnings consolidation, structured-output passes with single I/O). 9B is not a target for the implementer or reviewer seats — its failure modes (instruction-following decay, multi-step going off-rail) make it unsuitable for judgment work, and pairing a 9B's recovery loops with the high-context slowdown is a multiplicative penalty.
 
 ### The principle
@@ -51,7 +51,63 @@ The 64k figure is a planning target, not a measured knee — the actual inflecti
 
 ### Request ceiling (amended, #81)
 
-The 64k budget now carries a second, independent ground: **safety**. On a server with content-keyed KV retention (vLLM prefix cache, llama.cpp `--cache-reuse`, MTPLX's warm-prefix session bank), dead sessions' KV occupies the pool invisibly to every railhead-side ledger, and some engines abort under sustained pressure *before* their allocator wall. A request sized near the full nominal window therefore cannot survive a warm pool — headroom below raw capacity is load-bearing, not waste. The budget encodes the largest single request the railhead will ever send (prompt + output reserve) — a **request ceiling** — defaulting to **0.6× the model's nominal window**, not the server's capacity number. `max_context_tokens` is renamed `request_ceiling_tokens` (the legacy key is kept as an alias). The 64k-on-100k operating point now falls out of the fraction rule from this safety argument, reinforcing — not replacing — the throughput argument above.
+The 64k budget now carries a second, independent ground: **safety**. On a server with content-keyed KV retention (vLLM prefix cache, llama.cpp `--cache-reuse`, MTPLX's warm-prefix session bank), dead sessions' KV occupies the pool invisibly to every railhead-side ledger, and some engines abort under sustained pressure *before* their allocator wall. A request sized near the full nominal window therefore cannot survive a warm pool — headroom below raw capacity is load-bearing, not waste. The budget encodes the largest single request the railhead will ever send (prompt + output reserve) — a **request ceiling** — and its margin now lives in opencode's model `limit.context` (see the amendment below), not in a harness-side fraction. `max_context_tokens` is renamed `request_ceiling_tokens` (the legacy key is kept as an alias).
+
+### Per-seat ceilings (amended, 2026-09-25)
+
+The ceiling is resolved **per seat**, not once per run. `railhead.json`'s
+`request_ceiling_tokens` (`max_context_tokens`) is the IMPLEMENT seat's budget —
+`init` derives it from the implement model — and every judging seat (plan,
+review, visual, goal, extract) resolves ITS OWN model's configured opencode
+limit verbatim. One min-derived value governing every seat is what killed the
+spriteforge `run-20260925-1640` scaffold goal review: init wrote the
+implementer's 100k window as the global ceiling, the goal reviewer runs on a
+200k-window model, and the 95k kill guard fired 15 minutes in — before
+compaction could ever run, and with no verdict. A seat whose window is not
+detected (no registry entry, a failed `opencode models --verbose`) falls back to
+the operator ceiling, so an explicit value still governs wherever detection is
+blind. Resolved ceilings are logged at run start (`per-seat request ceilings:
+…`), and a budget kill now reports which guard fired (step cap vs request
+ceiling) instead of labeling every `budget_exceeded` a step-budget kill.
+
+### The 95% kill is opt-in (amended, 2026-09-25)
+
+The ceiling still sizes the pre-flight check and is reported live, but the
+mid-phase kill it used to arm is now opt-in: `context_guard: "kill"` in
+`railhead.json` restores it, and the default `"telemetry"` logs every crossing
+(the ℹ lines) while the phase keeps working. The ceiling is the model's
+configured opencode limit, so a crossing is ordinary fill that opencode's
+compaction manages. Killing there fired *before* compaction could run and
+discarded the phase's work: in spriteforge `run-20260925-2006`, the goal review
+crossed 115,995 of its 120,000-token seat budget while reading its own probe
+output and died with no verdict, turning a review that had run and observed
+into an inconclusive one. The in-flight estimate, peak reporting, the
+pre-flight line, and the #78 model-time thrash floor are unchanged; only the
+subprocess kill is configurable. The durable builder already pinned telemetry
+(ADR 0022 §5); the fresh judging phases now default to it too.
+
+### The harness fraction is retired (amended, 2026-09-25)
+
+The `0.6 × detected window` default is gone: when the operator sets no explicit
+`request_ceiling_tokens`, the ceiling is the model's detected limit verbatim,
+and every judging seat resolves its own model's limit the same way. The chain
+that produced the confusing kill was `0.6 × window` then `0.95 × ceiling` —
+an effective **57% of the model's real window**, so a goal review died at
+115,995 tokens on a 200k-window model. A second harness margin duplicates the
+one that matters and cannot see what the first one does.
+
+The margin now lives where it is enforced: opencode's model `limit.context`.
+`opencode models --verbose` reports the EFFECTIVE limit with config overrides
+applied (verified: `splash/*=100000`, `mtplx/*=60000`, exactly the values in
+the operator's `opencode.jsonc`), so an operator who sets `limit.context: 80000`
+on a server whose hard limit is 100000 gets that 80k read by both opencode's
+compaction and the railhead's ceiling. `init`/`build` print the source
+(`context budget: 80k (opencode's model limit.context — lower it there to leave
+your server headroom)`) so the knob is visible at configuration time. The 64k
+figure survives as `DEFAULT_CONTEXT_TOKENS`: the fallback when no model limit
+can be detected and no explicit ceiling is set. An explicit
+`request_ceiling_tokens` still wins (clamped to the detected window), so
+existing configs are unaffected.
 
 ## Consequences
 

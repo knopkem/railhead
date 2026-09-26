@@ -53,6 +53,13 @@ export interface ReviewArgs {
   /** When true, run in read-mode: the reviewer gets read access and a stat+
    * file-list prompt instead of the raw diff (#30). */
   readMode?: boolean;
+  /** The per-ticket review's tool posture (`code_review.inherit_tools`, default
+   * true in railhead.json): when true the review runs on the ordinary
+   * tool-bearing observe seat and the prompt grants read/search/run to verify
+   * the diff — the isolated tool-denied reviewer seats are bypassed; false
+   * uses them. Absent = false, keeping direct callers on the sandboxed
+   * default that the config layer opts out of. */
+  inheritTools?: boolean;
   /** When readMode is true, the diff stat to show instead of the raw diff. */
   stat?: string;
   /** When readMode is true, the list of source files the reviewer should read. */
@@ -313,6 +320,7 @@ export async function review(options: ReviewArgs): Promise<ReviewOutcome> {
         surface: options.surface,
         coherenceDoc: options.coherenceDoc,
         lintOutput: options.lintOutput,
+        inheritTools: options.inheritTools,
       })
     : await buildReviewerPrompt({
         ticketFile: options.ticketFile,
@@ -332,6 +340,7 @@ export async function review(options: ReviewArgs): Promise<ReviewOutcome> {
         surface: options.surface,
         coherenceDoc: options.coherenceDoc,
         lintOutput: options.lintOutput,
+        inheritTools: options.inheritTools,
       });
 
   const result = await runReviewAgent({
@@ -341,7 +350,11 @@ export async function review(options: ReviewArgs): Promise<ReviewOutcome> {
     ledgerDir: options.ledgerDir,
     phaseFile: options.phaseFile,
     model: options.model,
-    agent: options.readMode || useDiffFile ? RAILHEAD_AGENT_NAMES.reviewReadmode : RAILHEAD_AGENT_NAMES.review,
+    agent: options.inheritTools
+      ? RAILHEAD_AGENT_NAMES.observe
+      : options.readMode || useDiffFile
+        ? RAILHEAD_AGENT_NAMES.reviewReadmode
+        : RAILHEAD_AGENT_NAMES.review,
     baseSession: options.baseSession,
     live: options.live,
     verbose: options.verbose,

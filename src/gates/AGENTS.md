@@ -11,11 +11,11 @@ Everything that judges a ticket after implementation: the shared review-agent ru
 - `visual-loop.ts` / `goal-loop.ts` / `structural-loop.ts` — cadence scheduling and round execution per gate; `owed-gates.ts` replays gates owed across a stop (ADR 0038).
 - `evidence.ts` — transcript predicates (screenshots, real interaction, app launch) used to keep reviewers honest.
 - `goal-review.ts`, `structural-review.ts`, `visual.ts`, `interaction-smoke.ts` — prompt builders and verdict parsers per gate. `goal-review.ts` owns the `$PROBE` block parser (`parseProbeBlock`) and `dropClosedFindings` (probe-closed findings are never re-found).
-- `goal-loop.ts` re-verifies previously open blockers from the probe registry before a re-review (ADR 0043 amendment); `interaction-smoke.ts` runs once per committed group boundary with a render-delta + zero-console-errors bar.
+- `goal-loop.ts` re-verifies previously open blockers from the probe registry before a re-review (ADR 0043 amendment); `interaction-smoke.ts` runs once per committed group boundary with a render-delta + zero-console-errors bar, scoped to the built frontier — a feature owned by a pending ticket is absent by design, so a boundary with no built interactive surface yields `$SMOKE_INCONCLUSIVE`, not a failure.
 
 ## Invariants
 
-- Review runs are read-only and diff-scoped; a gate never edits project files except through the corrective path.
+- Review runs are read-only and diff-scoped; a gate never edits project files except through the corrective path. The per-ticket review inherits the project's ordinary toolset by default (`code_review.inherit_tools`), like every other gate; `false` restores the isolated tool-denied diff reviewer.
 - A gate verdict is green only if the gate ran (ADR 0050): a non-ok invocation is infra, an unevidenced PASS downgrades to inconclusive, and a configured-but-never-fired gate reports "not run".
 - Severity → retry rules (BLOCKER full budget; MAJOR one attempt then soft-pass in light — ADR 0025) live here and in `src/config/`; do not invent variants.
 - Gates are named in findings by slug (ADR 0027); reference identity must stay stable across rounds.

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildReviewerPrompt, buildReviewerReadModePrompt, buildContractExtractFilePrompt } from "./prompt.ts";
+import { buildReviewerPrompt, buildReviewerReadModePrompt, buildContractExtractFilePrompt, SCRATCH_FILE_DISCIPLINE } from "./prompt.ts";
 import { joinPhaseMessages, type PhaseMessages } from "./preamble.ts";
 
 /** The review-phase assertions cover the effective single-message prompt.
@@ -25,6 +25,20 @@ describe("buildReviewerPrompt", () => {
     expect(p).toMatch(/judged from the diff alone/);
     expect(p).toMatch(/If the diff is consistent with the criterion, treat it as met/);
     expect(p).toMatch(/no substitute tool family is available/);
+  });
+
+  it("grants read/search/read-only commands to a reviewer that inherits the ordinary toolset (code_review.inherit_tools)", async () => {
+    const p = await reviewerText({
+      ticketFile: "01-a.md",
+      ticketBody: "work",
+      criteria: ["grep finds no hex color literals outside src/ui/theme.rs"],
+      diff: "d",
+      inheritTools: true,
+    });
+    expect(p).toMatch(/You have the project's ordinary tools/);
+    expect(p).not.toMatch(/You have no read, search, or command tools/);
+    expect(p).toMatch(/verifiable with your tools/);
+    expect(p).not.toMatch(/repo-wide check you cannot run/);
   });
 
   it("treats ACs that name a third-party artifact as unverified plan claims: judge capability, never double-down on the name", async () => {
@@ -367,6 +381,21 @@ describe("buildReviewerReadModePrompt", () => {
     expect(p).toMatch(/If those files are consistent with the criterion, treat it as met/);
   });
 
+  it("grants search and read-only commands in read-mode when the reviewer inherits the ordinary toolset", async () => {
+    const p = await readModeText({
+      ticketFile: "01-a.md",
+      ticketBody: "work",
+      criteria: ["grep finds no hex color literals outside src/ui/theme.rs"],
+      stat: "stat",
+      files: ["src/ui/theme.rs"],
+      inheritTools: true,
+    });
+    expect(p).toMatch(/read and search tools/);
+    expect(p).not.toMatch(/Do NOT edit, run commands/);
+    expect(p).toMatch(/verifiable with your tools/);
+    expect(p).not.toMatch(/repo-wide check you cannot run/);
+  });
+
   it("instructs the reviewer to read the touched files", async () => {
     const p = await readModeText({
       ticketFile: "01-a.md",
@@ -639,5 +668,13 @@ describe("two-part phase prompts (#132 — canonical preamble + volatile task)",
     expect(m.preamble).not.toContain("Narrative");
     expect(m.preamble).not.toContain("Visual tokens: NEON.");
     expect(m.task).toContain("not classified as surface-scoped");
+  });
+});
+
+describe("SCRATCH_FILE_DISCIPLINE", () => {
+  it("steers browser-MCP output paths to .railhead/ — the MCP server rejects /tmp even under yolo", () => {
+    expect(SCRATCH_FILE_DISCIPLINE).toMatch(/write it under \.railhead\//);
+    expect(SCRATCH_FILE_DISCIPLINE).toMatch(/browser\/MCP tools that take an output path/i);
+    expect(SCRATCH_FILE_DISCIPLINE).toContain("/tmp");
   });
 });

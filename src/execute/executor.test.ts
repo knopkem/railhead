@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:http";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, expect, afterEach } from "vitest";
-import { describeExecFailure, executeFreshPhase, executeOpendCode, isQuotaError, isToolTimeout, isTransientError, resetWorkerForTest, stepTimingMs, windowedStepRates, writePayloadOf } from "./executor.ts";
+import { describeExecFailure, executeFreshPhase, executeOpendCode, isQuotaError, isToolTimeout, isTransientError, resetWorkerForTest, stepTimingMs, windowedStepRates, writePayloadOf, configureContextGuard, resetContextGuardForTest } from "./executor.ts";
 import { resetProviderHealthForTest, setProviderHealth } from "./provider-health.ts";
 import { estimateTokens } from "./diff-filter.ts";
 import { CHECKPOINT_RE } from "../core/checkpoint.ts";
@@ -390,6 +390,7 @@ describe("executeOpendCode token budget guard (#53)", () => {
         phaseFile: "budget-kill",
         model: null,
         maxContextTokens: 1000,
+        guardMode: "kill",
         live: false,
         heartbeat: false,
       });
@@ -419,6 +420,7 @@ describe("executeOpendCode token budget guard (#53)", () => {
         phaseFile: "budget-last-exit",
         model: null,
         maxContextTokens: 1000,
+        guardMode: "kill",
         live: false,
         heartbeat: false,
       });
@@ -464,6 +466,7 @@ describe("executeOpendCode token budget guard (#53)", () => {
         phaseFile: "budget-95pct-kill",
         model: null,
         maxContextTokens: 10000,
+        guardMode: "kill",
         live: false,
         heartbeat: false,
       });
@@ -584,6 +587,7 @@ describe("executeOpendCode in-flight token estimate (#82)", () => {
         phaseFile: "inflight-est-kill",
         model: null,
         maxContextTokens: 1000,
+        guardMode: "kill",
         stallTimeoutSec: null,
         maxStepModelSec: null,
         live: false,
@@ -682,6 +686,7 @@ describe("executeOpendCode in-flight token estimate (#82)", () => {
         phaseFile: "cache-inclusive-kill",
         model: null,
         maxContextTokens: 1_000,
+        guardMode: "kill",
         stallTimeoutSec: null,
         maxStepModelSec: null,
         live: false,
@@ -2239,7 +2244,7 @@ describe("executeOpendCode telemetry-only kill guards (ADR 0022 §5, #84)", () =
     }
   }, 60000);
 
-  it("still kills on the 95% crossing under the default kill guard", async () => {
+  it("still kills on the 95% crossing under an explicit guardMode kill", async () => {
     const start1 = stepStartLine().replace(/'/g, "'\\''");
     const big = stepFinishLineWithTokens(9_800).replace(/'/g, "'\\''");
     const emitter = `printf '%s\\n%s\\n' '${start1}' '${big}' ; sleep 30`;
@@ -2251,6 +2256,7 @@ describe("executeOpendCode telemetry-only kill guards (ADR 0022 §5, #84)", () =
         phaseFile: "kill-peak",
         model: null,
         maxContextTokens: 10_000,
+        guardMode: "kill",
         stallTimeoutSec: null,
         live: false,
         heartbeat: false,
@@ -2258,6 +2264,78 @@ describe("executeOpendCode telemetry-only kill guards (ADR 0022 §5, #84)", () =
       expect(result.status).toBe("budget_exceeded");
     } finally {
       restorePath(env.restorePath);
+    }
+  }, 60000);
+
+  it("defaults to telemetry: the 95% crossing does not kill without context_guard kill (ADR 0014 amendment)", async () => {
+    const start1 = stepStartLine().replace(/'/g, "'\\''");
+    const big = stepFinishLineWithTokens(9_800).replace(/'/g, "'\\''");
+    const start2 = stepStartLine().replace(/'/g, "'\\''");
+    const finish = stepFinishLine().replace(/'/g, "'\\''");
+    const emitter = `printf '%s\\n%s\\n%s\\n%s\\n' '${start1}' '${big}' '${start2}' '${finish}' ; sleep 0.2 ; printf 'done\\n'`;
+    const env = await makeFakeOpencode(emitter);
+    try {
+      const result = await executeOpendCode("test prompt", {
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "default-telemetry-peak",
+        model: null,
+        maxContextTokens: 10_000,
+        stallTimeoutSec: null,
+        live: false,
+        heartbeat: false,
+      });
+      // No guardMode and no installed kill: a judging phase that crosses the
+      // ceiling keeps working — the kill that discarded a goal review's
+      // verdict mid-probe (run-20260925-2006) is opt-in now.
+      expect(result.status).toBe("ok");
+      expect(result.steps).toBe(2);
+      expect(result.peakTokens).toBe(9_800);
+    } finally {
+      restorePath(env.restorePath);
+    }
+  }, 60000);
+
+  it("configureContextGuard kill arms the default; an explicit guardMode still overrides it", async () => {
+    const start1 = stepStartLine().replace(/'/g, "'\\''");
+    const big = stepFinishLineWithTokens(9_800).replace(/'/g, "'\\''");
+    const start2 = stepStartLine().replace(/'/g, "'\\''");
+    const finish = stepFinishLine().replace(/'/g, "'\\''");
+    const killEmitter = `printf '%s\\n%s\\n' '${start1}' '${big}' ; sleep 30`;
+    const quickEmitter = `printf '%s\\n%s\\n%s\\n%s\\n' '${start1}' '${big}' '${start2}' '${finish}' ; sleep 0.2 ; printf 'done\\n'`;
+    const killEnv = await makeFakeOpencode(killEmitter);
+    const quickEnv = await makeFakeOpencode(quickEmitter);
+    try {
+      configureContextGuard("kill");
+      const armed = await executeOpendCode("test prompt", {
+        cwd: killEnv.cwd,
+        ledgerDir: killEnv.ledgerDir,
+        phaseFile: "installed-kill-peak",
+        model: null,
+        maxContextTokens: 10_000,
+        stallTimeoutSec: null,
+        live: false,
+        heartbeat: false,
+      });
+      expect(armed.status).toBe("budget_exceeded");
+      // The builder's explicit telemetry pin wins over the installed mode.
+      const explicit = await executeOpendCode("test prompt", {
+        cwd: quickEnv.cwd,
+        ledgerDir: quickEnv.ledgerDir,
+        phaseFile: "explicit-telemetry-peak",
+        model: null,
+        maxContextTokens: 10_000,
+        guardMode: "telemetry",
+        stallTimeoutSec: null,
+        live: false,
+        heartbeat: false,
+      });
+      expect(explicit.status).toBe("ok");
+      expect(explicit.steps).toBe(2);
+    } finally {
+      restorePath(quickEnv.restorePath);
+      restorePath(killEnv.restorePath);
+      resetContextGuardForTest();
     }
   }, 60000);
 

@@ -1,7 +1,7 @@
 import type { GoalReviewRecord, RunState, TicketState } from "../core/state.ts";
 import { isFinished } from "../core/state.ts";
 import { loadTickets, type Ticket } from "../core/ticket.ts";
-import { contextBudget, firesAtRunEnd, goalCheckpointIsAdvisory, goalFiresCheckpointsMidRun, DEFAULT_MAX_REPLANS } from "../config/config.ts";
+import { seatContextBudget, firesAtRunEnd, goalCheckpointIsAdvisory, goalFiresCheckpointsMidRun, DEFAULT_MAX_REPLANS } from "../config/config.ts";
 import { reviewSummary, runReviewAgent } from "./reviewer.ts";
 import { baseSessionId } from "../execute/base-session.ts";
 import { runCommandFromVerify } from "./visual.ts";
@@ -332,7 +332,7 @@ export async function runGoalReview(
     maxSteps: state.config.max_phase_steps,
     stallTimeoutSec: state.config.stall_timeout_sec,
     maxStepModelSec: state.config.max_step_model_sec,
-    maxContextTokens: contextBudget(state),
+    maxContextTokens: seatContextBudget(state, "goal"),
   });
   if (agentOutcome.status === "fatal") {
     // The goal model's quota is exhausted (a 403 usage-limit wall, not a

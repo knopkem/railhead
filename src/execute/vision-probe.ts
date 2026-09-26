@@ -7,9 +7,17 @@
  * reviewers depend on: a railhead-generated PNG is written to disk, a fresh
  * `opencode run` reads it with the `read` tool, and the answer is verified.
  *
- * The image content is random per probe and never appears in the prompt, so a
- * text-only model that guesses is overwhelmingly likely to answer wrong — the
- * same asymmetry that makes the probe a measurement instead of a self-report.
+ * The probe asks for the SET of colors present and their count, not their
+ * left-to-right order. Order made a wrong-order answer from a model that did
+ * receive pixels indistinguishable from blindness (ADR 0036 amendment), and
+ * weaker local models that bind colors correctly still fumbled a four-cell
+ * strip's order. A ten-name palette with four drawn keeps the guess space at
+ * 1/C(10,4) = 1/210 — stronger than the old 1/24 — while carrying no order
+ * requirement. A failed attempt is retried once with a fresh permutation,
+ * because one flaky answer must not become a durable "measured blind" fact.
+ * When no attempt's read ever returned an image block, the outcome is
+ * INCONCLUSIVE: the toolchain failed, not the model, so no seat is told it is
+ * blind on that evidence.
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -19,20 +27,39 @@ import { executeOpendCode } from "./executor.ts";
 import { eventPath, extractAssistantText, initLedger, ledgerDir, resetPhase } from "../core/ledger.ts";
 import { parseToolCalls, toolResultContainsImage } from "../gates/evidence.ts";
 
-export const PROBE_VERSION = 1;
+export const PROBE_VERSION = 2;
 export const ANSWER_MARKER = "VISION_PROBE_ANSWER";
 export const NOREAD_MARKER = "VISION_PROBE_NOREAD";
 
-export const PROBE_COLORS = [
+/** Ten perceptually separated colors: four are drawn per probe, so naming a
+ * block can never be confused by a near-pair (red/blue, yellow/orange). */
+export const PROBE_PALETTE = [
   { name: "red", rgb: [220, 40, 40] },
-  { name: "green", rgb: [40, 180, 70] },
-  { name: "blue", rgb: [50, 90, 240] },
+  { name: "orange", rgb: [240, 130, 30] },
   { name: "yellow", rgb: [240, 210, 40] },
+  { name: "green", rgb: [40, 180, 70] },
+  { name: "cyan", rgb: [40, 190, 200] },
+  { name: "blue", rgb: [50, 90, 240] },
+  { name: "purple", rgb: [140, 70, 200] },
+  { name: "magenta", rgb: [220, 60, 160] },
+  { name: "brown", rgb: [140, 90, 50] },
+  { name: "gray", rgb: [130, 130, 130] },
 ] as const;
 
-const SIGNAL_COLORS = PROBE_COLORS.map((c) => c.name);
+export const PROBE_BLOCKS = 4;
+export const PROBE_CELL_PX = 80;
+export const PROBE_GAP_PX = 16;
+export const PROBE_BACKGROUND = [255, 255, 255] as const;
 
-const PROBE_CELL_PX = 24;
+/** Two attempts: the retry exists for flaky tool use, not for blind guessing —
+ * a text-only model cannot pass either attempt (1/210 per attempt). */
+export const DEFAULT_PROBE_ATTEMPTS = 2;
+
+const PROBE_NAMES: ReadonlySet<string> = new Set(PROBE_PALETTE.map((c) => c.name));
+
+/** Model-authored synonyms mapped onto the palette's canonical names, so a
+ * correct sighting is not failed by vocabulary (grey/gray, violet/purple). */
+const COLOR_SYNONYMS: Record<string, string> = { violet: "purple", grey: "gray", silver: "gray" };
 
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -59,41 +86,50 @@ function pngChunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([length, typeBytes, data, crc]);
 }
 
-/** A random permutation of {@link PROBE_COLORS} indices: four distinct colors,
- * equal area, no prompt leakage. Draw order is the answer. */
+/** A random four-block subset of {@link PROBE_PALETTE}: distinct colors, equal
+ * area, no prompt leakage. The set — not the draw order — is the answer. */
 export function randomProbeSpec(rng: () => number = Math.random): number[] {
-  const order = PROBE_COLORS.map((_, i) => i);
+  const order = PROBE_PALETTE.map((_, i) => i);
   for (let i = order.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1));
     [order[i], order[j]] = [order[j]!, order[i]!];
   }
-  return order;
+  return order.slice(0, PROBE_BLOCKS);
 }
 
-/** Encode a truecolor PNG of the probe spec — four side-by-side solid squares.
- * Hand-rolled (node:zlib + chunk framing) so the probe carries no dependency a
- * project's toolchain could lack. Pure. */
+/** Encode a truecolor PNG of the probe spec — solid blocks on a white canvas,
+ * separated by gaps so patchifying encoders cannot blend neighbors. Hand-rolled
+ * (node:zlib + chunk framing) so the probe carries no dependency a project's
+ * toolchain could lack. Pure. */
 export function buildProbePng(spec: readonly number[], cellPx = PROBE_CELL_PX): Buffer {
-  const width = spec.length * cellPx;
-  const height = cellPx;
+  const gap = PROBE_GAP_PX;
+  const width = gap + spec.length * (cellPx + gap);
+  const height = 2 * gap + cellPx;
+  const stride = 1 + width * 3;
+  const raw = Buffer.alloc(height * stride);
+  for (let y = 0; y < height; y++) {
+    let off = y * stride;
+    raw[off++] = 0;
+    for (let x = 0; x < width; x++) {
+      let rgb: readonly [number, number, number] = PROBE_BACKGROUND;
+      for (let i = 0; i < spec.length; i++) {
+        const x0 = gap + i * (cellPx + gap);
+        if (x >= x0 && x < x0 + cellPx && y >= gap && y < gap + cellPx) {
+          const { rgb: blockRgb } = PROBE_PALETTE[spec[i]!]!;
+          rgb = blockRgb;
+          break;
+        }
+      }
+      raw[off++] = rgb[0];
+      raw[off++] = rgb[1];
+      raw[off++] = rgb[2];
+    }
+  }
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(width, 0);
   ihdr.writeUInt32BE(height, 4);
   ihdr[8] = 8;
   ihdr[9] = 2;
-  const raw = Buffer.alloc(height * (1 + width * 3));
-  for (let y = 0; y < height; y++) {
-    let off = y * (1 + width * 3);
-    raw[off++] = 0;
-    for (const index of spec) {
-      const [r, g, b] = PROBE_COLORS[index]!.rgb;
-      for (let x = 0; x < cellPx; x++) {
-        raw[off++] = r;
-        raw[off++] = g;
-        raw[off++] = b;
-      }
-    }
-  }
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     pngChunk("IHDR", ihdr),
@@ -102,35 +138,46 @@ export function buildProbePng(spec: readonly number[], cellPx = PROBE_CELL_PX): 
   ]);
 }
 
+/** The path is absolute on purpose: a relative path let weaker models rewrite
+ * it to `/.railhead/...`, take the read error for a capability limit, and
+ * answer the (now removed) no-read marker. The read is forced before the
+ * answer because an unforced model answered from this prompt's text. */
 export function probePrompt(imagePath: string): string {
-  const names = SIGNAL_COLORS.join(", ");
-  return `You are being tested. Complete these two steps, then stop:
-
-1. Read the image file ${imagePath} using your file-reading tool (the "read" tool).
-2. Identify the color of each square in the image, left to right.
-
-The image shows four square blocks side by side, each a solid color drawn from this set: ${names}. All four colors are different.
-Reply with exactly one line: ${ANSWER_MARKER} color1, color2, color3, color4
-If you cannot read image files at all, reply with exactly: ${NOREAD_MARKER}
-Use no other tools, and add no other prose.`;
+  const names = PROBE_PALETTE.map((c) => c.name).join(", ");
+  return `You are being tested. Use the read tool now on this image file: ${imagePath}. You MUST call the read tool before answering — the answer is NOT in this text.
+The image shows four solid color blocks side by side, each a different color drawn from this list: ${names}.
+Reply with exactly one line:
+${ANSWER_MARKER} count=<number of blocks> colors=<comma-separated names of the colors present>
+Use no other tools, and add no other prose.
+If the read fails for a tool reason, report the exact error instead of concluding anything about your capabilities.`;
 }
 
 export interface ProbeAnswer {
   colors: string[];
+  count: number;
   correct: boolean;
   selfReportedNoRead: boolean;
 }
 
-/** Tolerant of prose around the marker: the recognized color words are read in
- * order off the marked line, so "The colors are red, blue, ..." still parses,
- * while a wrong order or a missing color fails. Pure. */
+/** Order-free: the marked line's count and its set of recognized color names
+ * are compared to the drawn subset. A bare color list (no `count=`/`colors=`
+ * labels) still parses — the count defaults to the list length. Pure. */
 export function parseProbeAnswer(text: string, spec: readonly number[]): ProbeAnswer {
   const selfReportedNoRead = text.includes(NOREAD_MARKER);
   const line = text.split("\n").find((l) => l.includes(ANSWER_MARKER)) ?? "";
-  const colors = line.toLowerCase().match(/\b(red|green|blue|yellow)\b/g) ?? [];
-  const expected = spec.map((i) => PROBE_COLORS[i]!.name);
-  const correct = !selfReportedNoRead && colors.length === expected.length && colors.every((c, i) => c === expected[i]);
-  return { colors, correct, selfReportedNoRead };
+  const expected: string[] = spec.map((i) => PROBE_PALETTE[i]!.name);
+  const countMatch = /count\s*[=:]\s*(\d+)/i.exec(line);
+  const colorsSection = /colors?\s*[=:]\s*([^\n]*)/i.exec(line)?.[1] ?? line;
+  const mentioned = (colorsSection.toLowerCase().match(/[a-z]+/g) ?? [])
+    .map((word) => COLOR_SYNONYMS[word] ?? word)
+    .filter((word) => PROBE_NAMES.has(word));
+  const colors = [...new Set(mentioned)];
+  const count = countMatch ? Number(countMatch[1]) : colors.length;
+  const correct = !selfReportedNoRead
+    && count === expected.length
+    && colors.length === expected.length
+    && colors.every((c) => expected.includes(c));
+  return { colors, count, correct, selfReportedNoRead };
 }
 
 export interface VisionProbeOutcome {
@@ -142,6 +189,14 @@ export interface VisionProbeOutcome {
   answerColors: string[];
   expectedColors: string[];
   error: string | null;
+  /** No attempt's read ever returned an image block: the probe measured the
+   * toolchain (path, permission, provider stripping), not the model. Never
+   * injects a "measured blind" claim; gates still refuse because vision is
+   * unverified. */
+  inconclusive: boolean;
+  /** opencode invocations spent: 1 when the first attempt passed, otherwise
+   * the attempt count (a fresh permutation each). */
+  attempts: number;
 }
 
 export interface VisionProbeOptions {
@@ -150,18 +205,31 @@ export interface VisionProbeOptions {
   maxContextTokens?: number | null;
   maxSteps?: number | null;
   stallTimeoutSec?: number | null;
+  attempts?: number | null;
 }
 
-export async function runVisionProbe(options: VisionProbeOptions): Promise<VisionProbeOutcome> {
+/** Rank for {@link pickBestProbeOutcome}: a pass outranks a delivered-but-
+ * misread attempt, which outranks an attempt where no image ever arrived.
+ * Ties keep the later attempt (freshest evidence). Pure. */
+function outcomeRank(outcome: VisionProbeOutcome): number {
+  if (outcome.ok) return 2;
+  if (outcome.sawImageBlock) return 1;
+  return 0;
+}
+
+export function pickBestProbeOutcome(a: VisionProbeOutcome, b: VisionProbeOutcome): VisionProbeOutcome {
+  return outcomeRank(b) >= outcomeRank(a) ? b : a;
+}
+
+async function runProbeAttempt(options: VisionProbeOptions, model: string | null): Promise<VisionProbeOutcome> {
   const { cwd } = options;
-  const model = options.model === DEFAULT_MODEL ? null : options.model;
   const modelKey = model ?? DEFAULT_MODEL;
   const dir = ledgerDir(cwd, "vision-probe");
-  const imagePath = join(".railhead", "vision-probe", "probe.png");
+  const imagePath = join(cwd, ".railhead", "vision-probe", "probe.png");
   const spec = randomProbeSpec();
 
   await mkdir(dir, { recursive: true });
-  await writeFile(join(cwd, imagePath), buildProbePng(spec));
+  await writeFile(imagePath, buildProbePng(spec));
   await initLedger(dir);
   const phaseFile = "vision-probe";
   await resetPhase(dir, phaseFile);
@@ -195,6 +263,7 @@ export async function runVisionProbe(options: VisionProbeOptions): Promise<Visio
   const sawImageBlock = readOfProbe ? toolResultContainsImage(readOfProbe.output, readOfProbe.attachments) : false;
   const answerText = await extractAssistantText(dir, phaseFile).catch(() => "");
   const parsed = parseProbeAnswer(answerText, spec);
+  const ok = result.status === "ok" && parsed.correct;
 
   const error = result.status === "ok"
     ? null
@@ -202,14 +271,30 @@ export async function runVisionProbe(options: VisionProbeOptions): Promise<Visio
 
   return {
     model: modelKey,
-    ok: error === null && parsed.correct,
+    ok,
     sawImageBlock,
     answerCorrect: parsed.correct,
     selfReportedNoRead: parsed.selfReportedNoRead,
     answerColors: parsed.colors,
-    expectedColors: spec.map((i) => PROBE_COLORS[i]!.name),
+    expectedColors: spec.map((i) => PROBE_PALETTE[i]!.name),
     error,
+    inconclusive: !ok && !sawImageBlock,
+    attempts: 1,
   };
+}
+
+export async function runVisionProbe(options: VisionProbeOptions): Promise<VisionProbeOutcome> {
+  const model = options.model === DEFAULT_MODEL ? null : options.model;
+  const attempts = Math.max(1, options.attempts ?? DEFAULT_PROBE_ATTEMPTS);
+  let best: VisionProbeOutcome | null = null;
+  let spent = 0;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const outcome = await runProbeAttempt(options, model);
+    spent = attempt;
+    best = best === null ? outcome : pickBestProbeOutcome(best, outcome);
+    if (best.ok) break;
+  }
+  return { ...best!, attempts: spent };
 }
 
 export interface VisionCapabilityRecord {
@@ -218,6 +303,9 @@ export interface VisionCapabilityRecord {
   saw_image_block: boolean;
   answer_correct: boolean;
   self_reported_no_read: boolean;
+  /** No image block ever came back: no measurement. Readers treat this as
+   * absent, so it neither grants nor denies vision. */
+  probe_inconclusive: boolean;
   verified_at: string;
   probe_version: number;
 }
@@ -253,6 +341,7 @@ export async function readVisionCapabilities(cwd: string): Promise<VisionCapabil
       saw_image_block: e.saw_image_block === true,
       answer_correct: e.answer_correct === true,
       self_reported_no_read: e.self_reported_no_read === true,
+      probe_inconclusive: e.probe_inconclusive === true,
       verified_at: typeof e.verified_at === "string" ? e.verified_at : "",
       probe_version: typeof e.probe_version === "number" ? e.probe_version : 0,
     });
@@ -267,6 +356,7 @@ export function outcomeToRecord(outcome: VisionProbeOutcome, verifiedAt = new Da
     saw_image_block: outcome.sawImageBlock,
     answer_correct: outcome.answerCorrect,
     self_reported_no_read: outcome.selfReportedNoRead,
+    probe_inconclusive: outcome.inconclusive,
     verified_at: verifiedAt,
     probe_version: PROBE_VERSION,
   };
@@ -307,7 +397,9 @@ export interface VisionCapabilityFact {
 
 export async function readVisionCapabilityFor(cwd: string, model: string | null): Promise<VisionCapabilityFact | null> {
   const key = model === null ? DEFAULT_MODEL : model;
-  const record = (await readVisionCapabilities(cwd)).find((r) => r.model === key && r.probe_version === PROBE_VERSION);
+  const record = (await readVisionCapabilities(cwd)).find(
+    (r) => r.model === key && r.probe_version === PROBE_VERSION && !r.probe_inconclusive,
+  );
   return record ? { readsImages: record.reads_images, verifiedAt: record.verified_at } : null;
 }
 
@@ -391,7 +483,7 @@ export async function ensureVisionForGates(options: {
 
 export function describeVisionOutcome(outcome: VisionProbeOutcome): string {
   if (outcome.ok) {
-    return `read the generated PNG and named all four colors (${outcome.expectedColors.join(", ")})`;
+    return `read the generated PNG and named all blocks correctly (${outcome.expectedColors.join(", ")})`;
   }
   if (outcome.error) return `the agent ${outcome.error}`;
   if (outcome.selfReportedNoRead) return "the model reported it cannot read image files";
@@ -413,10 +505,13 @@ export function describeVisionOutcome(outcome: VisionProbeOutcome): string {
 }
 
 /** ADR 0036: the implementer's visual self-check is optional, so a surfaced
- * run measures the implement seat only when no current-version record covers
+ * run measures the implement seat only when no current-version PASS covers
  * today's model — a gate always re-probes; this seat does not pay that cost on
- * every run once measured. `skip` names models already probed this invocation
- * (the gate seats), so an all-one-model config probes once. */
+ * every run once verified. A negative or inconclusive record is re-probed every
+ * invocation: a stale "no" silently disables the self-check (the opt-out §4
+ * rejects), and it is the false-negative direction that a flaky probe
+ * produced. `skip` names models already probed this invocation (the gate
+ * seats), so an all-one-model config probes once. */
 export async function ensureImplementerVision(options: {
   cwd: string;
   model: string | null;
@@ -426,7 +521,7 @@ export async function ensureImplementerVision(options: {
   const { cwd, model } = options;
   if (model === null || options.skip?.has(model)) return null;
   const existing = (await readVisionCapabilities(cwd)).find((r) => r.model === model && r.probe_version === PROBE_VERSION);
-  if (existing) return existing;
+  if (existing?.reads_images === true) return existing;
   const outcome = await runVisionProbe({
     cwd,
     model,

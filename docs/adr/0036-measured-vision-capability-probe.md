@@ -177,3 +177,46 @@ Still open from the same incident: the probe image is a degenerate vision
 input (24 px cells smear under patchifying encoders), and a single trial
 refuses on one bit of signal — enlarging the probe cells and re-probing once
 with a fresh permutation before refusing were deferred.
+
+## Amendment (2026-09-25): order-free set probe, retry, and inconclusive ≠ blind
+
+Recorded after the spriteforge run `run-20260925-1640`: one probe answer
+recorded `splash/incoai/Qwen3.6-35B-A3B-Splash` as blind (`reads_images: false`,
+`self_reported_no_read: true`) although the model reads images. Re-measured, the
+order probe passed 2 of 5 attempts — the failures rewrote the prompt's relative
+path `.railhead/...` to `/.railhead/...`, hit a file-not-found, and answered the
+no-read marker. Because the implement seat reuses a current-version record, that
+single false negative told every surface-ticket builder prompt it could not see
+("The railhead measured this seat's model and it does NOT receive image
+pixels"), so the screenshot self-check the seat was capable of never ran — the
+layout defects the interaction smoke later caught (an off-screen shell) went
+unseen by the writer.
+
+Changes:
+
+1. **The answer is a set, not an order.** The probe draws four blocks from a
+   ten-name palette and asks for the count plus the names present. Guess odds
+   improve from 1/4! = 1/24 to 1/C(10,4) = 1/210, while a model that receives
+   pixels but fumbles left-to-right binding is no longer indistinguishable from
+   one that receives none (the k3-256k ambiguity this ADR already recorded).
+2. **The read is forced and the path absolute.** The prompt opens with "Use the
+   read tool now on this image file: <absolute path>. You MUST call the read
+   tool before answering — the answer is NOT in this text." The no-read marker
+   is gone from the prompt (the parser still recognizes it if a model volunteers
+   it); a failed read is answered by reporting the exact error. The old relative
+   path is what weaker models mangled.
+3. **A failed attempt retries once with a fresh permutation**, and the best
+   attempt is recorded. Enlarged 80 px blocks with 16 px gaps replace the 24 px
+   cells this ADR flagged as a degenerate vision input.
+4. **No image block ever returning is INCONCLUSIVE, not blind.** The record
+   carries `probe_inconclusive`; readers treat it as absent, so no seat is told
+   it is blind on toolchain evidence. The surface cadence gains a third, neutral
+   variant for an unmeasured seat: try the read, report the failure, fall back
+   to DOM/state, and never claim a visual check the read did not deliver.
+5. **The implement seat caches only a pass.** A cached "no" silently disables
+   the self-check — the opt-out §4 rejects — so a negative or inconclusive
+   record is re-probed each invocation, like the gates. `PROBE_VERSION` is 2, so
+   records written by the order probe are ignored.
+
+This closes the two items the previous amendment deferred (enlarged cells;
+re-probing once with a fresh permutation before refusing).

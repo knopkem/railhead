@@ -1,4 +1,4 @@
-import type { RailheadConfig, ResolvedModels } from "../config/config.ts";
+import type { RailheadConfig, ResolvedModels, SeatName } from "../config/config.ts";
 import type { PhaseContext } from "./telemetry.ts";
 
 export const SCHEMA_VERSION = 1;
@@ -283,6 +283,11 @@ export interface RunState {
    * persisted (derived at startRun). Underscored to mark it as excluded
    * from writeState's JSON. */
   _effectiveContextTokens?: number;
+  /** ADR 0014 amendment: per-seat request ceilings resolved at run start from
+   * each seat's own model window (the operator ceiling governs the implement
+   * seat). Runtime-only, not persisted; absent means fall back to
+   * `_effectiveContextTokens`. */
+  _seatContextTokens?: Partial<Record<SeatName, number>>;
 }
 
 export interface RunMeta {
