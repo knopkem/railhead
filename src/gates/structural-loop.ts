@@ -12,7 +12,7 @@ import { pushDigest, readDigest } from "../context/digest.ts";
 import { readLearnings } from "../context/learnings.ts";
 import { loadContracts, summarizeContracts } from "../core/contracts.ts";
 import * as git from "../core/git.ts";
-import { nowClock } from "../cli/overview.ts";
+import { nowClock, scopeLabel } from "../cli/overview.ts";
 import { writeState } from "../core/ledger.ts";
 import { detectGroupCheckpoints } from "./goal-loop.ts";
 import { addPendingCheckpoint, clearPendingCheckpoint } from "../core/pending-checkpoints.ts";
@@ -76,7 +76,8 @@ export async function runStructuralReview(
   const goalModel = state._models?.goal ?? null;
   if (!goalModel) return "pass";
 
-  console.log(`\n[${nowClock()}] structural review — checkpoint "${group}"`);
+  const scope = opts?.runEnd ? "run-end" : scopeLabel(state.tickets, { group });
+  console.log(`\n[${nowClock()}] [${scope}] structural review — checkpoint "${group}"`);
 
   const allTickets = await loadTickets(state.tickets_dir);
   const mission = state.original_prompt ?? "(no mission declared)";
@@ -143,11 +144,11 @@ export async function runStructuralReview(
   await writeState(ledger, state);
 
   if (verdict.verdict === "pass") {
-    console.log(`[${nowClock()}] structural review ✓ PASS (checkpoint "${group}")`);
+    console.log(`[${nowClock()}] [${scope}] structural review ✓ PASS (checkpoint "${group}")`);
     return "pass";
   }
   if (verdict.verdict === "inconclusive") {
-    console.log(`[${nowClock()}] structural review ⚠ INCONCLUSIVE (checkpoint "${group}")`);
+    console.log(`[${nowClock()}] [${scope}] structural review ⚠ INCONCLUSIVE (checkpoint "${group}")`);
     return "pass";
   }
 

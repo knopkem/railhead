@@ -794,6 +794,33 @@ export const DEFAULT_CONFIG: RailheadConfig = {
   provider: null,
 };
 
+/**
+ * Normalize a command list read from railhead.json. Planner-shaped Markdown
+ * survives in the config file — a user keeps a fenced block, or an older
+ * railhead wrote one — and a literal ``` entry runs under `sh -c` as an
+ * unterminated quote, failing the verify gate for every ticket before any code
+ * is judged. (The SpriteForge-07 run died four attempts this way.) Drop bare
+ * fence delimiters and blank/`$END` entries, unwrap single-line fences and
+ * backtick-wrapped commands, and trim. The planner's block parser
+ * (`commandLines` in src/plan/plan.ts) delegates here, so a config the planner
+ * seeded and one a human wrote are read by the same rules.
+ */
+export function normalizeShellCommands(commands: unknown[]): string[] {
+  const out: string[] = [];
+  for (const raw of commands) {
+    if (typeof raw !== "string") continue;
+    let line = raw.trim();
+    if (!line || /^\$end$/i.test(line)) continue;
+    const singleLineFence = line.match(/^(?:`{3,}|~{3,})([\s\S]*?)(?:`{3,}|~{3,})$/);
+    if (singleLineFence) line = singleLineFence[1].trim();
+    if (/^(?:`{3,}|~{3,})[\w.+#-]*$/.test(line)) continue;
+    line = line.replace(/^(?:`{3,}|~{3,})\s+/, "").replace(/\s+(?:`{3,}|~{3,})$/, "").trim();
+    if (/^`[^`]+`$/.test(line)) line = line.slice(1, -1).trim();
+    if (line) out.push(line);
+  }
+  return out;
+}
+
 /** Read railhead.json, falling back to DEFAULT_CONFIG for missing keys or a bad file. */
 export async function loadConfig(cwd: string): Promise<RailheadConfig> {
   let raw: string;
@@ -836,11 +863,11 @@ export async function loadConfig(cwd: string): Promise<RailheadConfig> {
     const modeOf = (obj: Record<string, any>, fallback: GateMode, legacy: (obj: Record<string, any>) => GateMode): GateMode =>
       parseGateMode(obj.mode) ?? ("enabled" in obj ? legacy(obj) : fallback);
     return {
-      verify: Array.isArray(j.verify) ? j.verify : DEFAULT_CONFIG.verify,
+      verify: Array.isArray(j.verify) ? normalizeShellCommands(j.verify) : DEFAULT_CONFIG.verify,
       projectInterface,
       provider,
-      smoke: Array.isArray(j.smoke) ? j.smoke : DEFAULT_CONFIG.smoke,
-      lint: Array.isArray(j.lint) ? j.lint : DEFAULT_CONFIG.lint,
+      smoke: Array.isArray(j.smoke) ? normalizeShellCommands(j.smoke) : DEFAULT_CONFIG.smoke,
+      lint: Array.isArray(j.lint) ? normalizeShellCommands(j.lint) : DEFAULT_CONFIG.lint,
       max_retries: j.max_retries ?? DEFAULT_CONFIG.max_retries,
       max_review_retries: j.max_review_retries ?? DEFAULT_CONFIG.max_review_retries,
       max_attempts: j.max_attempts ?? DEFAULT_CONFIG.max_attempts,

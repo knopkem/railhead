@@ -93,6 +93,28 @@ describe("loadConfig", () => {
     expect(cfg.max_retries).toBe(DEFAULT_CONFIG.max_retries);
   });
 
+  it("normalizes planner-shaped verify/smoke/lint entries — fence lines dropped, backticks unwrapped", async () => {
+    // The SpriteForge railhead.json shape: a fenced block kept as list
+    // entries. A literal ``` entry dies under sh -c ("unexpected EOF while
+    // looking for matching backtick") and failed ticket 07's verify four
+    // times before any code was judged.
+    const cfg = await loadConfig(await makeCwd(JSON.stringify({
+      verify: ["```", "npm run typecheck", "npm run build", "npm test", "```"],
+      smoke: ["`npx vite --port 5173`", "```sh", "npm run dev", "```"],
+      lint: ["```", "eslint .", "```"],
+    })));
+    expect(cfg.verify).toEqual(["npm run typecheck", "npm run build", "npm test"]);
+    expect(cfg.smoke).toEqual(["npx vite --port 5173", "npm run dev"]);
+    expect(cfg.lint).toEqual(["eslint ."]);
+  });
+
+  it("leaves ordinary command lists untouched and drops non-string/droppable entries", async () => {
+    const cfg = await loadConfig(await makeCwd(JSON.stringify({
+      verify: ["npm run typecheck && npm run build && npm test", "", "$END", 42, "```"],
+    })));
+    expect(cfg.verify).toEqual(["npm run typecheck && npm run build && npm test"]);
+  });
+
   it("reads the declared interaction interface (issue #97)", async () => {
     expect((await loadConfig(await makeCwd('{"interface":"browser-ui"}'))).projectInterface).toBe("browser-ui");
     expect((await loadConfig(await makeCwd('{"interface":"canvas"}'))).projectInterface).toBe("canvas");

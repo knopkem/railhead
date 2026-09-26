@@ -341,6 +341,40 @@ export function nowClock(): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+/**
+ * The console scope tag for a phase line: a group-bound gate reads its group
+ * and execution range (`ui-foundation 05-13`), an ungrouped one reads the
+ * ticket's own number (`17`), and a phase with no ticket reads `run`. The
+ * group gates judge a whole group, so a bare ticket number would mislead.
+ */
+export function scopeLabel(
+  tickets: { number: string; group?: string | null }[],
+  scope: { group?: string | null; number?: string },
+): string {
+  const group = scope.group ?? null;
+  if (!group) return scope.number ?? "run";
+  const members = tickets.filter((t) => t.group === group);
+  if (members.length === 0) return group;
+  // Collapse consecutive numbers into runs. A group's members are NOT
+  // necessarily contiguous in the queue (a later group's tickets can
+  // interleave), so `01-04,12` is honest where a first–last span would claim
+  // tickets the group doesn't own.
+  const numbers = members.map((m) => m.number).sort((a, b) => Number(a) - Number(b));
+  const runs: string[] = [];
+  let start = numbers[0]!;
+  let prev = numbers[0]!;
+  for (const n of numbers.slice(1)) {
+    if (Number(n) === Number(prev) + 1) {
+      prev = n;
+      continue;
+    }
+    runs.push(start === prev ? start : `${start}-${prev}`);
+    start = prev = n;
+  }
+  runs.push(start === prev ? start : `${start}-${prev}`);
+  return `${group} ${runs.join(",")}`;
+}
+
 export async function writeReport(cwd: string, runId: string, state: RunState): Promise<void> {
   const cacheStats = await collectCacheStats(join(cwd, ".railhead", runId));
   await writeFile(join(cwd, ".railhead", runId, "report.md"), buildReport(state, await collectCharterReportInfo(state), cacheStats), "utf8");

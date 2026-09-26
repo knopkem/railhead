@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildReport, renderStatusTable, elapsedLabel, renderNextActionable, renderArcSummary } from "./overview.ts";
+import { buildReport, renderStatusTable, elapsedLabel, renderNextActionable, renderArcSummary, scopeLabel } from "./overview.ts";
 import { parseProductPlan } from "../core/product.ts";
 import type { RunState, TicketState } from "../core/state.ts";
 
@@ -143,6 +143,33 @@ describe("buildReport visual review status", () => {
         expect(r).not.toContain("- Visual review: PASS");
       }
     }
+  });
+});
+
+describe("scopeLabel", () => {
+  const t = (number: string, group?: string | null): { number: string; group?: string | null } => ({ number, group });
+
+  it("renders a group's ticket numbers, collapsing consecutive runs", () => {
+    const tickets = [t("01", "core"), t("02", "core"), t("03", "ui"), t("04", "ui"), t("05", "ui")];
+    expect(scopeLabel(tickets, { group: "core" })).toBe("core 01-02");
+    expect(scopeLabel(tickets, { group: "ui" })).toBe("ui 03-05");
+  });
+
+  it("does not claim interleaved tickets — an outer group reads as runs", () => {
+    // The SpriteForge shape: core-engine is 01-04 then 12, ui-foundation holds
+    // 05-11 and 13. `core-engine 01-12` would falsely claim 05-11.
+    const tickets = [t("01", "core"), t("02", "core"), t("03", "core"), t("04", "core"), t("05", "ui"), t("12", "core")];
+    expect(scopeLabel(tickets, { group: "core" })).toBe("core 01-04,12");
+    expect(scopeLabel(tickets, { group: "ui" })).toBe("ui 05");
+  });
+
+  it("collapses a single-member group to one number", () => {
+    expect(scopeLabel([t("12", "engine")], { group: "engine" })).toBe("engine 12");
+  });
+
+  it("uses the ticket's own number when ungrouped, and the group alone when unknown", () => {
+    expect(scopeLabel([t("17", undefined)], { group: null, number: "17" })).toBe("17");
+    expect(scopeLabel([t("01", "core")], { group: "run-end" })).toBe("run-end");
   });
 });
 

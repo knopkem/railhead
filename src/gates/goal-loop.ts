@@ -23,7 +23,7 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { readProductPlan, renderProductBrief } from "../core/product.ts";
-import { nowClock } from "../cli/overview.ts";
+import { nowClock, scopeLabel } from "../cli/overview.ts";
 import { readVisionCapabilityFor } from "../execute/vision-probe.ts";
 import { addPendingCheckpoint, clearPendingCheckpoint } from "../core/pending-checkpoints.ts";
 
@@ -182,6 +182,9 @@ export async function runGoalReview(
   // gate ignores the knob, so mode decides there (see goalCheckpointIsAdvisory).
   const advisory = goalCheckpointIsAdvisory(cfg, opts?.runEnd);
   const seat = advisory ? "advisory checkpoint" : `checkpoint "${group}"`;
+  // The console tag names the group AND its execution range — a group gate
+  // judges every ticket in the group, so a bare ticket number would mislead.
+  const scope = opts?.runEnd ? "run-end" : scopeLabel(state.tickets, { group });
 
   const allTickets = await loadTickets(state.tickets_dir);
 
@@ -195,12 +198,12 @@ export async function runGoalReview(
       recordGoalReview(state, { group, round: 0, verdict: "pass", findings: [] });
       state.last_goal_commit_count = state.tickets.filter((t) => t.status === "committed").length;
       await writeState(ledger, state);
-      console.log(`[${nowClock()}] goal review — checkpoint "${group}": no rendered surface in this group — skipped (structural review covers it)`);
+      console.log(`[${nowClock()}] [${scope}] goal review — checkpoint "${group}": no rendered surface in this group — skipped (structural review covers it)`);
       return "pass";
     }
   }
 
-  console.log(`\n[${nowClock()}] goal review — ${seat}`);
+  console.log(`\n[${nowClock()}] [${scope}] goal review — ${seat}`);
 
   const mission = state.original_prompt ?? "(no mission declared)";
   const runHint = runCommandFromVerify(state.config.verify, allTickets);
@@ -438,11 +441,11 @@ export async function runGoalReview(
   await writeState(ledger, state);
 
   if (verdict.verdict === "pass") {
-    console.log(`[${nowClock()}] goal review ✓ PASS (${seat})`);
+    console.log(`[${nowClock()}] [${scope}] goal review ✓ PASS (${seat})`);
     return "pass";
   }
   if (verdict.verdict === "inconclusive") {
-    console.log(`[${nowClock()}] goal review ⚠ INCONCLUSIVE (${seat}) — agent produced no verdict; no corrective tickets generated`);
+    console.log(`[${nowClock()}] [${scope}] goal review ⚠ INCONCLUSIVE (${seat}) — agent produced no verdict; no corrective tickets generated`);
     return "pass";
   }
 
@@ -454,7 +457,7 @@ export async function runGoalReview(
   // corrective batch happens at run end. The convergence stop never applies:
   // advisory is one round by construction.
   if (advisory) {
-    console.log(`[${nowClock()}] goal review ○ ADVISORY ${reviewSummary(verdict.findings)} — recorded + steering; zero corrective tickets (corrected in one batch at run end)`);
+    console.log(`[${nowClock()}] [${scope}] goal review ○ ADVISORY ${reviewSummary(verdict.findings)} — recorded + steering; zero corrective tickets (corrected in one batch at run end)`);
     return "pass";
   }
 
@@ -463,7 +466,7 @@ export async function runGoalReview(
   // corrective tickets would be no-op-churn (belt: also fires if a model ever
   // echoes its injected prior-findings block verbatim).
   if (previous?.verdict === "fail" && findingsEchoLastRound(previous.findings, verdict.findings)) {
-    console.log(`[${nowClock()}] goal review ⚠ checkpoint "${group}": identical findings as the previous round after a corrective cycle — corrections are not landing; stopping the review loop (resume with a replan or a manual fix)`);
+    console.log(`[${nowClock()}] [${scope}] goal review ⚠ checkpoint "${group}": identical findings as the previous round after a corrective cycle — corrections are not landing; stopping the review loop (resume with a replan or a manual fix)`);
     return "stop";
   }
 
@@ -531,7 +534,7 @@ export async function runGoalReview(
     return "pass";
   }
   if (outcome === "none") {
-    console.log(`[${nowClock()}] goal review ⚠ FAIL with no [BLOCKER] — soft-pass; ${reviewSummary(verdict.findings)} noted`);
+    console.log(`[${nowClock()}] [${scope}] goal review ⚠ FAIL with no [BLOCKER] — soft-pass; ${reviewSummary(verdict.findings)} noted`);
     return "pass";
   }
   if (outcome === "halted") {

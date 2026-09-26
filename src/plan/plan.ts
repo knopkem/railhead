@@ -1,7 +1,7 @@
 import { scanJsonObjects } from "../core/json.ts";
 import { indexOfOutsideFences } from "../core/fences.ts";
 import { parseProductPlan, type ProductPlan } from "../core/product.ts";
-import { DEFAULT_CONTEXT_TOKENS } from "../config/config.ts";
+import { DEFAULT_CONTEXT_TOKENS, normalizeShellCommands } from "../config/config.ts";
 import { titleSlug, type PlanTicket, type Ticket } from "../core/ticket.ts";
 import type { ProjectInterface } from "../config/interface.ts";
 import { PROJECT_INTERFACES } from "../config/interface.ts";
@@ -639,28 +639,16 @@ function fencedContentOnly(block: string): string {
   return out.join("\n");
 }
 
-/** Clean a planner metadata block into shell-command lines. Trims and drops
- * blank lines; drops a bare `$END` (model noise between blocks — it expands to
- * empty in a shell and exits 0, so it would be silent); drops Markdown fence
- * delimiters and unwraps backtick-wrapped commands. The planner is told to
- * emit bare commands, but a fenced `$VERIFY` block is a common local-model
- * shape — a literal ``` line used to land in railhead.json and die under
- * `sh -c` with "unexpected EOF while looking for matching backtick", burning a
- * whole run's retry budget on a gate that could never pass. */
+/** Clean a planner metadata block into shell-command lines. The per-line
+ * fence/backtick rules live in `normalizeShellCommands` (config.ts) — the same
+ * rules `loadConfig` applies to hand-written railhead.json entries, so a
+ * planner block and a config list can never drift. The planner is told to emit
+ * bare commands, but a fenced `$VERIFY` block is a common local-model shape —
+ * a literal ``` line used to land in railhead.json and die under `sh -c` with
+ * "unexpected EOF while looking for matching backtick", burning a whole run's
+ * retry budget on a gate that could never pass. */
 function commandLines(block: string): string[] {
-  return block
-    .split(/\n/)
-    .map((raw) => {
-      let line = raw.trim();
-      if (!line || /^\$end$/i.test(line)) return null;
-      const fenced = line.match(/^(?:`{3,}|~{3,})([\s\S]*?)(?:`{3,}|~{3,})$/);
-      if (fenced) line = fenced[1].trim();
-      if (/^(?:`{3,}|~{3,})[\w.+#-]*$/.test(line)) return null;
-      line = line.replace(/^(?:`{3,}|~{3,})\s+/, "").replace(/\s+(?:`{3,}|~{3,})$/, "").trim();
-      if (/^`[^`]+`$/.test(line)) line = line.slice(1, -1).trim();
-      return line || null;
-    })
-    .filter((l): l is string => l !== null);
+  return normalizeShellCommands(block.split(/\n/));
 }
 
 /** Extract the $VERIFY ... $SMOKE block from planner output as a list of

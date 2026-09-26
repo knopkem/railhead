@@ -48,7 +48,7 @@ import { DEFAULT_MAX_REPLANS, DEFAULT_MODEL, codeReviewRunsMidRun, contextBudget
 import { analyzePhase, summarizePhaseFiles } from "../core/telemetry.ts";
 import { advanceRetry, INITIAL_COUNTERS, type GateCounters, type GateLimits } from "../gates/gate.ts";
 import { ensureProjectGitignore, ensureProjectOpenCodePermissions, frameworkExternalDirsForVerify, detectFramework, frameworkSmokeRun, RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
-import { nowClock } from "../cli/overview.ts";
+import { nowClock, scopeLabel } from "../cli/overview.ts";
 import { haltReason } from "../core/halt.ts";
 import {
   clearStop,
@@ -1291,6 +1291,7 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
       const iface = state.config.projectInterface;
       if (interactModel !== null && iface !== "none") {
         const isPhase = `${ticket.number}-${String(attempt).padStart(2, "0")}-interact`;
+        const scopeTag = scopeLabel(state.tickets, ticket);
         const runHint = runCommandFromVerify(state.config.verify, allParsed);
         const hints = state.config.visual_review?.interaction_hints ?? state.config.goal_review?.interaction_hints ?? null;
         const scope = interactionSmokeScopeFor(parsed, allParsed, state);
@@ -1338,14 +1339,15 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
             }
             if (gap) {
               ticket.logs.push(`interact ${isPhase}: $SMOKE_PASS downgraded to inconclusive — ${gap}`);
-              console.log(`[${nowClock()}]   ${ticket.number} interaction smoke ⚠ inconclusive — ${gap}`);
+              console.log(`[${nowClock()}] [${scopeTag}] interaction smoke ⚠ inconclusive — ${gap}`);
             } else {
               ticket.logs.push(`interact ${isPhase}: ok — app operated by a real interaction`);
+              console.log(`[${nowClock()}] [${scopeTag}] interaction smoke ✓ PASS — app operated by a real interaction`);
             }
           } else if (verdict.verdict === "fail") {
             const findings = verdict.findings;
             ticket.logs.push(`interact ${isPhase}: FAIL — ${findings.length} finding(s)`);
-            console.log(`[${nowClock()}]   ${ticket.number} interaction smoke ✗ FAIL: ${findings.slice(0, 3).join(" | ")}`);
+            console.log(`[${nowClock()}] [${scopeTag}] interaction smoke ✗ FAIL: ${findings.slice(0, 3).join(" | ")}`);
             await writeState(ledger, state);
             const r = advanceRetry(counters, { type: "verify_failed", output: findings.join("\n") }, limits);
             counters = r.counters;
@@ -1353,10 +1355,13 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
             continue; // next build attempt
           } else {
             const noSurface = agentOutcome.transcript.includes("$SMOKE_INCONCLUSIVE");
-            ticket.logs.push(`interact ${isPhase}: inconclusive — ${noSurface ? "no interactive surface built yet" : "agent produced no verdict (app could not be driven)"}; not a failure`);
+            const why = noSurface ? "no interactive surface built yet" : "agent produced no verdict (app could not be driven)";
+            ticket.logs.push(`interact ${isPhase}: inconclusive — ${why}; not a failure`);
+            console.log(`[${nowClock()}] [${scopeTag}] interaction smoke ⊘ inconclusive — ${why}; not a failure`);
           }
         } else {
           ticket.logs.push(`interact ${isPhase}: ${agentOutcome.detail}`);
+          console.log(`[${nowClock()}] [${scopeTag}] interaction smoke ⊘ inconclusive — ${agentOutcome.detail}; not a failure`);
         }
         await writeState(ledger, state);
       }
