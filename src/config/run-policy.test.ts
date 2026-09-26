@@ -65,7 +65,7 @@ describe("resolveGateModes", () => {
     });
     expect(modes.visual).toBe("full");
     expect(modes.structural).toBe("off");
-    expect(modes.code).toBe("off");
+    expect(modes.code).toBe("medium");
   });
 
   it("forces visual full in fix mode when visual is enabled and a vision model exists", () => {

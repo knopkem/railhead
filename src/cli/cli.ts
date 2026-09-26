@@ -160,7 +160,7 @@ function usage() {
                    additionally fires advisory at group checkpoints under the
                    light preset — ADR 0029)
           off    = gate never fires
-        presets:  --light  review deferred to run end; goal checkpoints advisory (default)
+        presets:  --light  per-ticket code review; run-end goal/structural (default)
                   --medium per-ticket code review + goal/structural checkpoints
                   --full   everything on (per-ticket visual too)
                   --none   plan -> implement -> verify -> commit, no reviews

@@ -428,22 +428,23 @@ export interface PresetGateModes {
   goalCheckpointAction?: GoalCheckpointAction;
 }
 
-/** Per-gate modes for a preset. `--medium` is the distinctive one: checkpoint
- * goal/structural (catch problems at group boundaries) but no end-of-run
- * goal/structural pass, no per-ticket visual, and — since v2 issue 01 — no
- * per-ticket code review (only `--full` schedules one; the group probes and
- * the structural review carry the code-quality signal). `--light` is the
- * default run shape: same cadence plus a run-end goal pass, with the goal
- * judge firing corrective-anchored checkpoints at group boundaries. */
+/** Per-gate modes for a preset. `--medium` is the distinctive one: per-ticket
+ * code review + checkpoint goal/structural (catch problems at group
+ * boundaries) but no end-of-run goal/structural pass and no per-ticket visual
+ * (issue #73's table). `--light` is the default run shape: the same per-ticket
+ * code review plus a run-end goal pass, with the goal judge firing
+ * corrective-anchored checkpoints at group boundaries. Both cheap presets
+ * schedule the code gate at `medium` — BLOCKER and MAJOR both retry. (v2 issue
+ * 01 briefly turned per-ticket code review off in both; reverted.) */
 export function presetGateModes(preset: GatePreset): PresetGateModes {
   switch (preset) {
     case "full":
       return { code: "full", visual: "full", goal: "full", structural: "full" };
     case "medium":
-      return { code: "off", visual: "light", goal: "medium", structural: "medium" };
+      return { code: "medium", visual: "light", goal: "medium", structural: "medium" };
     case "light":
       return {
-        code: "off", visual: "light", goal: "light", structural: "light",
+        code: "medium", visual: "light", goal: "light", structural: "light",
         goalCheckpointAction: goalCheckpointActionFor("light") ?? undefined,
       };
     case "none":
@@ -585,14 +586,17 @@ export interface StructuralReviewConfig {
   mode: GateMode;
 }
 
-/** Per-ticket code review (issue #73; v2 issue 01). Only `full` schedules it
- * mid-run: the code review reviews each ticket's working diff after verify
- * passes and before commit. `mode` controls which finding severities trigger
- * retry:
- * - `full`: `[BLOCKER]` and `[MAJOR]` trigger retry; minor are noted.
- * - `medium`/`light`: not scheduled per-ticket by the presets (the mode only
- *   selects the severity policy if a hand-written `railhead.json` schedules it).
- * - `off` (the default): no code review.
+/** Per-ticket code review (issue #73; v2 issue 01). Every mode but `off`
+ * schedules it mid-run: the reviewer reads each ticket's working diff after
+ * verify passes and before commit. `mode` controls which finding severities
+ * trigger retry:
+ * - `full`/`medium`: `[BLOCKER]` and `[MAJOR]` trigger retry; minor are noted.
+ * - `light`: `[BLOCKER]` triggers retry; `[MAJOR]` gets one corrective attempt
+ *   per ticket (issue #96) — reachable via a hand-written `railhead.json`.
+ * - `off`: no code review.
+ *
+ * The presets schedule `medium` (`--light`/`--medium`), `full` (`--full`) or
+ * `off` (`--none`), so both cheap presets review every ticket.
  *
  * The end-of-run advisory pass (`finalReviewPass`) was removed — it was
  * redundant with per-ticket review and its findings had no teeth. */

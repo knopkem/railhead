@@ -158,12 +158,12 @@ describe("preset gate modes (issue #73)", () => {
     expect(presetGateModes("full")).toEqual({ code: "full", visual: "full", goal: "full", structural: "full" });
   });
 
-  it("--medium: no per-ticket code review (v2 issue 01), end-of-run visual, checkpoint-only goal/structural", () => {
-    expect(presetGateModes("medium")).toEqual({ code: "off", visual: "light", goal: "medium", structural: "medium" });
+  it("--medium: per-ticket code review (BLOCKER+MAJOR retry), end-of-run visual, checkpoint-only goal/structural", () => {
+    expect(presetGateModes("medium")).toEqual({ code: "medium", visual: "light", goal: "medium", structural: "medium" });
   });
 
-  it("--light: light cadence for all gates (no per-ticket code review — v2 issue 01; goal checkpoints corrective)", () => {
-    expect(presetGateModes("light")).toEqual({ code: "off", visual: "light", goal: "light", structural: "light", goalCheckpointAction: "corrective" });
+  it("--light: per-ticket code review (BLOCKER+MAJOR retry), light cadence for the other gates (goal checkpoints corrective)", () => {
+    expect(presetGateModes("light")).toEqual({ code: "medium", visual: "light", goal: "light", structural: "light", goalCheckpointAction: "corrective" });
   });
 
   it("--none turns every gate off", () => {
