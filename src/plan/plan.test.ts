@@ -402,6 +402,20 @@ $TICKETS
   it("tolerates markers in any case", () => {
     expect(parseVerifyBlock("$verify\ncargo build\n$tickets\n[]")).toEqual(["cargo build"]);
   });
+
+  it("strips a Markdown fence around the block — fence lines are not commands", () => {
+    const text = "$VERIFY\n```\nnpm run typecheck\nnpm run build\nnpm test\n```\n$SMOKE\nNONE\n$TICKETS\n[]";
+    expect(parseVerifyBlock(text)).toEqual(["npm run typecheck", "npm run build", "npm test"]);
+  });
+
+  it("strips a language-tagged fence and unwraps single-backtick commands", () => {
+    const text = "$VERIFY\n```bash\nnpm test\n`npm run build`\n```\n$TICKETS\n[]";
+    expect(parseVerifyBlock(text)).toEqual(["npm test", "npm run build"]);
+  });
+
+  it("strips a fence and its tokens when they share a line with the command", () => {
+    expect(parseVerifyBlock("$VERIFY\n``` npm run build ```\n$TICKETS\n[]")).toEqual(["npm run build"]);
+  });
 });
 
 describe("parseSmokeBlock", () => {
@@ -433,6 +447,15 @@ $TICKETS
     expect(smoke).toEqual(["npm run preview -- --port 4173 --strictPort"]);
     expect(smoke.join("\n")).not.toContain("the new plan");
     expect(smoke.join("\n")).not.toContain("One runtime dep");
+  });
+
+  it("unwraps a single-backtick-wrapped launch command", () => {
+    expect(parseSmokeBlock("$SMOKE\n`npx vite --port 5173`\n$TICKETS\n[]")).toEqual(["npx vite --port 5173"]);
+  });
+
+  it("strips a fence around the smoke block", () => {
+    const text = "$SMOKE\n```\nnpm run dev\n```\n$DESIGN\nA design.\n$END\n$TICKETS\n[]";
+    expect(parseSmokeBlock(text)).toEqual(["npm run dev"]);
   });
 });
 

@@ -527,6 +527,30 @@ function earliestSiblingMarker(text: string, markers: string[]): number {
   return earliest;
 }
 
+/** Clean a planner metadata block into shell-command lines. Trims and drops
+ * blank lines; drops a bare `$END` (model noise between blocks — it expands to
+ * empty in a shell and exits 0, so it would be silent); drops Markdown fence
+ * delimiters and unwraps backtick-wrapped commands. The planner is told to
+ * emit bare commands, but a fenced `$VERIFY` block is a common local-model
+ * shape — a literal ``` line used to land in railhead.json and die under
+ * `sh -c` with "unexpected EOF while looking for matching backtick", burning a
+ * whole run's retry budget on a gate that could never pass. */
+function commandLines(block: string): string[] {
+  return block
+    .split(/\n/)
+    .map((raw) => {
+      let line = raw.trim();
+      if (!line || /^\$end$/i.test(line)) return null;
+      const fenced = line.match(/^(?:`{3,}|~{3,})([\s\S]*?)(?:`{3,}|~{3,})$/);
+      if (fenced) line = fenced[1].trim();
+      if (/^(?:`{3,}|~{3,})[\w.+#-]*$/.test(line)) return null;
+      line = line.replace(/^(?:`{3,}|~{3,})\s+/, "").replace(/\s+(?:`{3,}|~{3,})$/, "").trim();
+      if (/^`[^`]+`$/.test(line)) line = line.slice(1, -1).trim();
+      return line || null;
+    })
+    .filter((l): l is string => l !== null);
+}
+
 /** Extract the $VERIFY ... $SMOKE block from planner output as a list of
  * shell commands. Returns [] when absent, empty, or NONE. The verify block is
  * plan-level metadata (one command set for the whole project), distinct from
@@ -541,13 +565,7 @@ export function parseVerifyBlock(text: string): string[] {
   const end = earliestSiblingMarker(text.slice(afterStart), ["$interface", "$smoke", "$tickets"]);
   const block = text.slice(afterStart, afterStart + end);
   if (!block || /^none$/i.test(block.trim())) return [];
-  return block
-    .split(/\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0)
-    // A bare `$END` is model noise between blocks, never a command ("$END"
-    // expands to empty in a shell and exits 0, so it would be silent).
-    .filter((l) => !/^\$end$/i.test(l));
+  return commandLines(block);
 }
 
 /** Extract the $SMOKE ... (next sibling) block from planner output as a list
@@ -569,13 +587,7 @@ export function parseSmokeBlock(text: string): string[] {
   const end = earliestSiblingMarker(text.slice(afterStart), ["$design", "$architecture", "$tickets"]);
   const block = text.slice(afterStart, afterStart + end);
   if (!block || /^none$/i.test(block.trim())) return [];
-  return block
-    .split(/\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0)
-    // A bare `$END` is model noise between blocks, never a command ("$END"
-    // expands to empty in a shell and exits 0, so it would be silent).
-    .filter((l) => !/^\$end$/i.test(l));
+  return commandLines(block);
 }
 
 /** Extract the $INTERFACE ... (next sibling) block from planner output (issue
