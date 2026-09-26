@@ -32,7 +32,7 @@ import { nextRunStatus, reconcileCommittedButUnsaved } from "../core/recovery.ts
 import { review, reviewSummary, severityOf, stripCompileClaimsWhenGreen, changedPathsFromDiff, downgradeUnanchoredBlockers, runReviewAgent } from "../gates/reviewer.ts";
 import { kickoffPerTicketVisualReview, joinPendingVisualReview, visualReviewLoop } from "../gates/visual-loop.ts";
 import { addPendingCheckpoint } from "../core/pending-checkpoints.ts";
-import { runCommandFromVerify } from "../gates/visual.ts";
+import { runCommandHint } from "../gates/visual.ts";
 import { buildInteractionSmokePrompt, parseInteractionSmokeVerdict, type InteractionSmokeScope } from "../gates/interaction-smoke.ts";
 import { interactionSmokePassGap, parseToolCalls } from "../gates/evidence.ts";
 import { touchesVisualSurface } from "../context/surface.ts";
@@ -1292,7 +1292,7 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
       if (interactModel !== null && iface !== "none") {
         const isPhase = `${ticket.number}-${String(attempt).padStart(2, "0")}-interact`;
         const scopeTag = scopeLabel(state.tickets, ticket);
-        const runHint = runCommandFromVerify(state.config.verify, allParsed);
+        const runHint = runCommandHint({ verify: state.config.verify, smoke: state.config.smoke });
         const hints = state.config.visual_review?.interaction_hints ?? state.config.goal_review?.interaction_hints ?? null;
         const scope = interactionSmokeScopeFor(parsed, allParsed, state);
         const prompt = buildInteractionSmokePrompt({

@@ -1,7 +1,7 @@
 import {
   buildVisualReviewPrompt,
   parseVisualVerdict,
-  runCommandFromVerify,
+  runCommandHint,
   shouldRunVisualReview,
   DEGRADED_TARGET_RECOVERY_NOTE,
   type VisualVerdict,
@@ -263,7 +263,7 @@ export async function visualReviewLoop(
   const aggregatedCriteria = Array.from(
     new Set(allTickets.flatMap((t) => t.criteria)),
   );
-  const runHint = runCommandFromVerify(state.config.verify, allTickets);
+  const runHint = runCommandHint({ verify: state.config.verify, smoke: state.config.smoke });
   const priorFindings: string[] = [];
   // Issue #96: the recovery note for the round that follows a degraded-target
   // kill. Set once, then cleared once a round returns a real verdict — the
@@ -442,7 +442,7 @@ export function kickoffPerTicketVisualReview(
   );
   const mission = state.original_prompt ?? "(no mission declared)";
   const criteria = parsed.criteria;
-  const runHint = runCommandFromVerify(state.config.verify, [parsed]);
+  const runHint = runCommandHint({ verify: state.config.verify, smoke: state.config.smoke });
   // Issue #99 (ADR 0028): a per-ticket visual review of a surface ticket
   // carries the coherence charter as an in-scope conformance check. Absent
   // (no charter authored) reads clean to null → no block.

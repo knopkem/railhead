@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { joinPhaseMessages, type PhaseMessages } from "../context/preamble.ts";
 const promptText = (m: PhaseMessages): string => joinPhaseMessages(m);
 const visualPrompt = (o: Parameters<typeof buildVisualReviewPrompt>[0]): string => promptText(buildVisualReviewPrompt(o));
-import { parseVisualVerdict, buildVisualReviewPrompt, runCommandFromVerify, shouldRunVisualReview, touchesVisualSurface, DEGRADED_TARGET_RECOVERY_NOTE } from "./visual.ts";
+import { parseVisualVerdict, buildVisualReviewPrompt, runCommandHint, shouldRunVisualReview, touchesVisualSurface, DEGRADED_TARGET_RECOVERY_NOTE } from "./visual.ts";
 import type { Ticket } from "../core/ticket.ts";
 
 describe("parseVisualVerdict", () => {
@@ -431,26 +431,23 @@ describe("buildVisualReviewPrompt (per-ticket mode)", () => {
   });
 });
 
-describe("runCommandFromVerify", () => {
-  const t = (file: string): Ticket => ({
-    file,
-    number: "01",
-    slug: "x",
-    title: "x",
-    what: "w",
-    criteria: []});
-
-  it("returns the first verify command as the run hint", () => {
-    expect(runCommandFromVerify(["cargo build", "cargo test"], [t("01-x.md")])).toContain("cargo build");
+describe("runCommandHint", () => {
+  it("prefers the project's smoke launch command over the verify chain", () => {
+    // The SpriteForge goal seat was handed its verify chain as the "how to run
+    // the app" hint and audited code for its whole step budget instead of
+    // launching — the project's declared smoke command is the launch truth.
+    expect(runCommandHint({ verify: ["npm run typecheck && npm test"], smoke: ["npx vite --port 5173"] }))
+      .toBe("npx vite --port 5173");
   });
 
-  it("includes the run/launch advisory regardless of language", () => {
-    const hint = runCommandFromVerify(["npm test"], [t("01-x.md")]);
+  it("falls back to the first verify command, hedged with the run/launch advisory, when smoke is empty", () => {
+    const hint = runCommandHint({ verify: ["cargo build", "cargo test"], smoke: [] });
+    expect(hint).toContain("cargo build");
     expect(hint).toContain("run/launch command");
   });
 
-  it("falls back to a generic message when verify is empty", () => {
-    expect(runCommandFromVerify([], [t("01-x.md")])).toMatch(/no hint available/i);
+  it("falls back to a generic message when both are empty", () => {
+    expect(runCommandHint({ verify: [], smoke: [] })).toMatch(/no hint available/i);
   });
 });
 

@@ -223,12 +223,15 @@ export function shouldRunVisualReview(ticket: Ticket): boolean {
   return touchesVisualSurface(ticket);
 }
 
-/** The run command hint the visual reviewer gets. Derives from the
- * project's own smoke command (if configured) or the first verify
- * command, rather than guessing a language-specific launcher. The
- * hint is advisory — the reviewer still adapts based on what works. */
-export function runCommandFromVerify(verify: string[], _tickets: Ticket[]): string {
-  if (verify.length) return `${verify[0]} — or the project's run/launch command`;
+/** The launch hint the browser-driving seats (visual, goal, interaction smoke)
+ * get. The project's own smoke command is the declared launch path and wins;
+ * the first verify command is a hedged fallback, since it usually builds/tests
+ * rather than launches (the SpriteForge goal seat was handed the verify chain
+ * and audited code for its whole budget instead of running the app). Never
+ * guesses a language-specific launcher — a project with neither says so. */
+export function runCommandHint(opts: { verify: string[]; smoke: string[] }): string {
+  if (opts.smoke.length) return opts.smoke[0]!;
+  if (opts.verify.length) return `${opts.verify[0]} — or the project's run/launch command`;
   return "no hint available — find the run command from the project files";
 }
 

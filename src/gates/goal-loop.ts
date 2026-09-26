@@ -4,7 +4,7 @@ import { loadTickets, type Ticket } from "../core/ticket.ts";
 import { seatContextBudget, firesAtRunEnd, goalCheckpointIsAdvisory, goalFiresCheckpointsMidRun, DEFAULT_MAX_REPLANS } from "../config/config.ts";
 import { reviewSummary, runReviewAgent } from "./reviewer.ts";
 import { baseSessionId } from "../execute/base-session.ts";
-import { runCommandFromVerify } from "./visual.ts";
+import { runCommandHint } from "./visual.ts";
 import { detectGameCanvas, RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
 import { touchesVisualSurface } from "../context/surface.ts";
 import { pushLearnings, readLearnings } from "../context/learnings.ts";
@@ -206,7 +206,7 @@ export async function runGoalReview(
   console.log(`\n[${nowClock()}] [${scope}] goal review — ${seat}`);
 
   const mission = state.original_prompt ?? "(no mission declared)";
-  const runHint = runCommandFromVerify(state.config.verify, allTickets);
+  const runHint = runCommandHint({ verify: state.config.verify, smoke: state.config.smoke });
 
   const designDoc = await git.readProjectDoc(state.cwd, join(state.docs_dir, "design.md"));
   const architectureDoc = await git.readProjectDoc(state.cwd, join(state.docs_dir, "architecture.md"));
