@@ -62,23 +62,45 @@ export function markCommitted(state: RunState, file: string, commit: string): Ru
 /**
  * Demote an interrupted `in_progress` Ticket back to `ready` and reset its
  * per-ticket counters, so the next loop pass re-runs it from a clean slate.
+ *
+ * ADR 0003 (stop, don't skip): a `failed` Ticket is demoted the same way. The
+ * hard fail stopped the run for a human; the resume is the human's decision,
+ * and the un-landed ticket must be re-run before the frontier can advance past
+ * it — otherwise a resume silently skips the failed ticket and builds
+ * downstream tickets on a base that never landed (the SpriteForge-06 hazard:
+ * 07 would have run the tree without 06's components). The failed attempt's
+ * ladder state is cleared with the counters: a re-run starts at rung 1.
  */
 export function rebaseFrontier(state: RunState): RunState {
   return {
     ...state,
-    tickets: state.tickets.map((t) =>
-      t.status === "in_progress"
-        ? {
-            ...t,
-            status: "ready" as const,
-            attempts: 0,
-            verify_ok: null,
-            review_ok: null,
-            review_attempts: 0,
-            reviews: [],
-          }
-        : t,
-    ),
+    tickets: state.tickets.map((t) => {
+      if (t.status === "in_progress") {
+        return {
+          ...t,
+          status: "ready" as const,
+          attempts: 0,
+          verify_ok: null,
+          review_ok: null,
+          review_attempts: 0,
+          reviews: [],
+        };
+      }
+      if (t.status === "failed") {
+        return {
+          ...t,
+          status: "ready" as const,
+          attempts: 0,
+          verify_ok: null,
+          review_ok: null,
+          review_attempts: 0,
+          reviews: [],
+          ladder_rung: undefined,
+          last_failure_class: undefined,
+        };
+      }
+      return t;
+    }),
   };
 }
 

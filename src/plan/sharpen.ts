@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir, appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import { scanJsonObjects } from "../core/json.ts";
 
@@ -236,6 +236,19 @@ export function renderQuestionForTerminal(question: SharpenQuestion, indexInRoun
   return `❓ **Q${indexInRound + 1}** - **${question.title}**: ${question.body}`;
 }
 
+/**
+ * The explicit answer-prompt tokens that end the interview immediately: no
+ * answer is recorded for the pending question, every prior answer is kept. The
+ * CLI advertises `:done` in the prompt hint; the colon prefix keeps a real
+ * answer from ever colliding with the signal. Ctrl-D (readline close) is the
+ * other stop path, handled by the CLI's asker.
+ */
+const STOP_ANSWERS = new Set([":done", ":q", ":quit", ":stop"]);
+
+export function isStopAnswer(raw: string): boolean {
+  return STOP_ANSWERS.has(raw.trim().toLowerCase());
+}
+
 /** Format a round's questions joined by a rule — kept for callers that want
  * the whole round at once (e.g. a non-interactive log dump). Unlike the
  * interactive per-question render, this includes each recommendation: with no
@@ -429,6 +442,83 @@ export function renderPlanInterviewAnswers(exchanges: SharpenExchange[]): string
   if (exchanges.length === 0) return "";
   const lines = exchanges.map((e) => `- Q: ${e.question.title} — ${e.question.body}\n  A: ${e.answer}`);
   return `The user answered a planning interview about this plan. Treat each answer as a decision the revised plan must honor:\n${lines.join("\n")}`;
+}
+
+/** The append-only answer log's filename inside `.railhead/plan-latest/`. One
+ * fixed name (not per-session) so a crashed or stopped interview's answers are
+ * found where they always live; sessions are delimited by their `session_*`
+ * lines, so the file can accumulate across attempts without ambiguity. */
+export const INTERVIEW_LOG_FILE = "interview.jsonl";
+
+/** One line of the append-only interview log. `answer` lines are appended the
+ * moment an answer is collected, BEFORE the next model call can fail — that is
+ * the crash safety; `session_*` lines frame a session so a reader (or a future
+ * resume) can find the last complete exchange list. */
+export type InterviewLogEntry =
+  | { type: "session_start"; at: string; mode: SharpenMode; topic: string; maxRounds: number; target: number | null }
+  | { type: "answer"; at: string; round: number; title: string; body: string; recommended: string; answer: string }
+  | { type: "session_end"; at: string; reason: "done" | "stopped" | "max_rounds" | "incomplete" | "failed"; rounds: number; answers: number; error?: string };
+
+/** The interview log path, relative to the project root (for display). */
+export function interviewLogPath(): string {
+  return join(".railhead", "plan-latest", INTERVIEW_LOG_FILE);
+}
+
+/** Append entries to the interview log, creating `.railhead/plan-latest/` as
+ * needed. Append-only by design: a crash must never truncate the answers it is
+ * meant to preserve. */
+export async function appendInterviewLog(cwd: string, entries: InterviewLogEntry[]): Promise<void> {
+  if (entries.length === 0) return;
+  const dir = join(cwd, ".railhead", "plan-latest");
+  await mkdir(dir, { recursive: true });
+  await appendFile(join(dir, INTERVIEW_LOG_FILE), entries.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+}
+
+/**
+ * Read an interview log back into exchanges, for replaying a stopped or crashed
+ * interview against the same arc (`railhead product --answers`). Session
+ * framing lines are ignored; a corrupt line or an entry missing `title`/
+ * `answer` is an error (a silently shrunk replay would misrepresent the
+ * operator's decisions), while a log with no answers at all is refused with
+ * guidance rather than replayed as an empty revision.
+ */
+export async function readInterviewAnswers(file: string): Promise<SharpenExchange[]> {
+  let raw: string;
+  try {
+    raw = await readFile(file, "utf8");
+  } catch {
+    throw new Error(`cannot read interview answers at ${file}`);
+  }
+  const exchanges: SharpenExchange[] = [];
+  const lines = raw.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!.trim();
+    if (!line) continue;
+    let entry: unknown;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      throw new Error(`interview answers at ${file}: line ${i + 1} is not valid JSON`);
+    }
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as Record<string, unknown>;
+    if (e.type !== "answer") continue;
+    if (typeof e.title !== "string" || typeof e.answer !== "string") {
+      throw new Error(`interview answers at ${file}: line ${i + 1} is an answer entry missing title/answer`);
+    }
+    exchanges.push({
+      question: {
+        title: e.title,
+        body: typeof e.body === "string" ? e.body : "",
+        recommended: typeof e.recommended === "string" ? e.recommended : "",
+      },
+      answer: e.answer,
+    });
+  }
+  if (exchanges.length === 0) {
+    throw new Error(`interview answers at ${file} hold no {"type":"answer"} entries — pass a railhead interview log`);
+  }
+  return exchanges;
 }
 
 const CONTEXT_FILE = "CONTEXT.md";

@@ -50,7 +50,7 @@ vi.mock("./executor.ts", async (importOriginal) => {
 });
 
 import { executeOpendCode, startPersistentWorker, stopPersistentWorker } from "./executor.ts";
-import { assembleBranch, detectGroupCheckpoints, nextTicketNumber, processTicket, protectedPaths, resolveDocsRoot, runLoop, ticketBudgetStop } from "./run.ts";
+import { assembleBranch, detectGroupCheckpoints, nextTicketNumber, processTicket, protectedPaths, resolveDocsRoot, runLoop, startRun, ticketBudgetStop } from "./run.ts";
 import { goalCheckpointsToFire } from "../gates/goal-loop.ts";
 import { structuralCheckpointsToFire } from "../gates/structural-loop.ts";
 import { clearStop, requestStop } from "./stop.ts";
@@ -168,6 +168,62 @@ beforeEach(() => {
   // A soft-stop request that landed during one test must never leak into the
   // next — the run loop clears on entry, but direct processTicket tests don't.
   clearStop();
+});
+
+describe("startRun — feature baseline (ADR 0051)", () => {
+  it("skips the baseline when this plan seeded the verify suite (greenfield step 1)", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    await makeTicket(ticketsDir);
+    // "false" would refuse the run if the baseline were checked at all.
+    const { state } = await startRun({
+      cwd,
+      ticketsDir,
+      branch: "run/test",
+      pauseOnFailure: false,
+      config: baseConfig({ feature_mode: true, verify: ["false"] }),
+      verifySeeded: true,
+    });
+    expect(state.tickets).toHaveLength(1);
+  });
+
+  it("still refuses a red baseline when the verify suite predates this plan", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    await makeTicket(ticketsDir);
+    await expect(
+      startRun({
+        cwd,
+        ticketsDir,
+        branch: "run/test",
+        pauseOnFailure: false,
+        config: baseConfig({ feature_mode: true, verify: ["false"] }),
+        verifySeeded: false,
+      }),
+    ).rejects.toThrow(/baseline is already red/);
+  });
+
+  it("honors the plan origin's verify_seeded when a plain `railhead run` continues the plan", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const { ticket } = await makeTicket(ticketsDir);
+    await writePlanOrigin(join(ticketsDir, ".."), {
+      slug: "step-01-test",
+      prompt: "a feature prompt",
+      created_at: new Date().toISOString(),
+      ticket_files: [ticket.file],
+      base_sha: null,
+      verify_seeded: true,
+    });
+    const { state } = await startRun({
+      cwd,
+      ticketsDir,
+      branch: "run/test",
+      pauseOnFailure: false,
+      config: baseConfig({ feature_mode: true, verify: ["false"] }),
+    });
+    expect(state.tickets).toHaveLength(1);
+  });
 });
 
 describe("assembleBranch", () => {
@@ -490,7 +546,7 @@ describe("processTicket", () => {
     expect(ticketState.logs.some((l) => l.startsWith("soft-pass:"))).toBe(true);
   });
 
-  it("hard-fails at the attempt cap when a BLOCKER survives, and cleans the worktree", async () => {
+  it("hard-fails at the attempt cap when a BLOCKER survives — verify-green work is checkpointed, not wiped", async () => {
     const cwd = await freshRepo();
     const ticketsDir = ticketsDirOf(cwd);
     const ledgerDir = join(cwd, ".railhead", "run-test");
@@ -519,13 +575,82 @@ describe("processTicket", () => {
     expect(ticketState.status).toBe("failed");
     expect(ticketState.attempts).toBe(2);
     expect(ticketState.logs).toContain("FAILED: retries exhausted");
-    // The worktree must be left clean — no uncommitted implementer output
-    // lingering after a hard fail. (.gitignore itself legitimately stays
-    // untracked here — in a real run it only gets swept into git by the
-    // FIRST ticket's commit, which never happens in this scenario — so the
-    // precise invariant to check is that cleanWorktree actually removed the
-    // implementer's own leftover file, not a repo-wide "nothing untracked".)
+    // Verify was green (baseConfig's `["true"]`), so the tree is durable
+    // work: it lands as a checkpoint commit for the re-armed ticket to carry
+    // forward, and no uncommitted implementer output lingers either.
+    expect(existsSync(join(cwd, "src", "index.js"))).toBe(true);
+    expect(await git.workingDiff(cwd)).toBe("");
+    expect(ticketState.logs.some((l) => l.includes("preserved on hard fail"))).toBe(true);
+    expect(await git.commitSubjectsSince(cwd, null)).toContain("01 — Add greet (checkpoint — gate failed, verify green)");
+  });
+
+  it("review-budget hard fail on a green verify preserves the work (the SpriteForge-06 shape)", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    // medium mode feeds MAJORs to the retry machine; reviewRounds never
+    // resets (ADR 0025 / issue #70), so the 4th distinct MAJOR round fails
+    // with a GREEN verify — exactly the incident that wiped 06's work.
+    const config = baseConfig({ code_review: { mode: "medium" }, max_retries: 3 });
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+
+    let reviewRounds = 0;
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else if (kind === "review") {
+        reviewRounds++;
+        await emitText(ledgerDir, options.phaseFile, `$BLOCKING\n[MAJOR] distinct gap ${reviewRounds}\n$NITS\nNONE\n$OK\nmeh`);
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const outcome = await processTicket(state, ledgerDir, ticketState);
+
+    expect(reviewRounds).toBe(4);
+    expect(outcome).toBe("failed");
+    expect(ticketState.status).toBe("failed");
+    expect(existsSync(join(cwd, "src", "index.js"))).toBe(true);
+    expect(ticketState.logs.some((l) => l.includes("preserved on hard fail"))).toBe(true);
+    expect(await git.commitSubjectsSince(cwd, null)).toContain("01 — Add greet (checkpoint — gate failed, verify green)");
+  });
+
+  it("hard-fails with a RED verify and wipes the worktree (a red tree must not become a checkpoint base)", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({ verify: ["false"], max_retries: 5, max_review_retries: 5, max_attempts: 2 });
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+
+    mockExec.mockImplementation(async (_prompt, options) => {
+      if (kindOf(options) === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const outcome = await processTicket(state, ledgerDir, ticketState);
+
+    expect(outcome).toBe("failed");
+    expect(ticketState.status).toBe("failed");
+    // The verify gate never went green, so the work is not durable: the
+    // worktree is cleaned (archived by cleanWorktree) instead of checkpointed.
     expect(existsSync(join(cwd, "src", "index.js"))).toBe(false);
+    expect(ticketState.logs.some((l) => l.includes("work wiped (verify red"))).toBe(true);
+    expect(await git.commitSubjectsSince(cwd, null)).not.toContain("01 — Add greet (checkpoint — gate failed, verify green)");
   });
 
   it("per-ticket visual: PASS when visual_review.per_ticket is on and the reviewer returns $VISUAL_PASS", async () => {

@@ -20,6 +20,11 @@ export interface PlanOrigin {
    * and lets the goal reviewer judge the step, not just the derived prompt.
    * Legacy origin.json files read as undefined. */
   arc_step?: ArcStepIdentity;
+  /** True when this plan seeded the verify suite into a previously-empty
+   * railhead.json. The run start skips the feature red-baseline refusal for
+   * this plan — there was no suite to be green before it (greenfield step 1).
+   * Legacy origin.json files read as undefined (check the baseline as before). */
+  verify_seeded?: boolean;
 }
 
 const ORIGIN_FILE = "origin.json";
@@ -63,6 +68,7 @@ export async function readPlanOrigin(dir: string): Promise<PlanOrigin | null> {
     ticket_files: (obj.ticket_files as unknown[]).filter((f): f is string => typeof f === "string"),
     base_sha: typeof obj.base_sha === "string" && obj.base_sha ? obj.base_sha : null,
     ...(arcStep ? { arc_step: arcStep } : {}),
+    ...(typeof obj.verify_seeded === "boolean" ? { verify_seeded: obj.verify_seeded } : {}),
   };
 }
 

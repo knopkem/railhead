@@ -133,6 +133,15 @@ describe("parseProductArgs", () => {
     expect(parseProductArgs(["vision text", "--sharpen"]).instruction).toBe("vision text");
     expect(() => parseProductArgs(["x", "--sharpen", "--no-sharpen"])).toThrow(/mutually exclusive/);
   });
+
+  it("reads --answers and keeps its value out of the instruction", () => {
+    const a = parseProductArgs(["revise", "the", "arc", "--answers", ".railhead/plan-latest/interview.jsonl"]);
+    expect(a.answers).toBe(".railhead/plan-latest/interview.jsonl");
+    expect(a.instruction).toBe("revise the arc");
+    expect(parseProductArgs(["vision text"]).answers).toBeNull();
+    // An answers-only replay has no positional text.
+    expect(parseProductArgs(["--answers", "a.jsonl"]).instruction).toBe("");
+  });
 });
 
 describe("parseGateMode", () => {

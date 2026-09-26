@@ -452,6 +452,15 @@ $TICKETS
   it("strips a fence and its tokens when they share a line with the command", () => {
     expect(parseVerifyBlock("$VERIFY\n``` npm run build ```\n$TICKETS\n[]")).toEqual(["npm run build"]);
   });
+
+  it("ignores prose around a fenced block — the SpriteForge title line is not a verify command", () => {
+    const text = "$VERIFY\n```\nnpm run typecheck && npm run build && npm test\n```\n\nSpriteForge — browser-ui\n\n$SMOKE\n```\nnpx vite preview --port 5173 --open\n```\n$DESIGN\nx\n$END\n";
+    expect(parseVerifyBlock(text)).toEqual(["npm run typecheck && npm run build && npm test"]);
+  });
+
+  it("ignores prose BEFORE a fenced block too", () => {
+    expect(parseVerifyBlock("$VERIFY\nHere are the commands:\n```\nnpm test\n```\n$TICKETS\n[]")).toEqual(["npm test"]);
+  });
 });
 
 describe("parseSmokeBlock", () => {
@@ -492,6 +501,11 @@ $TICKETS
   it("strips a fence around the smoke block", () => {
     const text = "$SMOKE\n```\nnpm run dev\n```\n$DESIGN\nA design.\n$END\n$TICKETS\n[]";
     expect(parseSmokeBlock(text)).toEqual(["npm run dev"]);
+  });
+
+  it("ignores prose outside the fence — only fenced content is a launch command", () => {
+    const text = "$SMOKE\n```\nnpx vite preview --port 5173 --open\n```\nSpriteForge — browser-ui\n$DESIGN\nA design.\n$END\n$TICKETS\n[]";
+    expect(parseSmokeBlock(text)).toEqual(["npx vite preview --port 5173 --open"]);
   });
 });
 

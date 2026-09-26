@@ -15,6 +15,8 @@ import {
   writeGrillAdr,
   sharpenSystemPrompt,
   depthToMaxRounds,
+  isStopAnswer,
+  readInterviewAnswers,
   DEPTH_TARGET_QUESTIONS,
   GRILL_DEPTH_OPTIONS,
   EXHAUSTIVE_BACKSTOP,
@@ -255,6 +257,62 @@ describe("renderQuestionsForTerminal", () => {
   it("shows a placeholder when no recommendation was given", () => {
     const out = renderQuestionsForTerminal([{ title: "A", body: "a?", recommended: "" }]);
     expect(out).toContain("(no recommendation given)");
+  });
+});
+
+describe("isStopAnswer", () => {
+  it("recognizes the colon-prefixed stop tokens, case- and whitespace-tolerant", () => {
+    expect(isStopAnswer(":done")).toBe(true);
+    expect(isStopAnswer("  :DONE ")).toBe(true);
+    expect(isStopAnswer(":q")).toBe(true);
+    expect(isStopAnswer(":quit")).toBe(true);
+    expect(isStopAnswer(":stop")).toBe(true);
+  });
+
+  it("never mistakes a real answer for the stop signal", () => {
+    // Bare "done" is a plausible answer; only the colon-prefixed form stops.
+    expect(isStopAnswer("done")).toBe(false);
+    expect(isStopAnswer("stop")).toBe(false);
+    expect(isStopAnswer(":done, but only after X")).toBe(false);
+    expect(isStopAnswer("")).toBe(false);
+  });
+});
+
+describe("readInterviewAnswers", () => {
+  it("reads answer entries from a JSONL interview log, ignoring session framing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "interview-log-"));
+    const file = join(dir, "interview.jsonl");
+    await writeFile(
+      file,
+      [
+        JSON.stringify({ type: "session_start", at: "t", mode: "product", topic: "x", maxRounds: 100, target: 0 }),
+        JSON.stringify({ type: "answer", at: "t", round: 1, title: "MVP", body: "what is in it?", recommended: "shell", answer: "shell only" }),
+        "",
+        JSON.stringify({ type: "session_end", at: "t", reason: "failed", rounds: 1, answers: 1 }),
+      ].join("\n"),
+      "utf8",
+    );
+    const exchanges = await readInterviewAnswers(file);
+    expect(exchanges).toEqual([
+      { question: { title: "MVP", body: "what is in it?", recommended: "shell" }, answer: "shell only" },
+    ]);
+  });
+
+  it("throws on a missing file, a corrupt line, an answer missing fields, and a log with no answers", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "interview-log-"));
+    await expect(readInterviewAnswers(join(dir, "nope.jsonl"))).rejects.toThrow(/cannot read/);
+
+    const corrupt = join(dir, "corrupt.jsonl");
+    await writeFile(corrupt, "{not json\n", "utf8");
+    await expect(readInterviewAnswers(corrupt)).rejects.toThrow(/not valid JSON/);
+
+    const missing = join(dir, "missing.jsonl");
+    await writeFile(missing, JSON.stringify({ type: "answer", title: "Q" }) + "\n", "utf8");
+    await expect(readInterviewAnswers(missing)).rejects.toThrow(/missing title\/answer/);
+
+    const empty = join(dir, "empty.jsonl");
+    await writeFile(empty, JSON.stringify({ type: "session_start" }) + "\n", "utf8");
+    await expect(readInterviewAnswers(empty)).rejects.toThrow(/hold no .*answer.* entries/);
   });
 });
 

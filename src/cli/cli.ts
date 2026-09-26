@@ -52,13 +52,15 @@ import {
 } from "../core/recovery.ts";
 import type { TicketState, RunState } from "../core/state.ts";
 import { renderStatusTable, writeReport, elapsedLabel, nowClock, renderNextActionable, renderArcSummary } from "./overview.ts";
-import { runPlan, maybeGenerateAgentsMd, runSharpenSession, runProductSession, deriveFeaturePrompt } from "../plan/planner.ts";
+import { runPlan, maybeGenerateAgentsMd, runSharpenSession, runProductSession, reviseProductArc, deriveFeaturePrompt, type ProductSessionResult } from "../plan/planner.ts";
 import { readPlanOrigin } from "../plan/plan-identity.ts";
 import { readProductPlan, writeProductPlan, nextArcAction, setStepStatus, PRODUCT_DOC, type ProductStep } from "../core/product.ts";
 import {
   GRILL_DEPTH_OPTIONS,
   DEPTH_TARGET_QUESTIONS,
   depthToMaxRounds,
+  isStopAnswer,
+  readInterviewAnswers,
   renderPlanInterviewAnswers,
   type SharpenDepth,
   type SharpenDepthOption,
@@ -486,16 +488,40 @@ async function askPick(question: string, options: readonly SharpenDepthOption[],
  * recommended, with the ❓Qn header) has ALREADY been printed by the
  * `onQuestion` callback, so this only prompts for the answer — repeating
  * the question here would double-print it and misplace the cursor.
+ *
+ * Returns `null` when the user ends the interview early: the explicit `:done`
+ * token (advertised in the prompt hint) or Ctrl-D on an empty line. The
+ * session keeps every answer already given and still runs the revision.
  */
-async function askAnswer(recommendation: string): Promise<string> {
+async function askAnswer(recommendation: string): Promise<string | null> {
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   try {
-    const answer = (await rl.question(`\n➡️ answer [${recommendation}] `)).trim();
+    // Ctrl-D closes the interface instead of submitting a line; abort the
+    // pending question so it settles as a stop rather than hanging forever.
+    const eof = new AbortController();
+    rl.once("close", () => eof.abort());
+    let raw: string;
+    try {
+      raw = await rl.question(`\n➡️ answer [${recommendation}] (:done to end the interview) `, { signal: eof.signal });
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return null;
+      throw err;
+    }
+    const answer = raw.trim();
     console.log();
-    return answer || recommendation;
+    return isStopAnswer(answer) ? null : answer || recommendation;
   } finally {
     rl.close();
   }
+}
+
+/** One-line interview outcome: count, rounds, whether the human stopped early,
+ * and where the answers were persisted. Shared by the build/fix/product call
+ * sites so an interrupted interview always says what was kept and where. */
+function interviewSummary(count: number, rounds: number, stopped: boolean, answersPath: string | null): string {
+  const early = stopped ? " — ended early at your request" : "";
+  const saved = answersPath ? ` — saved to ${answersPath}` : "";
+  return `${count} question(s) answered across ${rounds} round(s)${early}${saved}`;
 }
 
 async function cmdInit(cwd: string, yes: boolean = false, free: boolean = false): Promise<void> {
@@ -926,16 +952,18 @@ async function cmdBuild(cwd: string, prefs: PlanArgs, internal: { arcStepNumber?
       const session = await runSharpenSession({ ...sessionOptions, topic: prompt, mode });
       if (session.transcript) {
         enrichedPrompt = `${prompt}\n\n${session.transcript}`;
-        console.log(`fix interview (${depth})${skipLabel}: ${session.exchanges.length} question(s) answered across ${session.rounds} round(s)`);
+        console.log(`fix interview (${depth})${skipLabel}: ${interviewSummary(session.exchanges.length, session.rounds, session.stopped, session.answersPath)}`);
+      } else if (session.stopped) {
+        console.log(`fix interview (${depth})${skipLabel}: ended early at your request before any answer — no interview context added`);
       }
     } else {
       interviewPlan = async (planText: string) => {
         const session = await runSharpenSession({ ...sessionOptions, topic: prompt, mode: "build", planText });
         if (session.exchanges.length === 0) {
-          console.log(`plan interview (${depth})${skipLabel}: no questions — the plan already decides what the interview would ask`);
+          console.log(`plan interview (${depth})${skipLabel}: ${session.stopped ? "ended early at your request before any answer" : "no questions — the plan already decides what the interview would ask"}`);
           return null;
         }
-        console.log(`plan interview (${depth})${skipLabel}: ${session.exchanges.length} question(s) answered across ${session.rounds} round(s)`);
+        console.log(`plan interview (${depth})${skipLabel}: ${interviewSummary(session.exchanges.length, session.rounds, session.stopped, session.answersPath)}`);
         return renderPlanInterviewAnswers(session.exchanges);
       };
     }
@@ -949,7 +977,7 @@ async function cmdBuild(cwd: string, prefs: PlanArgs, internal: { arcStepNumber?
   // ADR 0014 amendment: the plan phases honor the same request-ceiling guard
   // mode as the run phases (telemetry-only unless `context_guard: "kill"`).
   configureContextGuard(config.context_guard);
-  const { outDir, tickets: ordered, verify } = await runPlan({
+  const { outDir, tickets: ordered, verify, verifySeeded } = await runPlan({
     cwd,
     prompt: enrichedPrompt,
     model: models.plan,
@@ -1026,7 +1054,7 @@ async function cmdBuild(cwd: string, prefs: PlanArgs, internal: { arcStepNumber?
     const acceptedPlan = !auto && mode === "build";
     const startNow = auto || cont || acceptedPlan || await askYesNo("Start this run now?", true);
     if (startNow) {
-      return await cmdRun(cwd, [outDir, ...(verbose ? ["--verbose"] : [])], { fromPlan: true });
+      return await cmdRun(cwd, [outDir, ...(verbose ? ["--verbose"] : [])], { fromPlan: true, verifySeeded });
     } else {
       console.log("planned; nothing run. start later with: railhead run <tickets-dir>");
       return null;
@@ -1296,13 +1324,40 @@ async function cmdFeature(cwd: string, prefs: PlanArgs): Promise<void> {
  * -a/--auto).
  */
 async function cmdProduct(cwd: string, args: ProductArgs): Promise<void> {
-  if (!args.instruction) {
-    throw new Error(`product requires the vision or steering text, e.g. \`railhead product "a hiking log my family actually opens; first a rough mvp, then search, then shared albums"\``);
+  if (!args.instruction && !args.answers) {
+    throw new Error(`product requires the vision or steering text, e.g. \`railhead product "a hiking log my family actually opens; first a rough mvp, then search, then shared albums"\` — or replay a stopped interview's answers with \`railhead product --answers <file>\``);
   }
   const config = await loadConfig(cwd);
   const models = resolveModels(config, args.modelOverride ? ["--model", args.modelOverride] : []);
   const existing = await readProductPlan(cwd);
   console.log(existing ? "product session — steering the existing arc" : "product session — authoring the product arc");
+
+  // The recorded-answer replay: no condense, no interview — one revision call
+  // against the arc on disk, so a stopped/crashed interview finishes where it
+  // left off with the operator's own answers.
+  if (args.answers) {
+    if (!existing) {
+      throw new Error(`--answers revises an existing ${PRODUCT_DOC}, but none exists — author the arc first with \`railhead product "<vision>"\``);
+    }
+    const answersFile = isAbsolute(args.answers) ? args.answers : join(cwd, args.answers);
+    const exchanges = await readInterviewAnswers(answersFile);
+    console.log(`product session — replaying ${exchanges.length} recorded answer(s) from ${args.answers}`);
+    const replayed = await reviseProductArc({
+      cwd,
+      instruction: args.instruction || "The operator answered a planning interview about this arc; apply the recorded answers.",
+      findings: renderPlanInterviewAnswers(exchanges),
+      model: models.plan ?? null,
+      maxSteps: config.max_phase_steps,
+      stallTimeoutSec: config.stall_timeout_sec,
+      maxStepModelSec: config.max_step_model_sec,
+      maxContextTokens: config.max_context_tokens ?? undefined,
+      verbose: args.verbose,
+      persistentWorker: config.persistent_worker === true,
+      infraBackoffSec: config.infra_backoff_sec,
+    });
+    await adoptProductArc(cwd, args, replayed);
+    return;
+  }
 
   // ADR 0051: the post-condense arc interview (same discipline and depth picker
   // as the build pipeline's planning interview). It sharpens the roadmap — the
@@ -1345,11 +1400,12 @@ async function cmdProduct(cwd: string, args: ProductArgs): Promise<void> {
           : (q: SharpenQuestion) => askAnswer(q.recommended || "(no recommendation given)"),
         onQuestion: isSkip ? undefined : (_q: SharpenQuestion, rendered: string) => console.log("\n" + rendered),
       });
+      const skipLabel = isSkip ? " (auto-answered)" : "";
       if (session.exchanges.length === 0) {
-        console.log(`arc interview (${depth}): no questions — the arc already decides what the interview would ask`);
+        console.log(`arc interview (${depth})${skipLabel}: ${session.stopped ? "ended early at your request before any answer" : "no questions — the arc already decides what the interview would ask"}`);
         return null;
       }
-      console.log(`arc interview (${depth})${isSkip ? " (auto-answered)" : ""}: ${session.exchanges.length} question(s) answered across ${session.rounds} round(s)`);
+      console.log(`arc interview (${depth})${skipLabel}: ${interviewSummary(session.exchanges.length, session.rounds, session.stopped, session.answersPath)}`);
       return renderPlanInterviewAnswers(session.exchanges);
     };
   }
@@ -1362,6 +1418,12 @@ async function cmdProduct(cwd: string, args: ProductArgs): Promise<void> {
     verbose: args.verbose,
     refine,
   });
+  await adoptProductArc(cwd, args, session);
+}
+
+/** Show a product session's arc, take the adoption decision, and write it — the
+ * shared tail of the authoring/steering session and the --answers replay. */
+async function adoptProductArc(cwd: string, args: ProductArgs, session: ProductSessionResult): Promise<void> {
   console.log();
   // Adoption must be of the arc's PROSE, not just its step titles: the operator
   // is about to have every future feature run steer against this file.
@@ -1381,7 +1443,7 @@ async function cmdProduct(cwd: string, args: ProductArgs): Promise<void> {
   console.log(`next: \`railhead feature\` builds the first todo step unattended. Commit ${PRODUCT_DOC} whenever the arc changes.`);
 }
 
-async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } = {}): Promise<RunOutcome | null> {
+async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean; verifySeeded?: boolean } = {}): Promise<RunOutcome | null> {
   const args = parseRunArgs(rest);
   if (!args.ticketsDir) throw new Error("run requires a tickets directory");
   const ticketsDir = isAbsolute(args.ticketsDir) ? args.ticketsDir : join(cwd, args.ticketsDir);
@@ -1483,6 +1545,7 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } 
     verbose,
     quiet,
     originalPrompt: await git.readProjectDoc(cwd, "prompt") ?? undefined,
+    verifySeeded: opts.verifySeeded,
   });
 
   console.log(`branch ${branch}`);

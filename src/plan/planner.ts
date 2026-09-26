@@ -20,7 +20,9 @@ import { CHARTER_DOC } from "../context/coherence.ts";
 import { summarizePermissionRejections } from "../core/permissions.ts";
 import {
   appendContextTerms,
+  appendInterviewLog,
   buildSharpenRoundPrompt,
+  interviewLogPath,
   sharpenSystemPrompt,
   parseSharpenRound,
   renderQuestionForTerminal,
@@ -42,6 +44,11 @@ function plannerRestart(cwd: string, persistentWorker: boolean): () => Promise<v
   tickets: Ticket[];
   /** Verify commands parsed from the plan's $VERIFY block (empty if none emitted). */
   verify: string[];
+  /** True when this plan established the project's verify suite — railhead.json
+   * had no verify list before and the plan's $VERIFY seeded it. A feature run
+   * then skips the red-baseline refusal: there was no suite to be green before
+   * this plan (the greenfield step-1 case). */
+  verifySeeded: boolean;
   /** Smoke (binary-launch) commands parsed from the plan's $SMOKE block
    * (empty when the project has no runnable binary or the planner emitted NONE). */
   smoke: string[];
@@ -264,17 +271,72 @@ export async function runProductSession(options: ProductSessionOptions): Promise
     // the operator actually changed something.
     const answers = await options.refine(renderProductPlan(first.plan));
     if (answers?.trim()) {
-      const revised = await plannerStage(
-        stageOpts,
-        "product-revise",
-        `${buildProductRevisionPrompt({ instruction, priorArcMarkdown: renderProductPlan(first.plan), findings: [answers.trim()] })}\n\nEmit the revised arc now.`,
-        "product",
-      );
-      const parsed = parseProductReply(revised);
-      return { plan: parsed.plan, warnings: parsed.warnings, markdown: renderProductPlan(parsed.plan) };
+      return reviseProductStage(stageOpts, instruction, renderProductPlan(first.plan), answers.trim());
     }
   }
   return { plan: first.plan, warnings: first.warnings, markdown: renderProductPlan(first.plan) };
+}
+
+/** One revision call: the operator's interview answers change the arc; the
+ * session re-emits the complete arc. Shared by the live session (ADR 0051) and
+ * the recorded-answer replay (`reviseProductArc`). */
+async function reviseProductStage(
+  stageOpts: PlannerStageOptions,
+  instruction: string,
+  priorArcMarkdown: string,
+  findings: string,
+): Promise<ProductSessionResult> {
+  const revised = await plannerStage(
+    stageOpts,
+    "product-revise",
+    `${buildProductRevisionPrompt({ instruction, priorArcMarkdown, findings: [findings] })}\n\nEmit the revised arc now.`,
+    "product",
+  );
+  const parsed = parseProductReply(revised);
+  return { plan: parsed.plan, warnings: parsed.warnings, markdown: renderProductPlan(parsed.plan) };
+}
+
+export interface ProductRevisionOptions {
+  cwd: string;
+  /** The operator's original/steering input the revision frames the answers against. */
+  instruction: string;
+  /** Rendered findings (see `renderPlanInterviewAnswers` in sharpen.ts). */
+  findings: string;
+  model: string | null;
+  maxSteps?: number | null;
+  stallTimeoutSec?: number | null;
+  maxStepModelSec?: number | null;
+  maxContextTokens?: number | null;
+  verbose?: boolean;
+  infraBackoffSec?: number[];
+  persistentWorker?: boolean;
+}
+
+/**
+ * Replay a recorded interview's answers against the stored arc — the resume
+ * path after a stopped or crashed product session, with no interview and no
+ * condense call (the arc under review is already on disk). One revision call;
+ * never writes (adoption stays the CLI's).
+ */
+export async function reviseProductArc(options: ProductRevisionOptions): Promise<ProductSessionResult> {
+  const { cwd } = options;
+  const planLedger = join(cwd, ".railhead", "plan-latest");
+  await initLedger(planLedger);
+  const current = await readProductPlan(cwd);
+  if (!current) throw new Error(`no product arc at ${PRODUCT_DOC} to revise — author one with \`railhead product\` first`);
+  const stageOpts: PlannerStageOptions = {
+    cwd,
+    planLedger,
+    model: options.model,
+    maxSteps: options.maxSteps,
+    stallTimeoutSec: options.stallTimeoutSec,
+    maxStepModelSec: options.maxStepModelSec,
+    maxContextTokens: options.maxContextTokens,
+    verbose: options.verbose,
+    infraBackoffSec: options.infraBackoffSec,
+    persistentWorker: options.persistentWorker,
+  };
+  return reviseProductStage(stageOpts, options.instruction, renderProductPlan(current), options.findings);
 }
 
 export interface FeatureStepOptions {
@@ -759,6 +821,14 @@ function hardenerTicket(): PlanTicket {
   const ordered = numberTickets(tickets);
   const planDir = join(outDir, "..");
   await writeTickets(outDir, ordered);
+  // Seed the verify commands BEFORE the origin is written: the run start reads
+  // the origin to learn whether THIS plan established the suite (railhead.json
+  // was empty), in which case a feature run skips the red-baseline refusal —
+  // there was nothing to be green before this plan.
+  let verifySeeded = false;
+  if (verify.length > 0) {
+    verifySeeded = await seedVerifyIfEmpty(cwd, verify);
+  }
   await writePlanOrigin(planDir, {
     slug,
     prompt,
@@ -766,6 +836,7 @@ function hardenerTicket(): PlanTicket {
     ticket_files: ordered.map((t) => t.file),
     base_sha: await headCommit(cwd).catch(() => null),
     ...(arcStep ? { arc_step: arcStep } : {}),
+    ...(verifySeeded ? { verify_seeded: true } : {}),
   });
   // The human-facing plan overview. Written for build plans only (fix mode is
   // one ticket — there is nothing to iterate on); the distilled
@@ -795,17 +866,11 @@ function hardenerTicket(): PlanTicket {
     );
   }
 
-  // Seed the verify commands into railhead.json when the user left it empty, so
-  // the very first ticket is gated by a real build/test command rather than
-  // running with no gate (the default DEFAULT_CONFIG.verify is []). Never
-  // clobber a user-configured verify list — even a single explicit command
-  // means the user chose their own gate.
-  if (verify.length > 0) {
-    await seedVerifyIfEmpty(cwd, verify);
-  }
-  // Same shape, same rule for smoke: seed a planner-emitted launch command
-  // only when the user hasn't already configured one. A user who sets smoke:[]
-  // (or NONE) is signalling "no smoke for this project" — don't override that.
+  // Seed a planner-emitted launch command into railhead.json only when the
+  // user hasn't already configured one (same seed-if-empty rule as verify,
+  // which was seeded above, before the origin was written). A user who sets
+  // smoke:[] (or NONE) is signalling "no smoke for this project" — don't
+  // override that.
   if (smoke.length > 0) {
     await seedSmokeIfEmpty(cwd, smoke);
   }
@@ -819,7 +884,7 @@ function hardenerTicket(): PlanTicket {
       ? `seeded interaction interface into railhead.json: ${projectInterface} (issue #97)`
       : `declared interaction interface: ${projectInterface} (issue #97)`);
   }
-  return { outDir, tickets: ordered, verify, smoke, designDoc: designNarrative, architectureDoc, planPath };
+  return { outDir, tickets: ordered, verify, verifySeeded, smoke, designDoc: designNarrative, architectureDoc, planPath };
 }
 
 /** Deterministic ticket validation, replacing the model repair gate: every
@@ -970,9 +1035,16 @@ DONE AGENTS.md
 export interface SharpenSessionResult {
   /** Extra context to fold into the ticket-generation prompt; "" when nothing was asked. */
   transcript: string;
-  /** Rounds actually run (<= maxRounds; can end earlier on the model's own $DONE). */
+  /** Rounds actually run (<= maxRounds; can end earlier on the model's own $DONE or a stop). */
   rounds: number;
   exchanges: SharpenExchange[];
+  /** True when the human ended the interview early (the asker returned null / a stop token).
+   * Answers collected up to that point are kept and still feed the revision. */
+  stopped: boolean;
+  /** The append-only interview answer log, relative to cwd — written after every
+   * answer so a provider failure or Ctrl-C cannot lose the Q&A. Null when the
+   * interview never ran (`maxRounds <= 0`). */
+  answersPath: string | null;
 }
 
 /**
@@ -1020,7 +1092,15 @@ export async function runSharpenSession(options: {
   persistentWorker?: boolean;
   /** Echo the exact prompt sent to each model call to the console. */
   verbose?: boolean;
-  ask: (question: SharpenQuestion) => Promise<string>;
+  /**
+   * Collect the human's answer to one question. Return `null` to end the
+   * interview NOW: the pending question is dropped, every earlier answer is
+   * kept, and the session returns `stopped: true` so the caller still applies
+   * the answers collected so far (a zero-answer stop skips like a zero-question
+   * interview). The CLI maps its `:done` token / Ctrl-D to null; auto-answering
+   * callers always return a string.
+   */
+  ask: (question: SharpenQuestion) => Promise<string | null>;
   /**
    * Called once PER question, immediately before that question's answer is
    * collected via `ask` — real callers print the rendered string so the user
@@ -1052,7 +1132,7 @@ async function runSharpenSessionInner(options: {
   mode?: SharpenMode;
   planText?: string | null;
   verbose?: boolean;
-  ask: (question: SharpenQuestion) => Promise<string>;
+  ask: (question: SharpenQuestion) => Promise<string | null>;
   onQuestion?: (question: SharpenQuestion, rendered: string, indexInRound: number) => void;
   infraBackoffSec?: number[];
   persistentWorker?: boolean;
@@ -1067,63 +1147,116 @@ async function runSharpenSessionInner(options: {
   await initLedger(sharpenLedger);
 
   const exchanges: SharpenExchange[] = [];
+  const answersPath = maxRounds > 0 ? interviewLogPath() : null;
   let round = 0;
-  while (round < maxRounds) {
-    round++;
-    const phaseFile = `sharpen-${String(round).padStart(2, "0")}`;
-    // Each session owns this phase file; without truncating, a prior plan
-    // invocation's round output would leak into this one, mirroring the
-    // exact reason runPlan resets its own "plan" phase file.
-    await resetPhase(sharpenLedger, phaseFile);
-    const prompt = buildSharpenRoundPrompt(system, exchanges);
-    const sharpenBackoff = infraBackoffSec ?? DEFAULT_INFRA_BACKOFF_SEC;
-    const sharpenInfra = await withFailureLadderOnThrow(
-      async () => {
-        const r = await executeOpendCode(prompt, {
-          cwd,
-          ledgerDir: sharpenLedger,
-          phaseFile,
-          model,
-          heartbeat: true,
-          live: verbose === true,
-          verbose,
-          livePrefix: "sharpen",
-          maxSteps,
-          stallTimeoutSec,
-          maxStepModelSec,
-          maxContextTokens,
-        });
-        if (r.status === "transient") throw new Error(describeExecFailure(r));
-        return r;
-      },
-      {
-        backoff: sharpenBackoff,
-        budget: maxContextTokens ?? DEFAULT_CONTEXT_TOKENS,
-        restartWorker: plannerRestart(cwd, persistentWorker === true),
-        onRung: (rung) => {
-          console.log(`[sharpen] round ${round}: ${rung.diagnosis}`);
+  let stopped = false;
+  let endReason: "done" | "stopped" | "max_rounds" | "incomplete" = "max_rounds";
+  if (answersPath) {
+    await appendInterviewLog(cwd, [{
+      type: "session_start",
+      at: new Date().toISOString(),
+      mode: mode ?? "build",
+      topic,
+      maxRounds,
+      target: depthTarget ?? null,
+    }]);
+  }
+  try {
+    while (round < maxRounds) {
+      round++;
+      console.log(`[sharpen] round ${round} of up to ${maxRounds} — ${exchanges.length} question(s) answered so far`);
+      const phaseFile = `sharpen-${String(round).padStart(2, "0")}`;
+      // Each session owns this phase file; without truncating, a prior plan
+      // invocation's round output would leak into this one, mirroring the
+      // exact reason runPlan resets its own "plan" phase file.
+      await resetPhase(sharpenLedger, phaseFile);
+      const prompt = buildSharpenRoundPrompt(system, exchanges);
+      const sharpenBackoff = infraBackoffSec ?? DEFAULT_INFRA_BACKOFF_SEC;
+      const sharpenInfra = await withFailureLadderOnThrow(
+        async () => {
+          const r = await executeOpendCode(prompt, {
+            cwd,
+            ledgerDir: sharpenLedger,
+            phaseFile,
+            model,
+            heartbeat: true,
+            live: verbose === true,
+            verbose,
+            livePrefix: "sharpen",
+            maxSteps,
+            stallTimeoutSec,
+            maxStepModelSec,
+            maxContextTokens,
+          });
+          if (r.status === "transient") throw new Error(describeExecFailure(r));
+          return r;
         },
-      },
-    );
-    if (!sharpenInfra.ok) throw new Error(`sharpen round ${round}: ${sharpenInfra.rung.diagnosis}`);
-    const result = sharpenInfra.value;
-    if (result.status !== "ok") break; // can't continue the interview; keep whatever was already resolved
+        {
+          backoff: sharpenBackoff,
+          budget: maxContextTokens ?? DEFAULT_CONTEXT_TOKENS,
+          restartWorker: plannerRestart(cwd, persistentWorker === true),
+          onRung: (rung) => {
+            console.log(`[sharpen] round ${round}: ${rung.diagnosis}`);
+          },
+        },
+      );
+      if (!sharpenInfra.ok) throw new Error(`sharpen round ${round}: ${sharpenInfra.rung.diagnosis}`);
+      const result = sharpenInfra.value;
+      if (result.status !== "ok") {
+        endReason = "incomplete"; // can't continue the interview; keep whatever was already resolved
+        break;
+      }
 
-    const text = await extractAssistantText(sharpenLedger, phaseFile);
-    const parsed = parseSharpenRound(text);
+      const text = await extractAssistantText(sharpenLedger, phaseFile);
+      const parsed = parseSharpenRound(text);
 
-    if (parsed.terms.length) await appendContextTerms(cwd, parsed.terms);
-    for (const adr of parsed.adrs) await writeGrillAdr(cwd, adr);
+      if (parsed.terms.length) await appendContextTerms(cwd, parsed.terms);
+      for (const adr of parsed.adrs) await writeGrillAdr(cwd, adr);
 
-    if (parsed.done) break;
+      if (parsed.done) {
+        endReason = "done";
+        break;
+      }
 
-    for (let i = 0; i < parsed.questions.length; i++) {
-      const q = parsed.questions[i];
-      onQuestion?.(q, renderQuestionForTerminal(q, i), i);
-      const answer = await ask(q);
-      exchanges.push({ question: q, answer });
+      for (let i = 0; i < parsed.questions.length; i++) {
+        const q = parsed.questions[i];
+        onQuestion?.(q, renderQuestionForTerminal(q, i), i);
+        const answer = await ask(q);
+        if (answer === null) {
+          stopped = true;
+          endReason = "stopped";
+          break;
+        }
+        exchanges.push({ question: q, answer });
+        // Persist BEFORE the next model call: a provider failure mid-interview
+        // must never cost an answer that was already given.
+        if (answersPath) {
+          await appendInterviewLog(cwd, [{ type: "answer", at: new Date().toISOString(), round, title: q.title, body: q.body, recommended: q.recommended, answer }]);
+        }
+      }
+      if (stopped) break;
     }
+  } catch (err) {
+    if (answersPath) {
+      // Best-effort: the phase failure is the error the caller must see, so a
+      // failed log write here must not replace it.
+      await appendInterviewLog(cwd, [{
+        type: "session_end",
+        at: new Date().toISOString(),
+        reason: "failed",
+        rounds: round,
+        answers: exchanges.length,
+        error: err instanceof Error ? err.message : String(err),
+      }]).catch(() => {});
+    }
+    if (answersPath && err instanceof Error) {
+      throw new Error(`${err.message} — interview answers so far are saved at ${answersPath}`, { cause: err });
+    }
+    throw err;
+  }
+  if (answersPath) {
+    await appendInterviewLog(cwd, [{ type: "session_end", at: new Date().toISOString(), reason: endReason, rounds: round, answers: exchanges.length }]);
   }
 
-  return { transcript: renderTranscriptForPlanner(exchanges), rounds: round, exchanges };
+  return { transcript: renderTranscriptForPlanner(exchanges), rounds: round, exchanges, stopped, answersPath };
 }

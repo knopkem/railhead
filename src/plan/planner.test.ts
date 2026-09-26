@@ -16,7 +16,7 @@ vi.mock("../execute/executor.ts", async (importOriginal) => {
 });
 
 import { executeOpendCode } from "../execute/executor.ts";
-import { runPlan, runSharpenSession, maybeGenerateAgentsMd, runProductSession, deriveFeaturePrompt } from "./planner.ts";
+import { runPlan, runSharpenSession, maybeGenerateAgentsMd, runProductSession, reviseProductArc, deriveFeaturePrompt } from "./planner.ts";
 import { writeProductPlan, renderProductPlan, type ProductPlan } from "../core/product.ts";
 import { saveContracts } from "../core/contracts.ts";
 import { writeProjectDoc, readProjectDoc } from "../core/git.ts";
@@ -226,6 +226,9 @@ describe("runSharpenSession", () => {
     const result = await runSharpenSession({ cwd, topic: "t", model: null, maxRounds: 5, ask: async () => "answer" });
     expect(result.rounds).toBe(2);
     expect(result.exchanges).toHaveLength(1);
+    const raw = await readFile(join(cwd, ".railhead", "plan-latest", "interview.jsonl"), "utf8");
+    const entries = raw.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    expect(entries.at(-1)).toMatchObject({ type: "session_end", reason: "incomplete", answers: 1 });
   });
 
   it("renders each question to onQuestion before its answer is collected, one at a time (so Q2 is rendered only after Q1 is answered)", async () => {
@@ -281,6 +284,93 @@ describe("runSharpenSession", () => {
     expect(result.transcript).toContain("Backend: none");
   });
 
+  it("ends the interview when the asker signals stop, keeping the answers already given", async () => {
+    const cwd = await freshCwd();
+    let call = 0;
+    mockExec.mockImplementation(async (_prompt, options) => {
+      call++;
+      await emitStaged(options, '$TERMS\nNONE\n$ADRS\nNONE\n$QUESTIONS\n{"title":"Q1","body":"first?","recommended":"a"}\n{"title":"Q2","body":"second?","recommended":"b"}\n',
+      );
+      return okResult();
+    });
+    const result = await runSharpenSession({
+      cwd,
+      topic: "t",
+      model: null,
+      maxRounds: 5,
+      ask: (q) => Promise.resolve(q.title === "Q1" ? "kept answer" : null),
+    });
+    expect(call).toBe(1);
+    expect(result.stopped).toBe(true);
+    expect(result.rounds).toBe(1);
+    expect(result.exchanges).toHaveLength(1);
+    expect(result.exchanges[0].answer).toBe("kept answer");
+    expect(result.transcript).toContain("kept answer");
+    expect(result.transcript).not.toContain("second?");
+  });
+
+  it("a stop before the first answer ends like a zero-question interview", async () => {
+    const cwd = await freshCwd();
+    mockExec.mockImplementation(async (_prompt, options) => {
+      await emitStaged(options, '$TERMS\nNONE\n$ADRS\nNONE\n$QUESTIONS\n{"title":"Q1","body":"only?","recommended":"a"}\n',
+      );
+      return okResult();
+    });
+    const result = await runSharpenSession({ cwd, topic: "t", model: null, maxRounds: 5, ask: async () => null });
+    expect(result.stopped).toBe(true);
+    expect(result.exchanges).toEqual([]);
+    expect(result.transcript).toBe("");
+  });
+
+  it("persists every answer to the interview log as it is collected, framed by session start/end", async () => {
+    const cwd = await freshCwd();
+    let call = 0;
+    mockExec.mockImplementation(async (_prompt, options) => {
+      call++;
+      if (call === 1) {
+        await emitStaged(options, '$TERMS\nNONE\n$ADRS\nNONE\n$QUESTIONS\n{"title":"Storage","body":"Where?","recommended":"SQLite"}\n',
+        );
+      } else {
+        await emitStaged(options, "$TERMS\nNONE\n$ADRS\nNONE\n$QUESTIONS\nNONE\n$DONE\n");
+      }
+      return okResult();
+    });
+    const result = await runSharpenSession({
+      cwd,
+      topic: "t",
+      model: null,
+      maxRounds: 5,
+      mode: "product",
+      ask: async () => "sqlite",
+    });
+    expect(result.answersPath).toBe(join(".railhead", "plan-latest", "interview.jsonl"));
+    const raw = await readFile(join(cwd, result.answersPath!), "utf8");
+    const entries = raw.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    expect(entries.map((e) => e.type)).toEqual(["session_start", "answer", "session_end"]);
+    expect(entries[0]).toMatchObject({ mode: "product", maxRounds: 5 });
+    expect(entries[1]).toMatchObject({ round: 1, title: "Storage", recommended: "SQLite", answer: "sqlite" });
+    expect(entries[2]).toMatchObject({ reason: "done", rounds: 2, answers: 1 });
+  });
+
+  it("names the answer log in the throw when the provider dies mid-interview, so no answer is lost", async () => {
+    const cwd = await freshCwd();
+    mockExec.mockImplementation(async () => transientResult());
+    const error = await runSharpenSession({
+      cwd,
+      topic: "t",
+      model: null,
+      maxRounds: 5,
+      infraBackoffSec: [0, 0],
+      ask: async () => "x",
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("interview answers so far are saved at");
+    expect((error as Error).message).toContain(join(".railhead", "plan-latest", "interview.jsonl"));
+    const raw = await readFile(join(cwd, ".railhead", "plan-latest", "interview.jsonl"), "utf8");
+    const entries = raw.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    expect(entries.at(-1)).toMatchObject({ type: "session_end", reason: "failed" });
+  });
+
   it("fix mode passes the mode into sharpenSystemPrompt (the prompt contains reproduction/language, not build-topic)", async () => {
     const cwd = await freshCwd();
     const prompts: string[] = [];
@@ -321,11 +411,27 @@ describe("runPlan — two-call planning (design -> tickets)", () => {
     expect(result.tickets.map((t) => t.file)).toEqual(["01-scaffold.md", "02-greet.md"]);
     expect(result.designDoc).toContain("Goal: a greetable CLI.");
     expect(result.architectureDoc).toContain("Modules: greet, cli.");
+    // railhead.json had no verify list, so the plan's $VERIFY seeded it — the
+    // run may skip the feature baseline (nothing was green before this plan).
+    expect(result.verifySeeded).toBe(true);
     const planMd = await readProjectDoc(cwd, "PLAN.md");
     expect(planMd).toContain("Goal: a greetable CLI.");
     expect(planMd).toContain("## Ticket plan (2 tickets)");
     // No model audit ran.
     expect(phases.some((p) => p.startsWith("plan-check"))).toBe(false);
+  });
+
+  it("reports verifySeeded=false and leaves an existing verify list untouched", async () => {
+    const cwd = await freshCwd();
+    await writeFile(join(cwd, "railhead.json"), JSON.stringify({ verify: ["cargo test"] }), "utf8");
+    mockExec.mockImplementation(async (_prompt, options) => {
+      await emitStaged(options, planPayload({ verify: "cargo build" }));
+      return okResult();
+    });
+    const result = await runPlan({ cwd, prompt: "a greetable CLI", model: null });
+    expect(result.verifySeeded).toBe(false);
+    const cfg = JSON.parse(await readFile(join(cwd, "railhead.json"), "utf8"));
+    expect(cfg.verify).toEqual(["cargo test"]);
   });
 
   it("feature mode: the stage prompts carry the product arc and the held charter, and never the scaffold rule", async () => {
@@ -590,6 +696,36 @@ describe("runPlan — two-call planning (design -> tickets)", () => {
     });
     expect(phases).toEqual(["product"]);
     expect(plan.steps).toHaveLength(1);
+  });
+
+  it("reviseProductArc replays recorded answers against the stored arc in one revision call", async () => {
+    const cwd = await freshCwd();
+    await writeProductPlan(cwd, ARC);
+    const phases: string[] = [];
+    const prompts: string[] = [];
+    mockExec.mockImplementation(async (prompt, options) => {
+      phases.push(options.phaseFile);
+      prompts.push(prompt);
+      await emitStaged(options, "$PRODUCT\n# Trail Tracker\n\n## Roadmap\n\n### 1 — MVP shell\n\n**Status:** todo\n\nShell only.\n$END\n");
+      return okResult();
+    });
+    const { plan } = await reviseProductArc({
+      cwd,
+      instruction: "a hiking log",
+      findings: "The user answered a planning interview about this plan.\n- Q: MVP — in?\n  A: shell only",
+      model: null,
+    });
+    expect(phases).toEqual(["product-revise"]);
+    expect(prompts[0]).toContain("shell only");
+    expect(prompts[0]).toContain("MVP shell");
+    // The revision never writes: adoption stays the CLI's explicit act.
+    expect(plan.steps[0].title).toBe("MVP shell");
+  });
+
+  it("reviseProductArc refuses when no arc exists to revise", async () => {
+    const cwd = await freshCwd();
+    await expect(reviseProductArc({ cwd, instruction: "x", findings: "y", model: null })).rejects.toThrow(/no product arc/);
+    expect(mockExec).not.toHaveBeenCalled();
   });
 
   it("deriveFeaturePrompt returns the derived prompt with the step, feedback, and roadmap folded in", async () => {

@@ -611,6 +611,34 @@ function earliestSiblingMarker(text: string, markers: string[]): number {
   return earliest;
 }
 
+/** Restrict a metadata block to its fenced regions when it uses Markdown
+ * fences at all. A model that fences its `$VERIFY` commands habitually writes
+ * non-command prose around the fence — the SpriteForge plan emitted
+ * `SpriteForge — browser-ui` (its title + interface) between the verify fence
+ * and `$SMOKE`, with no `$INTERFACE` marker; `parseVerifyBlock` stopped only
+ * at sibling markers, so that line landed in the verify list and died under
+ * `sh -c` as "command not found" for four attempts, aborting the run before
+ * ticket 02. Inside a fenced block the commands are the fenced content; prose
+ * outside is not a command. A block with NO fence keeps the bare-command
+ * shape intact. */
+function fencedContentOnly(block: string): string {
+  const lines = block.split(/\n/);
+  if (!lines.some((l) => /^\s*(?:`{3,}|~{3,})/.test(l))) return block;
+  const out: string[] = [];
+  let inFence = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const fenceDelimiter = /^(?:`{3,}|~{3,})[\w.+#-]*$/.test(trimmed);
+    const singleLineFence = /^(?:`{3,}|~{3,})[\s\S]*?(?:`{3,}|~{3,})$/.test(trimmed);
+    if (fenceDelimiter) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence || singleLineFence) out.push(line);
+  }
+  return out.join("\n");
+}
+
 /** Clean a planner metadata block into shell-command lines. Trims and drops
  * blank lines; drops a bare `$END` (model noise between blocks — it expands to
  * empty in a shell and exits 0, so it would be silent); drops Markdown fence
@@ -649,7 +677,7 @@ export function parseVerifyBlock(text: string): string[] {
   const end = earliestSiblingMarker(text.slice(afterStart), ["$interface", "$smoke", "$tickets"]);
   const block = text.slice(afterStart, afterStart + end);
   if (!block || /^none$/i.test(block.trim())) return [];
-  return commandLines(block);
+  return commandLines(fencedContentOnly(block));
 }
 
 /** Extract the $SMOKE ... (next sibling) block from planner output as a list
@@ -671,7 +699,7 @@ export function parseSmokeBlock(text: string): string[] {
   const end = earliestSiblingMarker(text.slice(afterStart), ["$design", "$architecture", "$tickets"]);
   const block = text.slice(afterStart, afterStart + end);
   if (!block || /^none$/i.test(block.trim())) return [];
-  return commandLines(block);
+  return commandLines(fencedContentOnly(block));
 }
 
 /** Extract the $INTERFACE ... (next sibling) block from planner output (issue

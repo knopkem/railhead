@@ -100,6 +100,12 @@ export interface RunOptions {
   /** Issue #19: the original user prompt/goal. Stored on the run state so
    * the goal reviewer can evaluate against it at group checkpoints. */
   originalPrompt?: string;
+  /** ADR 0051: true when the plan that produced this run SEEDED the verify
+   * suite into a previously-empty railhead.json. There was no suite to be
+   * green before this plan, so the feature baseline check is skipped — the
+   * greenfield step-1 case; the first ticket establishes the suite. Undefined
+   * (a direct `railhead run`) keeps the check. */
+  verifySeeded?: boolean;
 }
 
 /** Issue #80: the rung-2 restart closure for a run's failure-ladder phases.
@@ -176,12 +182,22 @@ export async function startRun(options: RunOptions): Promise<{ runId: string; st
   }
   await git.ensureInitialCommit(options.cwd);
   await ensureProjectGitignore(options.cwd);
+  // The plan identity is read before the baseline check and before the run
+  // state exists: `verify_seeded` exempts a plan's own freshly-seeded suite
+  // from the baseline refusal, and `arc_step` rides the state (ADR 0051) so
+  // the goal reviewer and run-end finalizer know which roadmap step this run
+  // builds. A direct `railhead run` on a legacy plan reads both as absent.
+  const origin = await readPlanOrigin(join(options.ticketsDir, ".."));
   // ADR 0051: a feature run extends an existing product — refuse to start on
   // a red verify baseline instead of burning the feature's retry budget on a
-  // pre-existing failure. Fresh starts only (resume replays owed gates).
+  // pre-existing failure. Fresh starts only (resume replays owed gates). A
+  // suite this plan just seeded is exempt: there was nothing to be green
+  // before the plan, and ticket 01 is what establishes it (greenfield step 1).
   const featureBaseline = options.config.feature_mode === true;
   if (featureBaseline) {
-    if (options.config.verify.length === 0) {
+    if (options.verifySeeded === true || origin?.verify_seeded === true) {
+      console.log(`[${nowClock()}] feature baseline: this plan seeded the verify suite (railhead.json had none) — baseline check skipped, there was no suite to be green`);
+    } else if (options.config.verify.length === 0) {
       console.log(`[${nowClock()}] feature baseline: no verify commands configured — the baseline check is skipped, only this run's gate output can prove greenness`);
     } else {
       console.log(`[${nowClock()}] feature baseline — verifying the project is green before ticket 01`);
@@ -202,10 +218,6 @@ export async function startRun(options: RunOptions): Promise<{ runId: string; st
     ? await queryReasoningCapability(options.config.model.implement)
     : false;
   await ensureProjectOpenCodePermissions(options.cwd, frameworkExternalDirsForVerify(options.config.verify), { yolo: options.config.yolo_permissions === true, contextTokens: options.config.max_context_tokens, implementModel: options.config.model.implement ?? undefined, clampReasoning: implSupportsReasoning });
-  // Read the plan identity before the run state exists: a feature plan's
-  // arc_step rides the state (ADR 0051) so the goal reviewer and the run-end
-  // finalizer know which roadmap step this run builds.
-  const origin = await readPlanOrigin(join(options.ticketsDir, ".."));
   const meta: RunMeta = {
     cwd: options.cwd,
     branch: options.branch,
@@ -1621,14 +1633,30 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
   }
 
   // Hard fail: retry budget exhausted, or a [BLOCKER] finding survived the attempt cap.
+  ticket.status = "failed";
   const lastDiff = await git.workingDiff(state.cwd).catch(() => "");
   if (lastDiff) {
-    const cleaned = await git.cleanWorktree(state.cwd, protectedPaths(state.cwd, state.tickets_dir));
-    if (cleaned.untrackedArchivePath) {
-      console.log(`[${nowClock()}] untracked work wiped — byte-for-byte copies archived to ${cleaned.untrackedArchivePath}`);
+    if (ticket.verify_ok === true) {
+      // ADR 0006: a verify-green tree is the floor for durable work. A gate
+      // verdict (reviewRounds past the budget, a standing BLOCKER) is not a
+      // broken build, so preserve the work as a checkpoint commit — the same
+      // shape resume gives in-flight work — instead of wiping it. The
+      // SpriteForge-06 incident: verify-green UI work with one standing
+      // [MAJOR] was wiped from the branch, and the only copy was a stash the
+      // operator had to discover. `rebaseFrontier` re-arms this ticket on
+      // resume, so the re-run starts from this checkpoint either way.
+      const checkpointMsg = `${ticket.number} — ${ticket.title} (checkpoint — gate failed, verify green)`;
+      const checkpoint = await git.commitOrReuseHead(state.cwd, checkpointMsg);
+      ticket.logs.push(`checkpoint ${checkpoint} preserved on hard fail (verify green — work not wiped)`);
+      console.log(`[${nowClock()}]   ${ticket.number} work preserved — checkpointed at ${checkpoint.slice(0, 8)} (verify green, not wiped)`);
+    } else {
+      const cleaned = await git.cleanWorktree(state.cwd, protectedPaths(state.cwd, state.tickets_dir));
+      if (cleaned.untrackedArchivePath) {
+        console.log(`[${nowClock()}] untracked work wiped — byte-for-byte copies archived to ${cleaned.untrackedArchivePath}`);
+      }
+      ticket.logs.push("work wiped (verify red — a failed tree must not become a checkpoint base)");
     }
   }
-  ticket.status = "failed";
   if (implementPhaseFiles.size > 0) ticket.context = await summarizePhaseFiles(ledger, implementPhaseFiles);
   ticket.logs.push("FAILED: retries exhausted");
   return "failed";

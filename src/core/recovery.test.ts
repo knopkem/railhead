@@ -111,14 +111,35 @@ describe("rebaseFrontier", () => {
     const r = rebaseFrontier(state([
       ticket({ file: "01-a.md", status: "in_progress", attempts: 3, reviews: [{ phase: "x", attempt: 1, blocking: true, findings: ["b"] }] }),
       ticket({ file: "02-b.md", status: "committed", attempts: 2 }),
-      ticket({ file: "03-c.md", status: "failed" }),
     ]));
     const t = r.tickets.find((x) => x.file === "01-a.md")!;
     expect(t).toMatchObject({ status: "ready", attempts: 0, verify_ok: null, review_ok: null, review_attempts: 0 });
     expect(t.reviews).toEqual([]);
-    // committed and failed tickets are untouched
+    // committed tickets are untouched
     expect(r.tickets.find((x) => x.file === "02-b.md")!.attempts).toBe(2);
-    expect(r.tickets.find((x) => x.file === "03-c.md")!.status).toBe("failed");
+  });
+
+  it("re-arms a failed ticket (ADR 0003 stop-don't-skip) with a fresh budget and ladder", () => {
+    // A hard fail stopped the run for a human; the resume must re-run the
+    // un-landed ticket before the frontier can advance past it — a skip would
+    // build downstream tickets on a base that never landed.
+    const r = rebaseFrontier(state([
+      ticket({ file: "01-a.md", status: "failed", attempts: 4, verify_ok: true, review_ok: null, ladder_rung: 2, last_failure_class: "stall" }),
+      ticket({ file: "02-b.md", status: "ready" }),
+    ]));
+    const t = r.tickets.find((x) => x.file === "01-a.md")!;
+    expect(t).toMatchObject({
+      status: "ready",
+      attempts: 0,
+      verify_ok: null,
+      review_ok: null,
+      review_attempts: 0,
+      ladder_rung: undefined,
+      last_failure_class: undefined,
+    });
+    expect(t.reviews).toEqual([]);
+    // The ready ticket after it is untouched and comes second in the frontier.
+    expect(r.tickets.find((x) => x.file === "02-b.md")!.status).toBe("ready");
   });
 
   it("demotes an in_progress ticket to ready even when a checkpoint was intended (the checkpoint must NOT mark the ticket committed)", () => {

@@ -144,6 +144,10 @@ export interface ProductArgs {
   /** ADR 0051: boolean override for the arc interview. null = ask (interactive)
    * or skip (auto). */
   sharpen: boolean | null;
+  /** Replay a recorded interview log (JSONL) through the revision stage instead
+   * of running a new session — the resume path for a stopped or crashed arc
+   * interview. Path is relative to the project root unless absolute. */
+  answers: string | null;
 }
 
 /** Parse the arguments of `railhead product`: the joined non-flag text is the
@@ -152,7 +156,7 @@ export function parseProductArgs(argv: string[]): ProductArgs {
   const consumed: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
-    if (a === "--model" || a === "-m") {
+    if (a === "--model" || a === "-m" || a === "--answers") {
       consumed.push(a);
       const v = argv[i + 1];
       if (v !== undefined && !v.startsWith("-")) {
@@ -170,6 +174,7 @@ export function parseProductArgs(argv: string[]): ProductArgs {
     verbose: argv.includes("--verbose"),
     modelOverride: argValue(argv, "--model") ?? argValueFlag(argv, "-m"),
     sharpen: parseBoolOverride(argv, "--sharpen", "--no-sharpen"),
+    answers: argValue(argv, "--answers"),
   };
 }
 
