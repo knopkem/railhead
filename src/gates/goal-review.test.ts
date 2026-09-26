@@ -927,3 +927,41 @@ describe("goal vision capability injection (ADR 0036)", () => {
     expect(p).toContain("not a valid finding");
   });
 });
+
+describe("goal prompt — feature scope (ADR 0051)", () => {
+  const base = {
+    originalPrompt: "add search to the trail log",
+    verifyCommands: ["npm test"],
+    runCommandHint: "npm run dev",
+    group: "search",
+    completedGroups: [],
+    priorFindings: [],
+  };
+  const FEATURE = {
+    ...base,
+    featureMode: true,
+    productBrief: "## Stack\nVANILLA_JUSTICE — decided.",
+    roadmapSummary: "1 — MVP [done]\n2 — Search [todo]",
+  };
+
+  it("carries the product context and scope rules: later roadmap steps are out of scope", () => {
+    const text = goalPrompt(FEATURE);
+    expect(text).toContain("VANILLA_JUSTICE — decided.");
+    expect(text).toContain("1 — MVP [done]");
+    expect(text).toMatch(/out of scope by design/);
+    expect(text).toMatch(/integration breakage/);
+  });
+
+  it("the final-group pass judges the feature's full goal, never the whole product", () => {
+    const text = goalPrompt({ ...FEATURE, isFinalGroup: true });
+    expect(text).toMatch(/judge the feature's FULL goal/);
+    expect(text).toMatch(/never demand them here/);
+    expect(text).not.toMatch(/judge the FULL goal\n/);
+  });
+
+  it("a build run (featureMode absent) produces today's goal prompt — no product context", () => {
+    const text = goalPrompt(base);
+    expect(text).not.toContain("Product context");
+    expect(goalPrompt({ ...base, isFinalGroup: true })).toMatch(/judge the FULL goal/);
+  });
+});

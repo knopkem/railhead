@@ -1,6 +1,7 @@
 import type { RunState, StructuralReviewRecord, TicketState } from "../core/state.ts";
 import { isFinished } from "../core/state.ts";
 import { loadTickets } from "../core/ticket.ts";
+import { join } from "node:path";
 import { seatContextBudget, firesMidRun } from "../config/config.ts";
 import { reviewSummary, runReviewAgent } from "./reviewer.ts";
 import { baseSessionId } from "../execute/base-session.ts";
@@ -79,7 +80,7 @@ export async function runStructuralReview(
 
   const allTickets = await loadTickets(state.tickets_dir);
   const mission = state.original_prompt ?? "(no mission declared)";
-  const architectureDoc = await git.readProjectDoc(state.cwd, "architecture");
+  const architectureDoc = await git.readProjectDoc(state.cwd, join(state.docs_dir, "architecture.md"));
   const contractsIndex = await loadContracts(state.cwd);
   const contractsSummary = summarizeContracts(contractsIndex);
 

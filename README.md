@@ -47,6 +47,22 @@ railhead fix "paddles don't move"             # bug report → reproduction ques
 
 `railhead init` (run automatically on first use) asks for a model per seat and probes each one for context limit, vision, and reasoning. `opencode models` lists what is available.
 
+## Building a product, not a demo (ADR 0051)
+
+A product is not one shot: its vision exists first, an MVP proves it, and it grows feature by feature over months. Railhead's build loop is exactly what one feature needs — planning, building, reviewing, fixing until good — so it doubles as the feature engine:
+
+```bash
+railhead product "a hiking log my family actually opens; first a rough MVP, then search"  # condense (or steer) the product arc
+railhead feature                                                                          # build the next roadmap step, unattended, overnight
+railhead status                                                                           # next morning: the arc's steps + run outcome
+railhead fix "...bug report..."                                                           # anything the morning found
+```
+
+- **The product arc** (`docs/product.md`) is the durable artifact: decided vision, traits, workflows, stack, and an ordered roadmap of steps that all future feature runs steer against. Hand-editable; one condense call keeps it terse; adoption is explicit.
+- **`railhead feature`** derives the first `todo` step into a feature prompt (or takes `"<one feature>"`/`--step N`), plans it in feature posture — no scaffold, contracts/charter/stack are decided — and builds it through the full gate stack. On finish the step is marked `built`; test it, flip it to `done`, or reopen it with feedback and run `railhead feature` again.
+- **Consistency across builds is machinery, not hope**: the decided stack and the coherence charter ride every feature plan, the run's plan docs live in their own namespace (project docs are never overwritten), and the goal review judges the feature — later steps are out of scope by design.
+- **A red baseline refuses to start** — `railhead feature` checks the project's verify is green first (run `railhead fix` before the feature), and the human gate between steps is the feature, not overhead.
+
 `build` generates the plan, a bounded clarifying interview (preset-gated) revises it, and then — unless `-a`/`--auto` — the final plan is written to `PLAN.md` for you to read and request changes; accepting it decomposes the plan into tickets. Resolved vocabulary lands in `CONTEXT.md`, hard decisions in `docs/adr/`, and the design narrative and architecture in `docs/design.md` / `docs/architecture.md`. `fix` asks only about reproduction — the planner reads the code itself.
 
 ## Commands

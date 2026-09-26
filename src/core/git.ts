@@ -276,6 +276,22 @@ export function stageAll(cwd: string): Promise<void> {
   return git(cwd, ["add", "-A"]).then(() => undefined);
 }
 
+/**
+ * Commit ONLY the named paths — stage by pathspec, commit when something in
+ * that pathspec actually differs. Returns the new sha, or null when the paths
+ * were clean (nothing committed). Unlike `commit`/`commitOrReuseHead`, this
+ * never sweeps unrelated worktree changes in: the arc update commits on the
+ * product branch without touching in-progress ticket work.
+ */
+export async function commitPaths(cwd: string, paths: string[], message: string): Promise<string | null> {
+  if (paths.length === 0) return null;
+  await git(cwd, ["add", "--", ...paths]);
+  const staged = await git(cwd, ["diff", "--cached", "--name-only"]).catch(() => "");
+  if (!staged.trim()) return null;
+  await git(cwd, ["commit", "-m", message]);
+  return headCommit(cwd);
+}
+
 export function isClean(cwd: string): Promise<boolean> {
   return git(cwd, ["status", "--porcelain"]).then((s) => s.length === 0);
 }

@@ -10,7 +10,8 @@ import {
 } from "../core/state.ts";
 import { initLedger, ledgerDir, newRunId, writeState, extractAssistantText, readStderrLines, boundedLog, writeRawLog, appendEvent, eventPath } from "../core/ledger.ts";
 import { readFile, writeFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { existsSync } from "node:fs";
+import { isAbsolute, join, relative } from "node:path";
 import { loadTickets, toTicketState, renderTicket, type Ticket } from "../core/ticket.ts";
 import { readPlanOrigin, checkPlanOrigin, readPlanWallMs } from "../plan/plan-identity.ts";
 import { replanFromCheckpoint } from "../gates/replan.ts";
@@ -24,7 +25,7 @@ import { joinPhaseMessages } from "../context/preamble.ts";
 import { readVisionCapabilityFor } from "./vision-probe.ts";
 import { summarizeIfNeeded, writeRunSummary } from "../context/summary.ts";
 import { compressVerifyOutput } from "./output-compress.ts";
-import { runVerify, type VerifyResult } from "./verify.ts";
+import { runVerify, assertGreenBaseline, type VerifyResult } from "./verify.ts";
 import { runSmoke, type SmokeResult } from "./smoke.ts";
 import { summarizePermissionRejections } from "../core/permissions.ts";
 import { nextRunStatus, reconcileCommittedButUnsaved } from "../core/recovery.ts";
@@ -72,7 +73,7 @@ import {
 } from "../context/learnings.ts";
 import { readDigest } from "../context/digest.ts";
 import { queryReasoningCapability } from "../core/models.ts";
-import { buildBuilderPrompt, buildBuilderFindingsPrompt, DESIGN_DOC, ARCHITECTURE_DOC, type BuilderTicket, type GateFeedback } from "../context/builder.ts";
+import { buildBuilderPrompt, buildBuilderFindingsPrompt, type BuilderTicket, type GateFeedback } from "../context/builder.ts";
 import { nextBuilderUnit, checkpointTarget, type BuilderUnit } from "./builder-units.ts";
 import { CHECKPOINT_RE, readCheckpointTicket } from "../core/checkpoint.ts";
 import { builderRecoveryFor } from "./builder-loop.ts";
@@ -154,12 +155,45 @@ export function assembleBranch(cwd: string, ticketsDir: string): string {
   return `run/${safe}`;
 }
 
+/** The directory this run's plan docs (design.md, architecture.md) live in.
+ * Feature runs (ADR 0051) keep their plan beside their ticket store
+ * (`.scratch/<slug>/docs`); the feature dir wins when it exists — a run's
+ * builder and reviewer seats must never be pointed at a stale project-root
+ * plan. Build/fix keep the repo-root `docs/`. */
+export async function resolveDocsRoot(cwd: string, ticketsDir: string): Promise<string> {
+  const abs = isAbsolute(ticketsDir) ? ticketsDir : join(cwd, ticketsDir);
+  const siblingDocs = join(abs, "..", "docs");
+  if (existsSync(join(siblingDocs, "design.md"))) {
+    const rel = relative(cwd, siblingDocs);
+    return rel.startsWith("..") ? siblingDocs : rel;
+  }
+  return "docs";
+}
+
 export async function startRun(options: RunOptions): Promise<{ runId: string; state: RunState; ledger: string }> {
   if (!(await git.isGitRepo(options.cwd))) {
     throw new Error("Not a git repository. The Railhead runs on one branch; init git first.");
   }
   await git.ensureInitialCommit(options.cwd);
   await ensureProjectGitignore(options.cwd);
+  // ADR 0051: a feature run extends an existing product — refuse to start on
+  // a red verify baseline instead of burning the feature's retry budget on a
+  // pre-existing failure. Fresh starts only (resume replays owed gates).
+  const featureBaseline = options.config.feature_mode === true;
+  if (featureBaseline) {
+    if (options.config.verify.length === 0) {
+      console.log(`[${nowClock()}] feature baseline: no verify commands configured — the baseline check is skipped, only this run's gate output can prove greenness`);
+    } else {
+      console.log(`[${nowClock()}] feature baseline — verifying the project is green before ticket 01`);
+      const beforeMs = Date.now();
+      const baseline = await assertGreenBaseline(options.cwd, options.config.verify, options.config.verify_timeout_sec);
+      if (baseline === null) {
+        console.log(`[${nowClock()}] feature baseline: no verify commands configured — skipped`);
+      } else {
+        console.log(`[${nowClock()}] feature baseline green (${((Date.now() - beforeMs) / 1000).toFixed(1)}s, ${baseline.outputs.length} command(s))`);
+      }
+    }
+  }
   // Same pre-grant as at plan time, but driven by the persisted railhead.json
   // verify list (a resume after a plan-time crash would otherwise start the
   // implementer with no external_directory allowance and trip the same
@@ -172,6 +206,7 @@ export async function startRun(options: RunOptions): Promise<{ runId: string; st
     cwd: options.cwd,
     branch: options.branch,
     tickets_dir: options.ticketsDir,
+    docs_dir: await resolveDocsRoot(options.cwd, options.ticketsDir),
     config: options.config,
     pause_on_failure: options.pauseOnFailure,
     verbose: options.verbose ?? false,
@@ -179,6 +214,7 @@ export async function startRun(options: RunOptions): Promise<{ runId: string; st
     original_prompt: options.originalPrompt,
   };
   const state = createRunState(meta);
+  console.log(`[${nowClock()}] plan docs: ${state.docs_dir}/`);
   state._models = resolveModels(options.config, []);
 
   const windows = await querySeatContextWindows(state._models);
@@ -1378,8 +1414,8 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
       // for surface tickets (chrome conformance is this diff seat's earliest
       // check); the narrative is surface-gated inside the prompt builder.
       const surface = touchesVisualSurface(parsed);
-      const rvDesignDoc = await git.readProjectDoc(state.cwd, "docs/design.md");
-      const rvArchitectureDoc = await git.readProjectDoc(state.cwd, "docs/architecture.md");
+      const rvDesignDoc = await git.readProjectDoc(state.cwd, join(state.docs_dir, "design.md"));
+      const rvArchitectureDoc = await git.readProjectDoc(state.cwd, join(state.docs_dir, "architecture.md"));
       const rvCoherenceDoc = surface ? await git.readProjectDoc(state.cwd, "docs/coherence.md") : null;
 
       const reviewResult = await withFailureLadderOnThrow(
@@ -1843,8 +1879,10 @@ async function runBuilderStep(
   // implemented the ticket ACs (structural predicates) with no target for the
   // look. The design narrative is surface-gated like the implementer's; the
   // architecture map is for every ticket.
-  const designDoc = await git.readProjectDoc(state.cwd, DESIGN_DOC);
-  const architectureDoc = await git.readProjectDoc(state.cwd, ARCHITECTURE_DOC);
+  const designDoc = await git.readProjectDoc(state.cwd, join(state.docs_dir, "design.md"));
+  const architectureDoc = await git.readProjectDoc(state.cwd, join(state.docs_dir, "architecture.md"));
+  const designPath = designDoc ? join(state.docs_dir, "design.md") : undefined;
+  const architecturePath = architectureDoc ? join(state.docs_dir, "architecture.md") : undefined;
 
   // Issue #106 (A): context blocks ride into the builder ONLY on a fresh seed
   // (sessionId null) or after an observed compaction — a warm session already
@@ -1904,6 +1942,7 @@ async function runBuilderStep(
           // prompt — the preamble on a fresh seed, a verbatim task re-injection
           // on a warm resume whose cheap model will not re-read it.
           designDoc: surface ? designDoc : null,
+          designPath,
           reinjectDesign: !useFull,
           architectureDoc: useFull ? architectureDoc : null,
           contextPointers: useFull
@@ -1912,9 +1951,9 @@ async function runBuilderStep(
                 contracts: contractsBlock ? CONTRACTS_FILE : undefined,
                 learnings: learningsBlock ? ".railhead/learnings.md" : undefined,
                 digest: digestBlock ? ".railhead/digest.md" : undefined,
-                design: designDoc ? DESIGN_DOC : undefined,
-                architecture: architectureDoc ? ARCHITECTURE_DOC : undefined,
-              },
+          design: designPath,
+          architecture: architecturePath,
+          },
           charter,
           contextBudget: contextBudget(state),
           visionCapability,

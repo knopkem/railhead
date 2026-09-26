@@ -22,6 +22,7 @@ function makeState(branch: string, status: RunState["status"]): RunState {
     branch,
     status,
     tickets_dir: "/x/issues",
+    docs_dir: "docs",
     config: cfg,
 
     pause_on_failure: false,

@@ -6,6 +6,7 @@ import {
   firstOpenStep,
   parseProductPlan,
   renderProductPlan,
+  renderProductBrief,
   setStepStatus,
   readProductPlan,
   PRODUCT_DOC,
@@ -157,6 +158,22 @@ describe("firstOpenStep", () => {
     const { plan } = parseProductPlan(DOC);
     plan.steps.forEach((s) => (s.status = "done"));
     expect(firstOpenStep(plan)).toBeNull();
+  });
+});
+
+describe("renderProductBrief", () => {
+  it("carries the decided prose sections and never the roadmap", () => {
+    const { plan } = parseProductPlan(DOC);
+    const brief = renderProductBrief(plan);
+    expect(brief).toContain("## Vision\nA hiking log");
+    expect(brief).toContain("## Stack\nPlain HTML+JS, no framework.");
+    expect(brief).not.toContain("Roadmap");
+    expect(brief).not.toContain("Shared albums");
+  });
+
+  it("drops empty sections instead of leaving skeletal headings", () => {
+    const { plan } = parseProductPlan("# Minimal\n\n## Roadmap\n");
+    expect(renderProductBrief(plan)).toBe("");
   });
 });
 

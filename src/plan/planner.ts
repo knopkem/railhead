@@ -7,13 +7,15 @@ import { DEFAULT_CONTEXT_TOKENS, DEFAULT_INFRA_BACKOFF_SEC, DEFAULT_MAX_REPLANS 
 import { buildReplanPrompt } from "../gates/replan.ts";
 import { readDigest } from "../context/digest.ts";
 import { withFailureLadderOnThrow } from "../execute/failure-ladder.ts";
-import { planDesignSystemPrompt, planTicketsSystemPrompt, planFixSystemPrompt, planContinuationSystemPrompt, buildPlanRevisionPrompt, buildPlanUserFeedbackPrompt, buildPlanMarkdown, buildPlanGatePrompt, parsePlanGateVerdict, parsePlanJson, parseVerifyBlock, parseSmokeBlock, parseDesignBlock, parseArchitectureBlock, parseInterfaceBlock, splitCoherenceContract, type PlanMode, type PlanTicket } from "./plan.ts";
+import { planDesignSystemPrompt, planTicketsSystemPrompt, planFeatureDesignSystemPrompt, planFeatureTicketsSystemPrompt, planFixSystemPrompt, planContinuationSystemPrompt, buildProductSessionPrompt, parseProductReply, buildFeatureStepPrompt, parseFeatureStepReply, buildPlanRevisionPrompt, buildPlanUserFeedbackPrompt, buildPlanMarkdown, buildPlanGatePrompt, parsePlanGateVerdict, parsePlanJson, parseVerifyBlock, parseSmokeBlock, parseDesignBlock, parseArchitectureBlock, parseInterfaceBlock, splitCoherenceContract, type PlanMode, type PlanTicket } from "./plan.ts";
 import { touchesVisualSurface } from "../context/surface.ts";
 import { isRenderedSurface, type ProjectInterface } from "../config/interface.ts";
 import { numberTickets, writeTickets, type Ticket } from "../core/ticket.ts";
 import { writePlanOrigin } from "./plan-identity.ts";
 import { extractAssistantText, extractPlanText, initLedger, resetPhase, readStderrLines } from "../core/ledger.ts";
 import { readProjectDoc, writeProjectDoc, headCommit } from "../core/git.ts";
+import { readProductPlan, renderProductBrief, renderProductPlan, type ProductPlan } from "../core/product.ts";
+import { CHARTER_DOC } from "../context/coherence.ts";
 import { summarizePermissionRejections } from "../core/permissions.ts";
 import {
   appendContextTerms,
@@ -119,6 +121,184 @@ export async function runPlan(options: {
   });
 }
 
+/** Shared subprocess/knobs bundle for every planner-family stage runner. */
+interface PlannerStageOptions {
+  cwd: string;
+  planLedger: string;
+  model: string | null;
+  maxSteps?: number | null;
+  stallTimeoutSec?: number | null;
+  maxStepModelSec?: number | null;
+  maxContextTokens?: number | null;
+  verbose?: boolean;
+  infraBackoffSec?: number[];
+  persistentWorker?: boolean;
+}
+
+/** One staged planner-family call: reset the phase file, run the model with
+ * the failure ladder (transient provider errors retry), and return the
+ * transcript. A non-ok completion is fatal — each stage's output feeds the
+ * next, so a partial transcript is never usable. */
+async function plannerStage(o: PlannerStageOptions, phaseFile: string, prompt: string, livePrefix: string): Promise<string> {
+  // Each phase file is owned by its invocation; without truncating, a prior
+  // session's events accumulate and leak into this one.
+  await resetPhase(o.planLedger, phaseFile);
+  const infra = await withFailureLadderOnThrow(
+    async () => {
+      const r = await executeOpendCode(prompt, {
+        cwd: o.cwd,
+        ledgerDir: o.planLedger,
+        phaseFile,
+        model: o.model,
+        heartbeat: true,
+        live: o.verbose === true,
+        verbose: o.verbose,
+        livePrefix,
+        maxSteps: o.maxSteps,
+        stallTimeoutSec: o.stallTimeoutSec,
+        maxStepModelSec: o.maxStepModelSec,
+        maxContextTokens: o.maxContextTokens,
+      });
+      if (r.status === "transient") {
+        throw new Error(describeExecFailure(r));
+      }
+      return r;
+    },
+    {
+      backoff: o.infraBackoffSec ?? DEFAULT_INFRA_BACKOFF_SEC,
+      budget: o.maxContextTokens ?? DEFAULT_CONTEXT_TOKENS,
+      restartWorker: plannerRestart(o.cwd, o.persistentWorker === true),
+      onRung: (rung) => {
+        console.log(`[${livePrefix}] ${rung.diagnosis}`);
+      },
+    },
+  );
+  if (!infra.ok) {
+    throw new Error(`planner hit a provider failure (${infra.rung.diagnosis}); re-run the railhead command after the rate limit clears`);
+  }
+  if (infra.value.status !== "ok") {
+    throw new Error(`planner did not complete (${describeExecFailure(infra.value)})`);
+  }
+  return extractPlanText(o.planLedger, phaseFile);
+}
+
+/** Product-session subprocess knobs (ADR 0051): everything planning supports,
+ * minus the plan-specific wiring (no ticket stages, no gate). */
+interface ProductSessionOptions {
+  cwd: string;
+  /** The operator's input for this session: the vision (authoring) or the
+   * steering text (revision). */
+  instruction: string;
+  model: string | null;
+  maxSteps?: number | null;
+  stallTimeoutSec?: number | null;
+  maxStepModelSec?: number | null;
+  maxContextTokens?: number | null;
+  verbose?: boolean;
+  infraBackoffSec?: number[];
+  persistentWorker?: boolean;
+}
+
+/**
+ * One condense call: the operator's vision or steering text becomes the
+ * product arc (a full ProductPlan). Never writes: the CLI shows the operator
+ * the parsed arc and adopts it explicitly — silently overwriting
+ * docs/product.md would desync the thing the whole process steers against.
+ */
+export async function runProductSession(options: ProductSessionOptions): Promise<ProductPlan> {
+  const { cwd, instruction } = options;
+  const planLedger = join(cwd, ".railhead", "plan-latest");
+  await initLedger(planLedger);
+  const stageOpts: PlannerStageOptions = {
+    cwd,
+    planLedger,
+    model: options.model,
+    maxSteps: options.maxSteps,
+    stallTimeoutSec: options.stallTimeoutSec,
+    maxStepModelSec: options.maxStepModelSec,
+    maxContextTokens: options.maxContextTokens,
+    verbose: options.verbose,
+    infraBackoffSec: options.infraBackoffSec,
+    persistentWorker: options.persistentWorker,
+  };
+  const current = await readProductPlan(cwd);
+  const system = buildProductSessionPrompt({
+    existingPlanMarkdown: current ? renderProductPlan(current) : null,
+    existingGlossary: (await readProjectDoc(cwd, "CONTEXT.md")) ?? undefined,
+  });
+  const text = await plannerStage(stageOpts, "product", `${system}\n\nThe operator's input for this session: ${instruction}`, "product");
+  return parseProductReply(text).plan;
+}
+
+export interface FeatureStepOptions {
+  cwd: string;
+  step: { number: number; title: string; description: string; feedback: string | null };
+  plan: ProductPlan;
+  model: string | null;
+  maxSteps?: number | null;
+  stallTimeoutSec?: number | null;
+  maxStepModelSec?: number | null;
+  maxContextTokens?: number | null;
+  verbose?: boolean;
+  infraBackoffSec?: number[];
+  persistentWorker?: boolean;
+}
+
+/** Roadmap summary for the derivation prompt: statuses only — what is DONE
+ * frames integration history, what is TODO frames where this step sits. */
+function roadmapSummary(plan: ProductPlan): string {
+  return plan.steps
+    .map((s) => `${s.number} — ${s.title} [${s.status}]`)
+    .join("\n");
+}
+
+/**
+ * One derivation call: a roadmap step becomes the feature prompt for one
+ * unattended feature run — the step that the human will test tomorrow
+ * morning. Fails loud when the session cannot produce a prompt beyond the
+ * marker.
+ */
+export async function deriveFeaturePrompt(options: FeatureStepOptions): Promise<string> {
+  const { cwd, step, plan } = options;
+  const planLedger = join(cwd, ".railhead", "plan-latest");
+  await initLedger(planLedger);
+  const stageOpts: PlannerStageOptions = {
+    cwd,
+    planLedger,
+    model: options.model,
+    maxSteps: options.maxSteps,
+    stallTimeoutSec: options.stallTimeoutSec,
+    maxStepModelSec: options.maxStepModelSec,
+    maxContextTokens: options.maxContextTokens,
+    verbose: options.verbose,
+    infraBackoffSec: options.infraBackoffSec,
+    persistentWorker: options.persistentWorker,
+  };
+  const contracts = await loadContracts(cwd);
+  const system = buildFeatureStepPrompt({
+    stepNumber: step.number,
+    stepTitle: step.title,
+    stepDescription: step.description,
+    feedback: step.feedback ?? undefined,
+    productBrief: renderProductBrief(plan),
+    roadmapSummary: roadmapSummary(plan),
+    contractsSummary: contracts.entries.length || contracts.schema_version ? summarizeContracts(contracts, "existing-repo") : undefined,
+    existingCharter: (await readProjectDoc(cwd, CHARTER_DOC)) ?? undefined,
+    existingGlossary: (await readProjectDoc(cwd, "CONTEXT.md")) ?? undefined,
+  });
+  const text = await plannerStage(
+    stageOpts,
+    "feature-step",
+    `${system}\n\nNow emit the $FEATURE_PROMPT block for step ${step.number} — ${step.title}.`,
+    "feature",
+  );
+  const derived = parseFeatureStepReply(text);
+  if (!derived.trim()) {
+    throw new Error("feature step derivation produced no prompt text — re-run `railhead feature`");
+  }
+  return derived;
+}
+
 async function runPlanInner(options: {
   cwd: string;
   prompt: string;
@@ -148,58 +328,30 @@ async function runPlanInner(options: {
   const outDir = join(cwd, ".scratch", slug, "issues");
 
   const contracts = await loadContracts(cwd);
+  // Feature mode (ADR 0051): the existing-repo framing keeps an empty
+  // contracts index from telling the planner a greenfield lie, and the arc +
+  // held charter ride every feature-plan stage.
+  const contractsSummary = summarizeContracts(contracts, mode === "feature" ? "existing-repo" : undefined);
   const existingGlossary = await readProjectDoc(cwd, "CONTEXT.md");
-  const contractsSummary = summarizeContracts(contracts);
+  const productPlan = mode === "feature" ? await readProductPlan(cwd) : null;
+  const productBrief = productPlan ? renderProductBrief(productPlan) : undefined;
+  const existingCharter = mode === "feature" ? await readProjectDoc(cwd, CHARTER_DOC) : null;
   const planLedger = join(cwd, ".railhead", "plan-latest");
   await initLedger(planLedger);
-  const backoff = infraBackoffSec ?? DEFAULT_INFRA_BACKOFF_SEC;
-
-  /** One staged planner call: reset the phase file, run the model with the
-   * failure ladder (transient provider errors retry), and return the
-   * transcript. A non-ok completion is fatal — each stage's output feeds the
-   * next, so a partial transcript is never usable. */
-  const stage = async (phaseFile: string, prompt: string, livePrefix: string): Promise<string> => {
-    // Each phase file is owned by this invocation; without truncating, a
-    // prior plan run's events accumulate and leak into this one.
-    await resetPhase(planLedger, phaseFile);
-    const infra = await withFailureLadderOnThrow(
-      async () => {
-        const r = await executeOpendCode(prompt, {
-          cwd,
-          ledgerDir: planLedger,
-          phaseFile,
-          model,
-          heartbeat: true,
-          live: verbose === true,
-          verbose,
-          livePrefix,
-          maxSteps,
-          stallTimeoutSec,
-          maxStepModelSec,
-          maxContextTokens,
-        });
-        if (r.status === "transient") {
-          throw new Error(describeExecFailure(r));
-        }
-        return r;
-      },
-      {
-        backoff,
-        budget: maxContextTokens ?? DEFAULT_CONTEXT_TOKENS,
-        restartWorker: plannerRestart(cwd, persistentWorker === true),
-        onRung: (rung) => {
-          console.log(`[${livePrefix}] ${rung.diagnosis}`);
-        },
-      },
-    );
-    if (!infra.ok) {
-      throw new Error(`planner hit a provider failure (${infra.rung.diagnosis}); re-run \`railhead build\` after the rate limit clears`);
-    }
-    if (infra.value.status !== "ok") {
-      throw new Error(`planner did not complete (${describeExecFailure(infra.value)})`);
-    }
-    return extractPlanText(planLedger, phaseFile);
+  const stageOpts: PlannerStageOptions = {
+    cwd,
+    planLedger,
+    model,
+    maxSteps,
+    stallTimeoutSec,
+    maxStepModelSec,
+    maxContextTokens,
+    verbose,
+    infraBackoffSec,
+    persistentWorker,
   };
+  const stage = (phaseFile: string, prompt: string, livePrefix: string): Promise<string> =>
+    plannerStage(stageOpts, phaseFile, prompt, livePrefix);
 
   // Planning is two calls: a fix is one call, a build is design → ticket
   // decomposition. The design call decides what the build IS; the ticket call
@@ -216,7 +368,10 @@ async function runPlanInner(options: {
     designText = text;
     ticketsText = text;
   } else {
-    const designSystem = planDesignSystemPrompt({ contractsSummary, existingGlossary: existingGlossary ?? undefined, artDirection });
+    const feature = mode === "feature";
+    const designSystem = feature
+      ? planFeatureDesignSystemPrompt({ contractsSummary, existingGlossary: existingGlossary ?? undefined, artDirection, productBrief, existingCharter: existingCharter ?? undefined })
+      : planDesignSystemPrompt({ contractsSummary, existingGlossary: existingGlossary ?? undefined, artDirection });
     designText = await stage("plan", `${designSystem}\n\nWhat to build: ${prompt}`, "plan");
     // ADR 0042: the planning interview now runs AFTER the plan exists, sourced
     // from the prompt + plan, and its answers revise the plan before the
@@ -240,7 +395,7 @@ async function runPlanInner(options: {
     if (reviewPlan) {
       let reviewRound = 0;
       for (;;) {
-        const planPath = await writePlanOnly({ cwd, prompt, designText });
+        const planPath = await writePlanOnly({ cwd, prompt, designText, mode: (mode ?? "build") as PlanMode, slug });
         const feedback = await reviewPlan({ planPath });
         if (!feedback || !feedback.trim()) break;
         reviewRound++;
@@ -253,7 +408,9 @@ async function runPlanInner(options: {
       }
       console.log("[plan] plan accepted — decomposing into tickets");
     }
-    const ticketsSystem = planTicketsSystemPrompt({ contractsSummary, existingGlossary: existingGlossary ?? undefined, artDirection });
+    const ticketsSystem = feature
+      ? planFeatureTicketsSystemPrompt({ contractsSummary, existingGlossary: existingGlossary ?? undefined, artDirection })
+      : planTicketsSystemPrompt({ contractsSummary, existingGlossary: existingGlossary ?? undefined, artDirection });
     ticketsText = await stage(
       "plan-tickets",
       `${ticketsSystem}\n\nThe validated plan to decompose:\n\n${designText}\n\nOriginal goal: ${prompt}`,
@@ -307,7 +464,7 @@ async function runPlanInner(options: {
   // failed gate regenerates the ticket frontier via the mid-run replan prompt,
   // capped by the same `max_replans` budget the run honors; a plan still
   // failing at the cap is rejected before the first commit.
-  if ((mode ?? "build") !== "build" || reviewPlan || !goalModel) return plan;
+  if (mode === "fix" || reviewPlan || !goalModel) return plan;
   const cap = maxReplans ?? DEFAULT_MAX_REPLANS;
   for (let round = 0; ; round++) {
     const gatePrompt = buildPlanGatePrompt({
@@ -349,10 +506,11 @@ async function runPlanInner(options: {
 
 /** Write the plan-only PLAN.md the interactive reviewer reads before any
  * ticket exists. The finalize pass rewrites it with the ticket breakdown once
- * the plan is accepted and decomposed. Returns the written path (build plans
- * only; fix mode has no plan to review). */
-async function writePlanOnly(opts: { cwd: string; prompt: string; designText: string }): Promise<string | null> {
-  const { cwd, prompt, designText } = opts;
+ * the plan is accepted and decomposed. Returns the written path (build and
+ * feature plans only; fix mode has no plan to review). Feature plans write
+ * into their .scratch namespace (ADR 0051). */
+async function writePlanOnly(opts: { cwd: string; prompt: string; designText: string; mode: PlanMode; slug: string }): Promise<string | null> {
+  const { cwd, prompt, designText, mode, slug } = opts;
   const designDoc = parseDesignBlock(designText);
   const architectureDoc = parseArchitectureBlock(designText);
   const markdown = buildPlanMarkdown({
@@ -360,8 +518,9 @@ async function writePlanOnly(opts: { cwd: string; prompt: string; designText: st
     designDoc: designDoc ? splitCoherenceContract(designDoc).narrative : null,
     architectureDoc,
   });
-  await writeProjectDoc(cwd, "PLAN.md", markdown);
-  return join(cwd, "PLAN.md");
+  const planDocPath = mode === "feature" ? join(".scratch", slug, "PLAN.md") : "PLAN.md";
+  await writeProjectDoc(cwd, planDocPath, markdown);
+  return join(cwd, planDocPath);
 }
 
 /** Deterministic art-direction ticket: a plan that declares a rendered surface
@@ -453,11 +612,18 @@ function hardenerTicket(): PlanTicket {
   const { narrative: designNarrative, charter: coherenceContract } = designDoc
     ? splitCoherenceContract(designDoc)
     : { narrative: null, charter: null };
+  // ADR 0051: a feature plan's docs live beside its ticket store under
+  // .scratch/<slug>/ — the project root's docs (a real product's plan, or the
+  // user's own) are never overwritten; startRun resolves this same location
+  // into state.docs_dir so every seat reads it back.
+  const feature = mode === "feature";
+  const designDocPath = feature ? join(".scratch", slug, "docs", "design.md") : "docs/design.md";
+  const architectureDocPath = feature ? join(".scratch", slug, "docs", "architecture.md") : "docs/architecture.md";
   if (designNarrative) {
-    await writeProjectDoc(cwd, "docs/design.md", designNarrative + "\n");
+    await writeProjectDoc(cwd, designDocPath, designNarrative + "\n");
   }
   if (architectureDoc) {
-    await writeProjectDoc(cwd, "docs/architecture.md", architectureDoc + "\n");
+    await writeProjectDoc(cwd, architectureDocPath, architectureDoc + "\n");
   }
   let coherenceAuthored = false;
   if (coherenceContract) {
@@ -489,9 +655,9 @@ function hardenerTicket(): PlanTicket {
   }
   // v2 issue 01: a project with a test stack gets ONE final hardening ticket
   // after the whole frontier; it transcribes the run's confirmed behaviors
-  // into the project's own tests. Build plans only (a fix has no plan to
-  // grow).
-  if (mode === "build" && planHasTestStack(verify)) {
+  // into the project's own tests. Build and feature plans (a fix has no plan
+  // to grow).
+  if ((mode === "build" || mode === "feature") && planHasTestStack(verify)) {
     tickets = [...tickets, hardenerTicket()];
   }
   const ordered = numberTickets(tickets);
@@ -506,17 +672,19 @@ function hardenerTicket(): PlanTicket {
   });
   // The human-facing plan overview. Written for build plans only (fix mode is
   // one ticket — there is nothing to iterate on); the distilled
-  // docs/design.md and docs/architecture.md remain the reviewer inputs.
+  // docs/design.md and docs/architecture.md remain the reviewer inputs. A
+  // feature plan writes its overview into the same .scratch namespace.
   let planPath: string | null = null;
-  if (mode === "build") {
+  if (mode === "build" || mode === "feature") {
     const markdown = buildPlanMarkdown({
       prompt,
       designDoc: designNarrative,
       architectureDoc,
       tickets: ordered,
     });
-    await writeProjectDoc(cwd, "PLAN.md", markdown);
-    planPath = join(cwd, "PLAN.md");
+    const planDocPath = feature ? join(".scratch", slug, "PLAN.md") : "PLAN.md";
+    await writeProjectDoc(cwd, planDocPath, markdown);
+    planPath = join(cwd, planDocPath);
   }
 
   // Issue #99 (ADR 0028): plan-time guard. A surfaced plan that authored no

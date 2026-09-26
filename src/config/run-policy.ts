@@ -144,6 +144,8 @@ export interface PolicyDecisions {
   yolo?: boolean;
   /** Persist `fix_mode` to this value (plan-only; always true). */
   fixMode?: boolean;
+  /** Persist `feature_mode` to this value (plan-only; always true). */
+  featureMode?: boolean;
   /** Desired per-gate cadence; only the listed gates are considered. */
   gateModes?: Partial<Record<GateName, GateMode>>;
 }
@@ -182,6 +184,12 @@ export async function persistPolicy(
       cfg.fix_mode = decisions.fixMode;
     });
     config.fix_mode = decisions.fixMode;
+  }
+  if (decisions.featureMode !== undefined && config.feature_mode !== decisions.featureMode) {
+    actions.push((cfg) => {
+      cfg.feature_mode = decisions.featureMode;
+    });
+    config.feature_mode = decisions.featureMode;
   }
   if (decisions.gateModes) {
     for (const [gate, key] of GATES) {

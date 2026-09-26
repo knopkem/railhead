@@ -33,6 +33,7 @@ function stateWith(tickets: TicketState[]): RunState {
     branch: "main",
     status: "running",
     tickets_dir: "/project/.scratch/test/issues",
+    docs_dir: ".scratch/test/docs",
     config: {} as never,
     pause_on_failure: false,
     verbose: false,

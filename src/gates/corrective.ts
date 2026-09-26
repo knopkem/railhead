@@ -117,11 +117,15 @@ const CORRECTIVE_SPECS: Record<CorrectiveKind, CorrectiveSpec> = {
  * [BLOCKER] finding becomes its own ticket so the implementer can target it in
  * isolation; [MAJOR] findings ride along as advisory context, matching the
  * per-ticket soft-pass rule (ADR 0005). Returns [] when there is nothing to
- * fix (no [BLOCKER] findings).
+ * fix (no [BLOCKER] findings). `docsDir` retargets the re-read guidance to the
+ * run's plan-docs directory (feature runs keep theirs under
+ * `.scratch/<slug>/docs`); the root `docs/` names in the specs are canonical
+ * placeholders rewritten here.
  */
 export function generateCorrectiveTickets(
   kind: CorrectiveKind,
   findings: string[],
+  docsDir = "docs",
 ): PlanTicket[] {
   const spec = CORRECTIVE_SPECS[kind];
   const blockers = findings.filter(isBlockerFinding);
@@ -130,6 +134,12 @@ export function generateCorrectiveTickets(
   const majorContext = majors.length
     ? `\n\n${spec.majorIntro}\n${majors.join("\n")}`
     : "";
+  const retargetDocReferences = (text: string): string =>
+    docsDir === "docs"
+      ? text
+      : text
+          .replaceAll("docs/design.md", join(docsDir, "design.md"))
+          .replaceAll("docs/architecture.md", join(docsDir, "architecture.md"));
   return blockers.map((finding) => {
     const body = spec.truncate(stripSeverityLabel(finding));
     const screenshotBlock = spec.screenshots
@@ -142,7 +152,7 @@ export function generateCorrectiveTickets(
     const criteria = typeof spec.criteria === "function" ? spec.criteria(body) : spec.criteria;
     return {
       title: `${spec.titlePrefix}${body.slice(0, 60)}`,
-      what: `${spec.intro}${body}${spec.outro}${screenshotBlock}${majorContext}`,
+      what: retargetDocReferences(`${spec.intro}${body}${spec.outro}${screenshotBlock}${majorContext}`),
       criteria,
     };
   });
@@ -216,7 +226,7 @@ export async function processCorrectiveFindings(
 
   const spec = CORRECTIVE_SPECS[options.kind];
   const suggested = options.suggested && options.suggested.length > 0 ? options.suggested : null;
-  const plan = suggested ?? generateCorrectiveTickets(options.kind, effectiveFindings);
+  const plan = suggested ?? generateCorrectiveTickets(options.kind, effectiveFindings, state.docs_dir ?? "docs");
   if (plan.length === 0) return "none";
 
   if (suggested) {

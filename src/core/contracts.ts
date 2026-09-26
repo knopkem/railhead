@@ -129,10 +129,16 @@ function keyOf(e: ContractEntry): string {
   return `${e.file}#${e.symbol}`;
 }
 
-/** One-line summaries for the planner to keep context tiny. */
-export function summarizeContracts(index: ContractsIndex): string {
+/** One-line summaries for the planner to keep context tiny. `framing`
+ * changes only the empty-index line: a greenfield repo has no public surface
+ * yet; an existing repo (feature mode) has real, unindexed surface — the one
+ * place the index's silence would otherwise tell the planner a destructive
+ * lie ("likely a greenfield repo"). */
+export function summarizeContracts(index: ContractsIndex, framing?: "greenfield" | "existing-repo"): string {
   if (!index.entries.length) {
-    return "(no known contracts yet — this is likely a greenfield repo)";
+    return framing === "existing-repo"
+      ? "(the contracts index is empty — this is an existing codebase whose public surface is not yet indexed; the feature description, the product arc, and the glossary are the authority on what exists; reuse what you find rather than scaffolding)"
+      : "(no known contracts yet — this is likely a greenfield repo)";
   }
   const lines = index.entries.map(
     (e) => `${e.symbol} (${e.kind}) @ ${e.file} :: ${e.signature || "?"}`,

@@ -1,5 +1,6 @@
 import { scanJsonObjects } from "../core/json.ts";
 import { indexOfOutsideFences } from "../core/fences.ts";
+import { parseProductPlan, type ProductPlan } from "../core/product.ts";
 import { DEFAULT_CONTEXT_TOKENS } from "../config/config.ts";
 import { titleSlug, type PlanTicket, type Ticket } from "../core/ticket.ts";
 import type { ProjectInterface } from "../config/interface.ts";
@@ -12,7 +13,7 @@ export type { PlanTicket } from "../core/ticket.ts";
  * into a real fix ticket — never a "verification" or "already implemented"
  * no-op. Kept as a string-literal type (not imported from sharpen.ts) so plan.ts
  * stays a leaf with no cross-import. */
-export type PlanMode = "build" | "fix";
+export type PlanMode = "build" | "fix" | "feature";
 
 /** The planner stage prompts; their text is pinned by prompt-content
  * assertions in plan.test.ts (ADR 0007 couples it to the ticket format).
@@ -32,6 +33,13 @@ export interface PlanStageInput {
    * surface, art direction not disabled). `false` suppresses the art-direction
    * request blocks; absent/true includes them. */
   artDirection?: boolean;
+  /** Feature mode (ADR 0051): the product arc's decided prose — vision,
+   * workflows, traits, and the stack. Present empties the greenfield framing. */
+  productBrief?: string;
+  /** Feature mode: the product's already-authored coherence contract
+   * (docs/coherence.md). When held, the design stage honors it instead of
+   * authoring a fresh one. */
+  existingCharter?: string;
 }
 
 const ART_DIRECTION_DESIGN_REQUEST = `The ART DIRECTION requirement: IF the $INTERFACE you declare is a rendered surface (browser-ui, canvas, or native — not terminal or none), the LOOK is part of the deliverable. Add an \`## Art direction\` section to $DESIGN (after Goal coverage, before any Coherence contract) describing the intended look with CONCRETE direction — palette roles as hex values with a stated value separation, distinguishable value bands, actor detail (outline/shading/highlight), background depth, a lighting model with an attenuation rule, and what moves with an easing rule. This section is DIRECTION for the art agent that will create the look — it is not a checklist the build is scored against, and it must not be turned into per-pixel acceptance criteria. Pure model/library/CLI builds (interface terminal/none): omit the section entirely.`;
@@ -73,17 +81,31 @@ function glossaryBlock(existingGlossary?: string): string {
     : "";
 }
 
-const VERIFY_INTERFACE_SMOKE_BLOCKS = `Emit a $VERIFY block first: the shell commands that prove a ticket works (the project's build and test commands). These run after every implementer attempt across the whole project, so list ONLY commands that should pass once ANY single ticket is correctly implemented — not project-final integration checks. Per-ticket criteria belong inside each ticket, not here. Use the single word NONE if there is genuinely no automated check (very rare; almost every project has at least a build/typecheck command).
+const VERIFY_BLOCK = `Emit a $VERIFY block first: the shell commands that prove a ticket works (the project's build and test commands). These run after every implementer attempt across the whole project, so list ONLY commands that should pass once ANY single ticket is correctly implemented — not project-final integration checks. Per-ticket criteria belong inside each ticket, not here. Use the single word NONE if there is genuinely no automated check (very rare; almost every project has at least a build/typecheck command).`;
 
-Then emit an $INTERFACE line: how a USER operates this deliverable — a property of the thing being built, never of the language it is written in. Emit the marker, then EXACTLY ONE token on its own line — one of <browser-ui | canvas | native | terminal | none>:
+const FEATURE_VERIFY_BLOCK = `Emit a $VERIFY block first: the shell commands that prove this feature's tickets work. The project ALREADY HAS a working verify suite — the railhead gates every ticket against the project's configured commands and refuses to start a run when that baseline is red. Emit THOSE commands (the run keeps gating with them), extended only by genuinely new checks this feature itself introduces; never weaken, rename, or drop an existing entry. List ONLY commands that should pass once ANY single ticket of this feature is correctly implemented — not product-final integration checks. Per-ticket criteria belong inside each ticket, not here. Use the single word NONE only if this feature adds no runnable check to an already-existing suite (very rare).`;
+
+const INTERFACE_BLOCK = `Then emit an $INTERFACE line: how a USER operates this deliverable — a property of the thing being built, never of the language it is written in. Emit the marker, then EXACTLY ONE token on its own line — one of <browser-ui | canvas | native | terminal | none>:
 - browser-ui — a DOM app the user operates by pointing and typing (buttons, fields, menus)
 - canvas — a full-canvas app running in a browser page, with no DOM controls to operate (games, pointer-lock)
 - native — an app that opens its own OS window (no browser, no DOM)
 - terminal — a CLI/TUI the user operates via stdin/stdout
 - none — a library or pure backend with no user-facing surface
-A browser app that is ONLY a full-canvas game is canvas; a DOM app with chrome around a canvas is browser-ui; an app that opens its own desktop window is native. When in doubt, choose by what a real user points at / types into.
+A browser app that is ONLY a full-canvas game is canvas; a DOM app with chrome around a canvas is browser-ui; an app that opens its own desktop window is native. When in doubt, choose by what a real user points at / types into.`;
 
-Then emit a $SMOKE block: ONE shell command that launches the built binary. This runs after verify passes, before review — it catches startup panics that a successful build cannot (an app that compiles but panics on the first frame; a server that binds the wrong port). The binary launches exactly as written, with no headless env injected — do NOT write code that skips rendering or the main schedule when a headless env is present, because the smoke phase must exercise the SAME code path the user runs. If the project is a library with no runnable binary, emit the single word NONE here.`;
+const SMOKE_BLOCK = `Then emit a $SMOKE block: ONE shell command that launches the built binary. This runs after verify passes, before review — it catches startup panics that a successful build cannot (an app that compiles but panics on the first frame; a server that binds the wrong port). The binary launches exactly as written, with no headless env injected — do NOT write code that skips rendering or the main schedule when a headless env is present, because the smoke phase must exercise the SAME code path the user runs. If the project is a library with no runnable binary, emit the single word NONE here.`;
+
+const VERIFY_INTERFACE_SMOKE_BLOCKS = `${VERIFY_BLOCK}
+
+${INTERFACE_BLOCK}
+
+${SMOKE_BLOCK}`;
+
+const FEATURE_VERIFY_INTERFACE_SMOKE_BLOCKS = `${FEATURE_VERIFY_BLOCK}
+
+${INTERFACE_BLOCK}
+
+${SMOKE_BLOCK}`;
 
 const DESIGN_BLOCK_SPEC = `$DESIGN
 <markdown: the complete design intent. Required sections, in order:
@@ -206,6 +228,91 @@ Rules:
 - Express each ticket from the user's perspective (what it makes work), not a layer-by-layer implementation list, with acceptance criteria as concrete, checkable bullets. Criteria must be verifiable by the implementer's seat: a claim only a human eye can check ("looks good") is not a criterion — name the observable behaviour or the artifact instead. Keep each criterion checkable against the ticket's own change: a repo-wide search or absence claim ("grep finds no X outside Y") cannot be confirmed from one ticket's diff — scope it to the files this ticket owns, or to a command the verify list already runs.
 - Order the tickets so each one's prerequisites come before it.
 - ${SPINE_FIRST_ORDER}
+
+${QUALITY_PREFERENCES}${artDirectionTicketsBlock(input)}
+
+${TICKET_ARRAY_SPEC}`;
+}
+
+// ---------------------------------------------------------------------------
+// feature mode (ADR 0051): ONE feature lands in an EXISTING product
+// ---------------------------------------------------------------------------
+
+const FEATURE_SPINE_FIRST_ORDER = `FEATURE-FIRST ORDER: the first one or two groups must deliver a VISIBLY WORKING slice of THIS FEATURE on the running product — the smallest end-to-end path a user can see and operate, built against the app shell that already exists. Do NOT let deep-logic tickets (parsers, engines, data layers) all precede surface composition: each group that follows builds visibly on the artifact. A feature plan whose first half is invisible plumbing and whose surface arrives last is the failure this rule prevents — the run ends with a feature nobody saw working.`;
+
+function productBriefBlock(brief?: string): string {
+  if (!brief?.trim()) {
+    return `No product arc is on file — treat the feature description below as the entire product context you have. Do not re-plan the product: plan the feature.`;
+  }
+  return `The product's arc (DECIDED — written with the human; the vision, workflows, traits, and stack are chosen and must not be re-decided; the feature serves this identity):
+
+${brief.trim()}`;
+}
+
+function heldCharterBlock(charter?: string): string {
+  if (!charter?.trim()) return "";
+  return `The product's coherence contract (DECIDED — normative for every rendered surface this feature touches: honor its Visual tokens, Layout model, and Chrome rules exactly; extend it only if this feature genuinely needs something it does not cover, and state that need in the design's narrative — the reviewer amends the contract; the plan never contradicts it):
+
+${charter.trim()}`;
+}
+
+export function planFeatureDesignSystemPrompt(input: PlanStageInput): string {
+  const charterTail = input.existingCharter?.trim()
+    ? artDirectionDesignBlock(input)
+    : `${COHERENCE_CHARTER_REQUEST}${artDirectionDesignBlock(input)}`;
+  return `You are a software planner deciding how ONE FEATURE lands in an EXISTING product. The repo already runs: an entry point, a working build, and a verify suite that is green before every run starts. You do not write tickets yet: a separate pass decomposes the validated plan into tickets. Your job is to decide what THIS FEATURE IS inside that product — the experience it adds, the quality bar it clears, and how it integrates with the system that exists — so the ticket pass can order the integration.
+
+The current known public contracts of the repo (decided; new work should BUILD ON these, not duplicate them):
+${input.contractsSummary}
+${glossaryBlock(input.existingGlossary)}
+${productBriefBlock(input.productBrief)}
+${heldCharterBlock(input.existingCharter)}
+DO NOT run shell commands, write files, or explore the filesystem. You already know enough about programming languages, build tools, and test runners from your training data to structure the plan, and the project's own verify/smoke commands are described below and in the project config. Running experiments in bash wastes time and context for no benefit — later phases run the code; your job is to PLAN it.
+
+Rules:
+- The Goal coverage checklist is the plan's contract with the goal: every demand the feature commits to must map to a concrete deliverable, including every quality adjective. A demand you restate but do not deliver WILL be flagged later — name the thing that produces it.
+- The module map in $ARCHITECTURE covers THIS FEATURE's modules plus the EXISTING seams it docks into (the entry point, the app shell, the data and the contracts it consumes). A feature plan that names no integration point is a parallel product, not a feature.
+- Do not plan scaffolding, a second entry point, or a re-decision of the stack: the manifest, build scripts, app shell, and dependencies are decided. If the feature genuinely needs a NEW capability, claim discipline below tells you how to cite it as a RESOLUTION.
+- Do not defer wiring: the feature's surface and logic dock into the existing shell's seams; no terminal "integrate everything" step.
+
+${FEATURE_SPINE_FIRST_ORDER}
+
+- Prefer deep modules (small interface, large implementation) over shallow ones — callers should read the interface, not the impl. See docs/codebase-design.md for the vocabulary (depth, seam, leverage, locality).
+
+${QUALITY_PREFERENCES}
+
+${CLAIM_DISCIPLINE}
+
+${FEATURE_VERIFY_INTERFACE_SMOKE_BLOCKS}
+
+Emit your reply in EXACTLY this shape — $VERIFY block, then an $INTERFACE line, then a $SMOKE block, then the $DESIGN block, then the $ARCHITECTURE block. No prose before $VERIFY, no code fences.
+
+${DESIGN_BLOCK_SPEC}
+
+${ARCHITECTURE_BLOCK_SPEC}
+
+${charterTail}
+
+The $DESIGN and $ARCHITECTURE blocks are REQUIRED — without them there is nothing for the ticket decomposition to derive from, and the plan is rejected.`;
+}
+
+export function planFeatureTicketsSystemPrompt(input: PlanStageInput): string {
+  return `You are a software planner decomposing a VALIDATED plan for ONE FEATURE of an EXISTING product into an ordered queue of tickets. The feature plan (design and architecture) is in the message that follows this prompt and is the source of truth: do not re-scope it. Your job is execution order — which independently verifiable increments, in what order, this feature integrates into the running product.
+
+The current known public contracts of the repo (decided; new tickets should BUILD ON these, not duplicate them):
+${input.contractsSummary}
+${glossaryBlock(input.existingGlossary)}
+DO NOT run shell commands, write files, or explore the filesystem. You already know enough about programming languages, build tools, and test runners from your training data to choose sensible commands and structure the tickets. Running experiments in bash wastes time and context for no benefit — the implementer runs the code; your job is to PLAN it.
+
+Rules:
+- COVER THE PLAN: every deliverable the feature plan commits to must be owned by a ticket. Walk the Architecture module map and the Goal coverage checklist; each named module, mechanism, effect, screen, artifact, or quality mechanism gets an owner. Never silently drop plan scope, and never narrow it to look smaller. If the plan under-specifies something a coherent feature needs, add the ticket and name it.
+- Each ticket is a single VERTICAL slice: a coherent, independently verifiable increment that leaves the product green and demoable when it commits. The builder runs as ONE durable session across all tickets, so size a ticket by verifiability and natural seams, not by a context window: there is no ticket-count ceiling and no file-count cap. Split when a ticket mixes independent concerns or cannot be verified on its own; merge when a slice is not independently meaningful.
+- The FIRST ticket is an INTEGRATION slice: it lands one working piece of the feature against the running product and leaves the EXISTING verify suite green. Never emit a scaffold or bootstrap ticket — the repo already builds; a feature plan that opens with manifest or shell scaffolding is the classic wrong-mode failure.
+- The app shell's entry point is owned: tickets extend it; no ticket mounts a second entry point or re-creates the project manifest.
+- Shared conventions are decided: tickets consume the product's tokens, units, naming, and the coherence contract — they do not re-derive or re-package them.
+- Express each ticket from the user's perspective (what it makes work), not a layer-by-layer implementation list, with acceptance criteria as concrete, checkable bullets. Criteria must be verifiable by the implementer's seat: a claim only a human eye can check ("looks good") is not a criterion — name the observable behaviour or the artifact instead. Keep each criterion checkable against the ticket's own change: a repo-wide search or absence claim ("grep finds no X outside Y") cannot be confirmed from one ticket's diff — scope it to the files this ticket owns, or to a command the verify list already runs.
+- Order the tickets so each one's prerequisites come before it.
+- ${FEATURE_SPINE_FIRST_ORDER}
 
 ${QUALITY_PREFERENCES}${artDirectionTicketsBlock(input)}
 
@@ -704,4 +811,135 @@ export function parsePlanJson(text: string): { tickets: PlanTicket[]; unparsed: 
     );
   }
   return { tickets, unparsed };
+}
+
+// ---------------------------------------------------------------------------
+// the product arc session (ADR 0051) — one condense call, arc format owned by
+// src/core/product.ts
+// ---------------------------------------------------------------------------
+
+export interface ProductSessionPromptInput {
+  contractsSummary?: string;
+  existingGlossary?: string;
+  /** The current arc markdown when the session STEERS an existing one; null
+   * when the arc is being authored for the first time. */
+  existingPlanMarkdown?: string | null;
+}
+
+export function buildProductSessionPrompt(input: ProductSessionPromptInput): string {
+  const steerBlock = input.existingPlanMarkdown?.trim()
+    ? `\nThe arc ALREADY EXISTS (below). This session REVISES it: preserve every step's number, status, and the human's prose unless the operator's input explicitly changes them; add new steps at the end of the roadmap in continuing numbering; keep decisions the arc already records (the stack is DECIDED — do not re-decide it) unless the input says otherwise.\n\n--- current arc ---\n${input.existingPlanMarkdown.trim()}\n--- end current arc ---\n`
+    : `\nNo arc exists yet — this session AUTHORS one. Every roadmap step starts with \`**Status:** todo\`.`;
+  return `You are capturing a PRODUCT ARC — the durable overview a product is built across, one feature run at a time (ADR 0051). The operator drives; you condense their input into the arc's decided prose and an ordered roadmap of feature steps. You are not planning a build: no tickets, no implementation detail beyond what makes each step's intent concrete.
+
+The known public contracts of the repo${input.contractsSummary ? "" : " (none recorded yet)"}:
+${input.contractsSummary || "(no contracts index — describe integration points generically, the feature runs will resolve them)"}
+${input.existingGlossary?.trim() ? `\nThe project's domain glossary (CONTEXT.md) — use these words exactly:\n${input.existingGlossary.trim()}\n` : ""}
+${steerBlock}
+Rules:
+- Sections stay TERSE — this file rides near every future feature plan's context. Vision: 1-3 sentences. Workflows and Traits: short lines. Stack: the decided technologies in one sentence with the rule that they are settled.
+- The Roadmap is the agile arc: an early rough first step (the MVP slice), then ordered steps roughly 3-8 in count, each a coherent user-visible increment. Give each step a short title and a one-paragraph description naming the behavior its feature run must make work — enough that a feature planner can plan it without re-asking the operator. New steps only when the arc genuinely needs them; an arc is a direction, not a specification.
+
+Emit your reply in EXACTLY this shape — the $PRODUCT marker, the arc in its on-disk format, then $END. No prose before $PRODUCT, no code fences around the block:
+
+$PRODUCT
+# <product name>
+
+## Vision
+<1-3 sentences>
+
+## Workflows
+<short lines>
+
+## Traits
+<short lines>
+
+## Stack
+<one sentence — decided>
+
+## Roadmap
+
+### 1 — <step title>
+
+**Status:** todo
+
+<one-paragraph description>
+
+### 2 — …
+
+$END`;
+}
+
+/** Parse the product session reply: the fenced-discipline $PRODUCT block is
+ * parsed with the same on-disk arc parser the file reads back, so the model
+ * can never drift from the file format. Returns warnings for status anomalies
+ * and duplicate steps (parseProductPlan's own). */
+export function parseProductReply(text: string): { plan: ProductPlan; warnings: string[] } {
+  const start = indexOfOutsideFences(text, /\$PRODUCT\b/);
+  if (start < 0) {
+    throw new Error("product session output contained no readable $PRODUCT block");
+  }
+  const afterMarker = start + "$PRODUCT".length;
+  const endMatch = indexOfOutsideFences(text.slice(afterMarker), /\$END\b/);
+  const block = endMatch >= 0 ? text.slice(afterMarker, afterMarker + endMatch) : text.slice(afterMarker);
+  return parseProductPlan(block);
+}
+
+// ---------------------------------------------------------------------------
+// roadmap step → feature prompt (ADR 0051)
+// ---------------------------------------------------------------------------
+
+export interface FeatureStepPromptInput {
+  stepNumber: number;
+  stepTitle: string;
+  stepDescription: string;
+  feedback?: string | null;
+  productBrief: string;
+  roadmapSummary: string;
+  contractsSummary?: string;
+  existingCharter?: string;
+  existingGlossary?: string;
+}
+
+export function buildFeatureStepPrompt(input: FeatureStepPromptInput): string {
+  const feedbackBlock = input.feedback?.trim()
+    ? `\n\nThe step was REOPENED by the human with this feedback — fold it in as hard constraints on the feature prompt:\n${input.feedback.trim()}\n`
+    : "";
+  return `You turn ONE roadmap step of a product arc into the feature prompt that \`railhead feature\` will plan from and build unattended. Write it as the operator would have written it if they had to write a prompt themselves — complete, self-contained, and specific to this step. It must not require knowledge beyond the arc.
+
+The product's decided context (the stack and all conventions are SETTLED — the prompt inherits them, never proposes new ones):
+${input.productBrief}
+${input.existingGlossary?.trim() ? `\nThe project's domain glossary (CONTEXT.md) — use these words exactly:\n${input.existingGlossary.trim()}\n` : ""}
+${input.contractsSummary ? `\nThe repo's known public contracts (decided; the feature must build on these):\n${input.contractsSummary}\n` : ""}
+${input.existingCharter?.trim() ? `\nThe product's coherence contract is DECIDED and rides along automatically — the prompt need not restate visual tokens, only surface-specific direction the contract does not cover.\n` : ""}
+The arc so far (document order IS execution order):
+${input.roadmapSummary}
+
+The roadmap step to turn into a feature prompt — ${input.stepNumber} — ${input.stepTitle}:
+
+${input.stepDescription}${feedbackBlock}
+
+Rules for the prompt text:
+- State what the step makes work END-TO-END from the user's perspective — the behavior a person tests the morning after the run, not an implementation list.
+- Name the integration points the feature relies on (the existing app shell, the contracts it consumes) as "build on X", so the planner sees the seams a feature must dock into.
+- Say what is explicitly OUT of scope (later steps) so the unattended run does not pull the whole product in.
+- Concrete and checkable where the step implies acceptance; do not invent scope beyond the step. Prototype-quality is acceptable — the arc's early steps exist to be TESTED by the human.
+
+Emit your reply in EXACTLY this shape — the marker, the prompt text, then $END, no other prose, no code fences:
+
+$FEATURE_PROMPT
+<the feature prompt text>
+$END`;
+}
+
+export function parseFeatureStepReply(text: string): string {
+  const start = indexOfOutsideFences(text, /\$FEATURE_PROMPT\b/);
+  if (start < 0) {
+    // Tolerant fallback: no marker — the reply IS the prompt.
+    return text.trim();
+  }
+  const afterMarker = text.indexOf("\n", start);
+  const bodyStart = afterMarker < 0 ? text.length : afterMarker + 1;
+  const endMatch = /\$END\b/.exec(text.slice(bodyStart));
+  return (endMatch ? text.slice(bodyStart, bodyStart + endMatch.index) : text.slice(bodyStart)).trim();
 }

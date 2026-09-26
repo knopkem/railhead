@@ -10,6 +10,7 @@ import { buildPlaythroughSection } from "../context/playthrough.ts";
 import { renderPreamble, type PhaseMessages } from "../context/preamble.ts";
 import { scanJsonObjects } from "../core/json.ts";
 import { indexOfOutsideFences } from "../core/fences.ts";
+import { PRODUCT_DOC } from "../core/product.ts";
 import { isBlocker } from "./reviewer.ts";
 import type { ProbeRecipe, ProbeStatus } from "../core/probes.ts";
 
@@ -314,6 +315,15 @@ export function buildGoalReviewPrompt(options: {
    * Injected so a model cannot silently decide it "doesn't want" to read
    * screenshots — the measurement overrides any self-assessment. */
   visionCapability?: VisionCapabilityFact | null;
+  /** ADR 0051: this run builds ONE feature of a larger product. The original
+   * goal is the feature prompt; the arc context scopes the judgment to the
+   * feature (later roadmap steps are out of scope by design). */
+  featureMode?: boolean;
+  /** ADR 0051: the product arc's decided prose (vision/traits/workflows/stack). */
+  productBrief?: string | null;
+  /** ADR 0051: the arc's step summary with statuses — what earlier runs
+   * delivered and what remains planned. */
+  roadmapSummary?: string | null;
 }): PhaseMessages {
   const {
     originalPrompt,
@@ -339,6 +349,9 @@ export function buildGoalReviewPrompt(options: {
     advisory,
     visionCapability,
     registeredProbes,
+    featureMode,
+    productBrief,
+    roadmapSummary,
   } = options;
 
   const designBlock = designDoc
@@ -355,6 +368,24 @@ export function buildGoalReviewPrompt(options: {
 
   const contractsBlock = contractsSummary
     ? `\n## Current public contracts (what the system exposes right now)\n${contractsSummary}`
+    : "";
+
+  // ADR 0051: a feature run's goal reviewer judges the FEATURE, scoped by the
+  // arc — the product context tells the seat what settled (brief, stack,
+  // earlier steps) and what is deliberately not part of this run.
+  const productContextBlock = featureMode
+    ? `\n## Product context (this run builds ONE feature of a larger product)
+This run is one feature of a product built step by step (${PRODUCT_DOC}). The feature goal is the ORIGINAL GOAL below; judge that.
+
+The product's decided context:
+${productBrief?.trim() || "(the arc's prose sections are absent in this repo's product arc)"}
+
+The product arc (document order = step order; statuses show what earlier runs delivered):
+${roadmapSummary?.trim() || "(no roadmap steps recorded)"}
+
+Scope rules:
+- Judge the FEATURE's behaviors and how it integrates with the product that exists. Do NOT demand capabilities that belong to later roadmap steps — they are out of scope by design.
+- DO flag integration breakage: a feature that regresses or contradicts the existing product (its stack, its charter, its working features) is a [BLOCKER].`
     : "";
 
   const verifyBlock = verifyCommands.length
@@ -394,7 +425,9 @@ ${registeredProbes.map((p) => `- [${p.status.toUpperCase()}] ${p.behavior}\n  co
     : "";
 
   const finalGroupBlock = isFinalGroup
-    ? `\n## Final group — judge the FULL goal\nThis is the LAST group in the plan; nothing is scheduled after it. Do NOT defer any gap to a later group — there is none. Evaluate the build against the ORIGINAL GOAL as a whole, the same question a run-end review asks: if a required capability is not present now, it is a real gap (flag it), never a "not yet built" deferral.`
+    ? featureMode
+      ? `\n## Final group — judge the feature's FULL goal\nThis is the LAST group in this feature's plan; nothing is scheduled after it. Do NOT defer a gap to a later group — there is none. Evaluate the build against the FEATURE's goal as a whole, the same question a run-end review asks: if a capability the feature needs is not present now, it is a real gap (flag it), never a "not yet built" deferral. The product's LATER roadmap steps are a different judgment — never demand them here.`
+      : `\n## Final group — judge the FULL goal\nThis is the LAST group in the plan; nothing is scheduled after it. Do NOT defer any gap to a later group — there is none. Evaluate the build against the ORIGINAL GOAL as a whole, the same question a run-end review asks: if a required capability is not present now, it is a real gap (flag it), never a "not yet built" deferral.`
     : "";
 
   const learningsBlock = learnings
@@ -450,7 +483,7 @@ This oversight seat is the intended consumer of the strong-model tier (ADR 0015)
 
 ORIGINAL GOAL/PROMPT (what the user asked for):
 ${originalPrompt}
-${designBlock}${coherenceBlock}${archBlock}${contractsBlock}${completedBlock}${deliverablesBlock}${unverifiedBlock}${pendingBlock}${remainingGroupsBlock}${finalGroupBlock}
+${designBlock}${coherenceBlock}${archBlock}${contractsBlock}${productContextBlock}${completedBlock}${deliverablesBlock}${unverifiedBlock}${pendingBlock}${remainingGroupsBlock}${finalGroupBlock}
 
 VERIFY COMMANDS (the project's build/test gate; useful to confirm the app builds, but your real test is to RUN it and evaluate it against the goal):
 ${verifyBlock}

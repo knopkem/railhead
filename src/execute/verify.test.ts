@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, expect } from "vitest";
-import { runVerify } from "./verify.ts";
+import { runVerify, assertGreenBaseline } from "./verify.ts";
 
 async function freshCwd(): Promise<string> {
   return mkdtemp(join(tmpdir(), "verify-"));
@@ -66,5 +66,22 @@ describe("runVerify", () => {
       const result = await runVerify(await freshCwd(), ["true"], t);
       expect(result.ok).toBe(true);
     }
+  });
+});
+
+describe("assertGreenBaseline (ADR 0051)", () => {
+  it("returns the verify result when the project is green", async () => {
+    const result = await assertGreenBaseline(await freshCwd(), ["true"]);
+    expect(result?.ok).toBe(true);
+  });
+
+  it("throws with the railhead-fix handoff when the baseline is red", async () => {
+    await expect(assertGreenBaseline(await freshCwd(), ["echo failing test output", "false"])).rejects.toThrow(/verify baseline is already red/);
+    await expect(assertGreenBaseline(await freshCwd(), ["echo failing test output", "false"])).rejects.toThrow('railhead fix "');
+    await expect(assertGreenBaseline(await freshCwd(), ["echo failing test output", "false"])).rejects.toThrow(/failing test output/);
+  });
+
+  it("skips (null) when no verify commands are configured", async () => {
+    expect(await assertGreenBaseline(await freshCwd(), [])).toBeNull();
   });
 });

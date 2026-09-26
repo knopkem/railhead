@@ -185,8 +185,8 @@ export async function replanFromCheckpoint(
   const contracts = await loadContracts(state.cwd);
   const contractsSummary = summarizeContracts(contracts);
   const digest = await readDigest(state.cwd);
-  const designDoc = await git.readProjectDoc(state.cwd, "design");
-  const architectureDoc = await git.readProjectDoc(state.cwd, "architecture");
+  const designDoc = await git.readProjectDoc(state.cwd, join(state.docs_dir, "design.md"));
+  const architectureDoc = await git.readProjectDoc(state.cwd, join(state.docs_dir, "architecture.md"));
 
   const committedTickets = state.tickets
     .filter((t) => t.status === "committed")

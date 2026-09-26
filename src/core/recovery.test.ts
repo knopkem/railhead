@@ -45,6 +45,7 @@ function state(tickets: TicketState[]): RunState {
     branch: "run/x",
     status: "stopped",
     tickets_dir: "/x/issues",
+    docs_dir: "docs",
     config: cfg,
 
     pause_on_failure: true,

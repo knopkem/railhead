@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseRunArgs, parsePlanArgs } from "./args.ts";
+import { parseRunArgs, parsePlanArgs, parseProductArgs } from "./args.ts";
 import { parseGateMode, presetGateModes, presetRunsSharpen, firesMidRun, firesAtRunEnd, severityTriggersRetry, codeReviewRunsMidRun, visualFiresAtRunEnd } from "./config.ts";
 
 describe("parseRunArgs", () => {
@@ -90,6 +90,40 @@ describe("parsePlanArgs", () => {
     expect(a.verbose).toBe(true);
     expect(a.prompt).toBe("build x");
     expect(parsePlanArgs(["build", "x"], "build").verbose).toBe(false);
+  });
+
+  it("feature mode: --step forces a roadmap step and stays out of the prompt", () => {
+    const a = parsePlanArgs(["--step", "2", "-a"], "feature");
+    expect(a.step).toBe(2);
+    expect(a.mode).toBe("feature");
+    expect(a.prompt).toBe("");
+    expect(parsePlanArgs(["--step", "03"], "feature").step).toBe(3);
+  });
+
+  it("build/fix parse --step but leave it to feature mode to honor", () => {
+    expect(parsePlanArgs(["--step", "2", "x"], "build").step).toBe(2);
+    expect(parsePlanArgs(["x"], "build").step).toBeNull();
+    expect(parsePlanArgs(["--step"], "feature").step).toBeNull();
+  });
+});
+
+describe("parseProductArgs", () => {
+  it("joins the non-flag text as the operator's input", () => {
+    const a = parseProductArgs(["a", "hiking log,", "please"]);
+    expect(a.instruction).toBe("a hiking log, please");
+    expect(a.auto).toBe(false);
+  });
+
+  it("keeps --model values out of the input and reads the convenience flags", () => {
+    const a = parseProductArgs(["--model", "opencode/gpt", "-a", "--verbose", "revise", "the arc"]);
+    expect(a.instruction).toBe("revise the arc");
+    expect(a.modelOverride).toBe("opencode/gpt");
+    expect(a.auto).toBe(true);
+    expect(a.verbose).toBe(true);
+  });
+
+  it("an all-flags invocation has an empty instruction (the command throws the guidance)", () => {
+    expect(parseProductArgs(["-a"]).instruction).toBe("");
   });
 });
 

@@ -126,6 +126,11 @@ describe("loadConfig", () => {
     expect(cfg.fix_mode).toBe(true);
   });
 
+  it("defaults feature_mode to false and reads an explicit true (ADR 0051)", async () => {
+    expect((await loadConfig(await makeCwd(null))).feature_mode).toBe(false);
+    expect((await loadConfig(await makeCwd('{"feature_mode":true}'))).feature_mode).toBe(true);
+  });
+
   it("defaults persistent_worker to false (ADR 0020; #39 telemetry: measured cross-session KV reuse was ~2k tokens)", async () => {
     const cfg = await loadConfig(await makeCwd(null));
     expect(cfg.persistent_worker).toBe(false);

@@ -33,7 +33,7 @@ import {
 } from "../config/config.ts";
 import * as git from "../core/git.ts";
 import { latestRun, ledgerDir, listPhases, readState, readStderrLines, writeState, eventPath, findRunForBranch, removeRun } from "../core/ledger.ts";
-import { parsePlanArgs, parseRunArgs, argValue, type PlanArgs } from "../config/args.ts";
+import { parsePlanArgs, parseProductArgs, parseRunArgs, argValue, type PlanArgs, type ProductArgs } from "../config/args.ts";
 import {
   GATES,
   resolveGateModes,
@@ -51,9 +51,10 @@ import {
   checkTicketInvariants,
 } from "../core/recovery.ts";
 import type { TicketState, RunState } from "../core/state.ts";
-import { renderStatusTable, writeReport, elapsedLabel, nowClock, renderNextActionable } from "./overview.ts";
-import { runPlan, maybeGenerateAgentsMd, runSharpenSession } from "../plan/planner.ts";
+import { renderStatusTable, writeReport, elapsedLabel, nowClock, renderNextActionable, renderArcSummary } from "./overview.ts";
+import { runPlan, maybeGenerateAgentsMd, runSharpenSession, runProductSession, deriveFeaturePrompt } from "../plan/planner.ts";
 import { readPlanOrigin } from "../plan/plan-identity.ts";
+import { readProductPlan, writeProductPlan, firstOpenStep, setStepStatus, PRODUCT_DOC } from "../core/product.ts";
 import {
   GRILL_DEPTH_OPTIONS,
   DEPTH_TARGET_QUESTIONS,
@@ -91,6 +92,18 @@ export async function main(argv: string[]): Promise<void> {
       await ensureInitialized(cwd, prefs.auto);
       if (!prefs.prompt) throw new Error("fix requires a description of the bug");
       await cmdBuild(cwd, prefs);
+      break;
+    }
+    case "feature": {
+      const prefs = parsePlanArgs(rest, "feature");
+      await ensureInitialized(cwd, prefs.auto);
+      await cmdFeature(cwd, prefs);
+      break;
+    }
+    case "product": {
+      const args = parseProductArgs(rest);
+      await ensureInitialized(cwd, args.auto);
+      await cmdProduct(cwd, args);
       break;
     }
     case "run": {
@@ -161,8 +174,20 @@ function usage() {
        [--review ...] [--vision ...] [--goal ...] [--structural ...]
        [--sharpen|--no-sharpen] [--yolo] [--verbose]
        turn a bug report into a fix ticket, then run it
-       fix mode forces visual_review.mode: full (bug reproducer is the test, #6)
-       flags: same as build above
+        fix mode forces visual_review.mode: full (bug reproducer is the test, #6)
+        flags: same as build above
+  feature ["<one feature>"] [--step N] [flags as build]
+       [--review ...] [--vision ...] [--goal ...] [--structural ...]
+       [--sharpen|--no-sharpen] [--yolo] [--verbose] [-a]
+       build ONE unattended feature of the product arc (ADR 0051). With no
+        description: the first todo roadmap step in docs/product.md is derived
+        into the feature prompt; --step N forces a step. On finish the step is
+        marked built — test it, flip it to done, or reopen it with feedback.
+  product "<overall vision | steering>" [--model M] [-a] [--verbose]
+       condense (or steer) the product arc — docs/product.md: vision, traits,
+        workflows, the decided stack, and the ordered roadmap of feature
+        steps. The arc persists across months of unattended feature runs;
+        shown before adoption unless -a/--auto.
    init [--free] [-y]                     scaffold a default railhead.json in the current directory
         all five model seats (plan/implement/review/visual/goal) are asked up front and default to
         the opencode default; each is probed once for availability, context limit, vision and reasoning.
@@ -709,7 +734,7 @@ async function ensureVisionGates<M extends { visual: GateMode; goal: GateMode }>
   throw new Error(refusals.map((r) => `vision gate refused: ${r.reason}`).join("\n"));
 }
 
-async function cmdBuild(cwd: string, prefs: PlanArgs): Promise<void> {
+async function cmdBuild(cwd: string, prefs: PlanArgs): Promise<RunOutcome | null> {
   const { prompt, auto, cont, yolo: yoloFlag, verbose, modelOverride, mode, overrides, sharpen } = prefs;
   // Planner/interview mode vocabulary is `build` | `fix`; the CLI's build/fix
   // commands map onto it (sharpen/planner prompts differ in fix mode).
@@ -807,8 +832,16 @@ async function cmdBuild(cwd: string, prefs: PlanArgs): Promise<void> {
     answer: gateAnswer,
   });
   const fixForcesVisual = fixModeForcesVisual(mode === "fix", visualEnabled, models.visual !== null);
+  // ADR 0051: the mode vocabulary lives in one persisted place. `railhead
+  // feature` sets feature_mode (and clears fix_mode — a fix run before it
+  // must not leave bug-diagnosis discipline on the implementer); build/fix
+  // clear feature_mode the same way.
   if (mode === "fix") {
-    await persistPolicy(cwd, config, { fixMode: true });
+    await persistPolicy(cwd, config, { fixMode: true, featureMode: false });
+  } else if (mode === "feature") {
+    await persistPolicy(cwd, config, { fixMode: false, featureMode: true });
+  } else {
+    await persistPolicy(cwd, config, { featureMode: false });
   }
 
   // ADR 0036: a requested vision gate must not run on a model the railhead has
@@ -985,12 +1018,14 @@ async function cmdBuild(cwd: string, prefs: PlanArgs): Promise<void> {
     const acceptedPlan = !auto && mode === "build";
     const startNow = auto || cont || acceptedPlan || await askYesNo("Start this run now?", true);
     if (startNow) {
-      await cmdRun(cwd, [outDir, ...(verbose ? ["--verbose"] : [])], { fromPlan: true });
+      return await cmdRun(cwd, [outDir, ...(verbose ? ["--verbose"] : [])], { fromPlan: true });
     } else {
       console.log("planned; nothing run. start later with: railhead run <tickets-dir>");
+      return null;
     }
   } else {
     console.log("planned; nothing run. start later with: railhead run <tickets-dir>");
+    return null;
   }
 }
 
@@ -1083,7 +1118,118 @@ function modelSeatFlags(argv: string[]): string[] {
   return argv.filter((a) => !consumed.has(a));
 }
 
-async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } = {}): Promise<void> {
+/** What cmdRun/cmdBuild hand back to orchestration callers (`cmdFeature`):
+ * the run id and its final state. Null when nothing ran. */
+interface RunOutcome {
+  runId: string;
+  state: RunState;
+}
+
+/**
+ * ADR 0051: `railhead feature` — one unattended feature run against the
+ * product arc. Without a description, the first `todo` roadmap step is
+ * derived into the feature prompt; with `--step N`, that step instead. When
+ * the run finishes, the step is marked `built` in the arc — the human tests
+ * the outcome the next morning, flips it to `done`, or reopens it with
+ * feedback that the next attempt folds in. A one-off description bypasses
+ * the arc entirely (like `build`, in feature posture).
+ */
+async function cmdFeature(cwd: string, prefs: PlanArgs): Promise<void> {
+  const description = prefs.prompt.trim();
+  if (description) {
+    await cmdBuild(cwd, { ...prefs, prompt: description, mode: "feature" });
+    return;
+  }
+  const arc = await readProductPlan(cwd);
+  if (!arc) {
+    throw new Error(`no product arc (${PRODUCT_DOC}) — pass a feature description, or design the arc with \`railhead product "<your product vision>"\` first`);
+  }
+  const wanted = prefs.step;
+  const step = wanted !== null ? arc.steps.find((s) => s.number === wanted) : firstOpenStep(arc);
+  if (!step) {
+    throw new Error(wanted !== null
+      ? `step ${wanted} does not exist in ${PRODUCT_DOC} (found: ${arc.steps.map((s) => s.number).join(", ") || "none"})`
+      : `every roadmap step is built or done — add the next step with \`railhead product "<steering>"\``);
+  }
+  if (step.status !== "todo") {
+    throw new Error(`step ${step.number} — ${step.title} is ${step.status}, not todo. Reopen it with your feedback in ${PRODUCT_DOC} to rebuild it.`);
+  }
+  if (!step.description.trim()) {
+    throw new Error(`step ${step.number} ("${step.title}") has no description — write one in ${PRODUCT_DOC} so the derivation has material`);
+  }
+  const config = await loadConfig(cwd);
+  const models = resolveModels(config, prefs.modelOverride ? ["--model", prefs.modelOverride] : []);
+  console.log(`arc: deriving the feature prompt for step ${step.number} — ${step.title}`)
+  const prompt = await deriveFeaturePrompt({
+    cwd,
+    step: { number: step.number, title: step.title, description: step.description, feedback: step.feedback },
+    plan: arc,
+    model: models.plan ?? null,
+    maxContextTokens: config.max_context_tokens ?? undefined,
+  });
+  console.log(`\nfeature prompt (step ${step.number} — ${step.title}):\n\n${prompt}\n`);
+  if (!prefs.auto) {
+    const go = await askYesNo("Build this step now?", true);
+    if (!go) {
+      console.log("not built — `railhead feature` derives it again next time.");
+      return;
+    }
+  }
+  // The arc's update commits on the product branch now, so the upcoming
+  // per-ticket commits stay pure feature diffs (stage-by-path only — never
+  // weaving in-progress worktree changes into the commit).
+  await git.commitPaths(cwd, [PRODUCT_DOC], `railhead: product arc — step ${step.number} (${step.title})`);
+  const end = await cmdBuild(cwd, { ...prefs, prompt, mode: "feature" });
+  if (!end) {
+    console.log(`arc: step ${step.number} ran under \`railhead run\` — flip it to built in ${PRODUCT_DOC} once the run finishes.`);
+    return;
+  }
+  if (end.state.status === "finished") {
+    await setStepStatus(cwd, step.number, { status: "built", runId: end.runId });
+    console.log(`arc: step ${step.number} — ${step.title} is built (run ${end.runId}).`);
+    console.log(`Test it, then either flip it to done in ${PRODUCT_DOC}, or reopen it with your feedback and run \`railhead feature\` again.`);
+  } else {
+    console.log(`arc: step ${step.number} NOT marked built — the run ended with status "${end.state.status}". Inspect with \`railhead status\`, fix what stopped it, then run \`railhead feature\` again.`);
+  }
+}
+
+/**
+ * ADR 0051: `railhead product` — condense the operator's input into the
+ * product arc (or steer the existing one). The session never writes on its
+ * own: the parsed arc is shown, adoption is explicit (or automatic under
+ * -a/--auto).
+ */
+async function cmdProduct(cwd: string, args: ProductArgs): Promise<void> {
+  if (!args.instruction) {
+    throw new Error(`product requires the vision or steering text, e.g. \`railhead product "a hiking log my family actually opens; first a rough mvp, then search, then shared albums"\``);
+  }
+  const config = await loadConfig(cwd);
+  const models = resolveModels(config, args.modelOverride ? ["--model", args.modelOverride] : []);
+  const existing = await readProductPlan(cwd);
+  console.log(existing ? "product session — steering the existing arc" : "product session — authoring the product arc");
+  const plan = await runProductSession({
+    cwd,
+    instruction: args.instruction,
+    model: models.plan ?? null,
+    maxContextTokens: config.max_context_tokens ?? undefined,
+    verbose: args.verbose,
+  });
+  console.log();
+  console.log(renderArcSummary(plan));
+  console.log();
+  if (!args.auto) {
+    const adopt = await askYesNo(`Adopt this arc into ${PRODUCT_DOC}? (every future \`railhead feature\` steers against it)`, true);
+    if (!adopt) {
+      console.log("discarded — nothing written.");
+      return;
+    }
+  }
+  await writeProductPlan(cwd, plan);
+  console.log(`wrote ${PRODUCT_DOC}.`);
+  console.log(`next: \`railhead feature\` builds the first todo step unattended. Commit ${PRODUCT_DOC} whenever the arc changes.`);
+}
+
+async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } = {}): Promise<RunOutcome | null> {
   const args = parseRunArgs(rest);
   if (!args.ticketsDir) throw new Error("run requires a tickets directory");
   const ticketsDir = isAbsolute(args.ticketsDir) ? args.ticketsDir : join(cwd, args.ticketsDir);
@@ -1161,7 +1307,7 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } 
       const refusal = resumeRefusal(cwd);
       if (refusal) {
         printHaltRefusal(refusal.path, refusal.reason);
-        return;
+        return null;
       }
       console.log(`found interrupted run ${prior!.runId} on branch ${branch} — resuming`);
       // Re-apply the FRESH railhead.json config (already loaded + flag-overridden
@@ -1171,8 +1317,8 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } 
       prior!.state.config = config;
       prior!.state._models = resolveModels(prior!.state.config, []);
       await detectContextLimit(prior!.state);
-      await resumeRun(cwd, prior!.runId, ledgerDir(cwd, prior!.runId), prior!.state);
-      return;
+      const resumed = await resumeRun(cwd, prior!.runId, ledgerDir(cwd, prior!.runId), prior!.state);
+      return { runId: prior!.runId, state: resumed };
     }
   }
 
@@ -1208,6 +1354,7 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean } 
   console.log("\n" + renderStatusTable(final));
   console.log(`total time: ${elapsedLabel(final.started_at, final.updated_at)}`);
   console.log(`report: .railhead/${runId}/report.md`);
+  return { runId, state: final };
 }
 
 async function cmdResume(cwd: string, runIdArg?: string): Promise<void> {
@@ -1298,7 +1445,7 @@ async function resumeRun(
   runId: string,
   dir: string,
   state: RunState,
-): Promise<void> {
+): Promise<RunState> {
   const head = await git.headCommit(cwd).catch(() => "");
   const origin = await readPlanOrigin(join(state.tickets_dir, "..")).catch(() => null);
   const subjects = new Set(head ? await git.commitSubjectsSince(cwd, origin?.base_sha ?? null) : []);
@@ -1375,9 +1522,15 @@ async function resumeRun(
   await writeReport(cwd, runId, final);
   console.log("\n" + renderStatusTable(final));
   console.log(`total time: ${elapsedLabel(final.started_at, final.updated_at)}`);
+  return final;
 }
 
 async function cmdStatus(cwd: string, runIdArg?: string): Promise<void> {
+  const arc = await readProductPlan(cwd);
+  if (arc) {
+    console.log(renderArcSummary(arc));
+    console.log();
+  }
   const runId = runIdArg ?? (await latestRun(cwd));
   const state = await readState(ledgerDir(cwd, runId));
   console.log(renderStatusTable(state));

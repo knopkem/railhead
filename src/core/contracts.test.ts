@@ -84,6 +84,17 @@ describe("summarizeContracts / renderContracts", () => {
     expect(summarizeContracts(EMPTY_INDEX)).toContain("greenfield");
   });
 
+  it("existing-repo framing replaces the greenfield line: an empty index is unindexed surface, not absence", () => {
+    const summary = summarizeContracts(EMPTY_INDEX, "existing-repo");
+    expect(summary).not.toContain("greenfield");
+    expect(summary).toContain("not yet indexed");
+  });
+
+  it("a non-empty index is unaffected by the framing", () => {
+    const idx = mergeContracts(EMPTY_INDEX, [greet], "01");
+    expect(summarizeContracts(idx, "existing-repo")).toContain("greet");
+  });
+
   it("renders a one-line summary", () => {
     const idx = mergeContracts(EMPTY_INDEX, [greet], "01");
     expect(summarizeContracts(idx)).toContain("greet");

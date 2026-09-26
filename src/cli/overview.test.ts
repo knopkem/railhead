@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { buildReport, renderStatusTable, elapsedLabel, renderNextActionable } from "./overview.ts";
+import { buildReport, renderStatusTable, elapsedLabel, renderNextActionable, renderArcSummary } from "./overview.ts";
+import { parseProductPlan } from "../core/product.ts";
 import type { RunState, TicketState } from "../core/state.ts";
 
 function makeState(ctxPeak: number, budget?: number): RunState {
@@ -9,6 +10,7 @@ function makeState(ctxPeak: number, budget?: number): RunState {
     branch: "run/x",
     status: "finished",
     tickets_dir: "/tmp/x/issues",
+    docs_dir: "docs",
     config: {
       verify: [],
       smoke: [],
@@ -184,6 +186,7 @@ function nextState(tickets: TicketState[], overrides: Partial<RunState> = {}): R
     branch: "run/x",
     status: "running",
     tickets_dir: "/tmp/x/issues",
+    docs_dir: "docs",
     config: {
       verify: [],
       smoke: [],
@@ -385,5 +388,43 @@ describe("buildReport — prompt cache formatting (#130)", () => {
       cached: 32,
     });
     expect(r).toContain("- 01-contracts-x: 32/26.2k first-step tokens reused");
+  });
+});
+
+describe("renderArcSummary (ADR 0051)", () => {
+  const ARC = `
+# Trail Tracker
+
+## Roadmap
+
+### 1 — Rough MVP
+
+**Status:** done
+
+**Run:** run-20260901
+
+The first slice.
+
+### 2 — Search
+
+**Status:** todo
+
+Search by tag.
+
+### 3 — Albums
+
+**Status:** todo
+`;
+  it("one line per step with statuses, the recorded run, and the frontier hint", () => {
+    const s = renderArcSummary(parseProductPlan(ARC).plan);
+    expect(s).toContain("product arc: Trail Tracker — 3 step(s)");
+    expect(s).toContain("1. Rough MVP [done] (run run-20260901)");
+    expect(s).toContain("2. Search [todo]");
+    expect(s).toContain("next: step 2 — Search");
+  });
+
+  it("an empty arc names the way forward instead of a ghost frontier", () => {
+    const s = renderArcSummary(parseProductPlan("# Empty\n\n## Roadmap\n").plan);
+    expect(s).toContain("every step is built or done");
   });
 });

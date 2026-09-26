@@ -8,6 +8,7 @@ import { loadTickets } from "../core/ticket.ts";
 import { touchesVisualSurface } from "../context/surface.ts";
 import { detectGameCanvas } from "../core/project-assets.ts";
 import { collectCacheStats, type RunCacheStats } from "../core/telemetry.ts";
+import { firstOpenStep, PRODUCT_DOC, type ProductPlan } from "../core/product.ts";
 
 const STATUS_SYM: Record<string, string> = {
   ready: "○",
@@ -433,4 +434,16 @@ export function renderNextActionable(state: RunState): string {
   }
 
   return lines.join("\n").trimEnd();
+}
+/** The product arc's status view (ADR 0051): one line per roadmap step plus
+ * the frontier hint — the thing `railhead status` shows above run tables and
+ * `railhead product` prints before adoption. */
+export function renderArcSummary(plan: ProductPlan): string {
+  const lines = [`product arc: ${plan.name} — ${plan.steps.length} step(s)`];
+  for (const s of plan.steps) {
+    lines.push(`  ${s.number}. ${s.title} [${s.status}]${s.runId ? ` (run ${s.runId})` : ""}${s.feedback ? "\n     reopened with feedback — the next attempt folds it in" : ""}`);
+  }
+  const open = firstOpenStep(plan);
+  lines.push(open ? `  next: step ${open.number} — ${open.title}` : `  every step is built or done — extend the arc with \`railhead product "…"\``);
+  return lines.join("\n");
 }

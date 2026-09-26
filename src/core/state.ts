@@ -192,6 +192,13 @@ export interface RunState {
   branch: string;
   status: RunStatus;
   tickets_dir: string;
+  /** The directory (relative to `cwd`, or absolute when the tickets dir was)
+   * the run's plan docs (design.md, architecture.md) live in. Build/fix runs
+   * use the repo-root `docs/`; feature runs (ADR 0051) use their plan namespace
+   * under `.scratch/<slug>/docs` — a feature run's builder, reviewers, and
+   * gates must never be pointed at a stale project-root plan. Absent on
+   * legacy state files: normalization defaults it to `docs`. */
+  docs_dir: string;
   config: RailheadConfig;
   pause_on_failure: boolean;
   verbose: boolean;
@@ -294,6 +301,9 @@ export interface RunMeta {
   cwd: string;
   branch: string;
   tickets_dir: string;
+  /** The run's plan-docs directory; resolved by startRun (feature runs point
+   * at their ticket store's sibling docs). Optional — defaults to `docs`. */
+  docs_dir?: string;
   config: RailheadConfig;
   pause_on_failure: boolean;
   verbose: boolean;
@@ -310,6 +320,7 @@ export function createRunState(meta: RunMeta): RunState {
     branch: meta.branch,
     status: "running",
     tickets_dir: meta.tickets_dir,
+    docs_dir: meta.docs_dir ?? "docs",
     config: meta.config,
     pause_on_failure: meta.pause_on_failure,
     verbose: meta.verbose,

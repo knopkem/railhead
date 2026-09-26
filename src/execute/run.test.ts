@@ -50,7 +50,7 @@ vi.mock("./executor.ts", async (importOriginal) => {
 });
 
 import { executeOpendCode, startPersistentWorker, stopPersistentWorker } from "./executor.ts";
-import { assembleBranch, detectGroupCheckpoints, nextTicketNumber, processTicket, protectedPaths, runLoop, ticketBudgetStop } from "./run.ts";
+import { assembleBranch, detectGroupCheckpoints, nextTicketNumber, processTicket, protectedPaths, resolveDocsRoot, runLoop, ticketBudgetStop } from "./run.ts";
 import { goalCheckpointsToFire } from "../gates/goal-loop.ts";
 import { structuralCheckpointsToFire } from "../gates/structural-loop.ts";
 import { clearStop, requestStop } from "./stop.ts";
@@ -181,6 +181,36 @@ describe("assembleBranch", () => {
 
   it("falls back to 'tickets' when the path has no usable parent segment", () => {
     expect(assembleBranch("/repo", "issues")).toBe("run/tickets");
+  });
+});
+
+describe("resolveDocsRoot (ADR 0051)", () => {
+  it("a feature run's ticket-store sibling docs dir wins when it exists", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "docsroot-"));
+    await mkdir(join(cwd, ".scratch", "add-search", "docs"), { recursive: true });
+    await writeFile(join(cwd, ".scratch", "add-search", "docs", "design.md"), "# Feature design", "utf8");
+    expect(await resolveDocsRoot(cwd, join(cwd, ".scratch", "add-search", "issues"))).toBe(".scratch/add-search/docs");
+  });
+
+  it("a relative tickets dir resolves the same way", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "docsroot-"));
+    await mkdir(join(cwd, ".scratch", "add-search", "docs"), { recursive: true });
+    await writeFile(join(cwd, ".scratch", "add-search", "docs", "design.md"), "x", "utf8");
+    expect(await resolveDocsRoot(cwd, join(".scratch", "add-search", "issues"))).toBe(join(".scratch", "add-search", "docs"));
+  });
+
+  it("without a sibling docs dir it falls back to the repo-root docs", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "docsroot-"));
+    expect(await resolveDocsRoot(cwd, join(cwd, ".scratch", "whatever", "issues"))).toBe("docs");
+  });
+
+  it("a stale tickets dir outside cwd resolves to its absolute sibling (never sanitized away)", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "docsroot-out-"));
+    await mkdir(join(outside, "docs"), { recursive: true });
+    await writeFile(join(outside, "docs", "design.md"), "x", "utf8");
+    const cwd = await mkdtemp(join(tmpdir(), "docsroot-"));
+    const resolved = await resolveDocsRoot(cwd, join(outside, "issues"));
+    expect(resolved).toBe(join(outside, "docs"));
   });
 });
 

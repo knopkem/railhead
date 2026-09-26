@@ -190,7 +190,7 @@ describe("persistPolicy", () => {
     expect(raw.visual_review).toEqual({ mode: "light", max_rounds: 2, custom: "keep" });
   });
 
-  it("persists yolo_permissions / fix_mode only when they change", async () => {
+  it("persists yolo_permissions / fix_mode / feature_mode only when they change", async () => {
     const cwd = await makeCwd(JSON.stringify({}));
     const config = await loadConfig(cwd);
     await persistPolicy(cwd, config, { yolo: true, fixMode: true });
@@ -202,6 +202,11 @@ describe("persistPolicy", () => {
     const raw = await readRaw(cwd);
     expect(raw.yolo_permissions).toBe(true);
     expect(raw.fix_mode).toBe(true);
+
+    await persistPolicy(cwd, config, { featureMode: true });
+    const after = await readRaw(cwd);
+    expect(after.feature_mode).toBe(true);
+    expect((await loadConfig(cwd)).feature_mode).toBe(true);
   });
 
   it("leaves decisions that were not provided untouched", async () => {

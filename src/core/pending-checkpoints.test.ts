@@ -14,6 +14,7 @@ function state(over: Partial<RunState> = {}): RunState {
     branch: "run/x",
     status: "running",
     tickets_dir: "/x/issues",
+    docs_dir: "docs",
     config: { verify: [], smoke: [], max_retries: 3, max_review_retries: null, infra_backoff_sec: [], model: { plan: null, implement: null, review: null, visual: null, goal: null, extract: null } },
     pause_on_failure: false,
     verbose: false,

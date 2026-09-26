@@ -156,6 +156,16 @@ describe("generateCorrectiveTickets — one ticket per [BLOCKER], kind-parameter
     expect(out[0]!.criteria![0]).toMatch(/Duplicated greeting/);
     expect(out[0].what).toContain("docs/architecture.md");
   });
+
+  it("a feature run's docs_dir retargets the re-read references (ADR 0051)", () => {
+    const out = generateCorrectiveTickets("structural", ["[BLOCKER] Duplicated greeting logic in utils.ts and greeter.ts"], ".scratch/add-search/docs");
+    expect(out[0].what).toContain(".scratch/add-search/docs/architecture.md");
+    // Not the root path standing alone (the namespaced path contains it as a
+    // substring — hence the boundary lookbehind).
+    expect(out[0].what).not.toMatch(/(?<![\w/.-])docs\/architecture\.md/);
+    const goal = generateCorrectiveTickets("goal", ["[BLOCKER] the goal gap"], ".scratch/add-search/docs");
+    expect(goal[0].what).toContain(".scratch/add-search/docs/design.md");
+  });
 });
 
 describe("nextTicketNumber", () => {

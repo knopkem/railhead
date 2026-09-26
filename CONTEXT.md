@@ -50,3 +50,12 @@ _Avoid_: memory, note, fact
 
 **Charter** (a.k.a. Coherence Charter): the terse, normative, cross-ticket visual design contract authored by the planner at plan time (a `## Coherence contract` subsection of the `$DESIGN` block), persisted as `docs/coherence.md`. Three fixed sections — Visual tokens, Layout model, Chrome rules. Surface Tickets are told to honor it exactly rather than invent their own chrome; the Goal Reviewer revises it via `CHARTER:` markers (ADR 0028).
 _Avoid_: style guide, design system
+
+**Product arc**: the durable overview a product is built across (`docs/product.md`, ADR 0051) — the decided vision, workflows, traits, stack, and an ordered Roadmap of Steps. Authored/steered via `railhead product` (one condense call, explicit adoption), hand-editable; railhead owns the format like the ticket format. Formats the goal for every feature run; the coherence charter, contracts index, learnings, and digest carry the rest of the cross-run consistency.
+_Avoid_: roadmap file, backlog, product spec
+
+**Roadmap Step**: one feature-sized increment of the Product arc, `todo → built (run id) → done`; reopened as `todo` with human feedback that the next attempt folds in. Doc order is the execution order, like Tickets.
+_Avoid_: milestone, epic, item
+
+**Feature Run**: one Run whose plan builds exactly ONE Roadmap Step into the existing product (`railhead feature`, plan mode `feature`). Unattended like a build, then stops: the human tests the outcome and steers. Its plan docs live in the run's `.scratch/<slug>/docs` namespace (`state.docs_dir`); the red-baseline rule (verify must be green before it starts) and the existing-repo planner posture hold. A one-off `railhead feature "<desc>"` bypasses the arc.
+_Avoid_: incremental build, sprint

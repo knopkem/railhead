@@ -77,6 +77,7 @@ export function normalizeState(state: RunState): RunState {
   if (typeof state.halt_reason !== "string" && state.halt_reason !== null) state.halt_reason = undefined;
   if (typeof state.stop_reason !== "string" && state.stop_reason !== null) state.stop_reason = undefined;
   if (typeof state.visual_pending !== "string") state.visual_pending = null;
+  if (typeof state.docs_dir !== "string" || !state.docs_dir) state.docs_dir = "docs";
   if (!state.pending_checkpoints) state.pending_checkpoints = { goal: [], structural: [] };
   if (!Array.isArray(state.pending_checkpoints.goal)) state.pending_checkpoints.goal = [];
   if (!Array.isArray(state.pending_checkpoints.structural)) state.pending_checkpoints.structural = [];

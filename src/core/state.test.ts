@@ -19,6 +19,7 @@ function make(tickets: any[]): RunState {
     branch: "run/x",
     status: "running",
     tickets_dir: "/x/issues",
+    docs_dir: "docs",
     config: cfg,
 
     pause_on_failure: false,
@@ -43,11 +44,19 @@ describe("frontier", () => {
   });
 });
 
-describe("builder state record (ADR 0022 stage 3, #84)", () => {
-  it("newBuilderState starts at zero checkpoints and no restarts", () => {
-    expect(newBuilderState()).toEqual({ checkpoint_count: 0, restarts: [] });
+describe("docs_dir (ADR 0051)", () => {
+  it("createRunState defaults a missing meta docs_dir to the repo-root docs", () => {
+    const state = createRunState({ cwd: "/x", branch: "run/x", tickets_dir: "/x/issues", config: cfg, pause_on_failure: false, verbose: false, quiet: false });
+    expect(state.docs_dir).toBe("docs");
   });
 
+  it("createRunState carries the caller-resolved docs_dir through", () => {
+    const state = createRunState({ cwd: "/x", branch: "run/x", tickets_dir: "/x/.scratch/add-search/issues", docs_dir: ".scratch/add-search/docs", config: cfg, pause_on_failure: false, verbose: false, quiet: false });
+    expect(state.docs_dir).toBe(".scratch/add-search/docs");
+  });
+});
+
+describe("builder state record (ADR 0022 stage 3, #84)", () => {
   it("createRunState always seeds a builder record (the durable session is the only engine)", () => {
     const meta: RunMeta = {
       cwd: "/x",

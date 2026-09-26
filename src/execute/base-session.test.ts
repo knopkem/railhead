@@ -44,13 +44,14 @@ async function makeRepo(docs: Record<string, string> = {}): Promise<string> {
   return cwd;
 }
 
-async function makeState(cwd: string, config: Partial<RailheadConfig> = {}): Promise<{ state: RunState; ledger: string }> {
+async function makeState(cwd: string, config: Partial<RailheadConfig> = {}, docsDir?: string): Promise<{ state: RunState; ledger: string }> {
   const ledger = join(cwd, ".railhead", "run-test");
   await initLedger(ledger);
   const state = createRunState({
     cwd,
     branch: "run/test",
     tickets_dir: join(cwd, ".scratch", "issues"),
+    docs_dir: docsDir,
     config: { ...DEFAULT_CONFIG, ...config },
     pause_on_failure: false,
     verbose: false,
@@ -87,6 +88,25 @@ describe("ensureBaseSession (#133)", () => {
     expect(prompt).toContain("MISSION: build a greetable CLI");
     expect(prompt).toContain("AGENTS.md");
     expect(prompt).toContain("docs/architecture.md");
+  });
+
+  // ADR 0051: a feature run's plan docs live in its ticket-store namespace;
+  // the canonical preamble reads from there, never the (possibly stale)
+  // project-root docs.
+  it("a feature run with docs_dir set reads its plan docs from that directory", async () => {
+    const cwd = await makeRepo({ "docs/architecture.md": "ROOT_ARCHITECTURE_STALE_TEXT" });
+    await mkdir(join(cwd, ".scratch", "f", "docs"), { recursive: true });
+    await writeFile(join(cwd, ".scratch", "f", "docs", "design.md"), "FEATURE_DESIGN_FRESH_TEXT", "utf8");
+    await writeFile(join(cwd, ".scratch", "f", "docs", "architecture.md"), "FEATURE_ARCHITECTURE_FRESH_TEXT", "utf8");
+    const { state, ledger } = await makeState(cwd, {}, ".scratch/f/docs");
+    mockExec.mockResolvedValue(okResult({ sessionId: "ses_feat1" }));
+
+    await ensureBaseSession({ state, ledger, model: null, contextTokens: null });
+
+    const prompt = mockExec.mock.calls[0]![0] as string;
+    expect(prompt).toContain("FEATURE_DESIGN_FRESH_TEXT");
+    expect(prompt).toContain("FEATURE_ARCHITECTURE_FRESH_TEXT");
+    expect(prompt).not.toContain("ROOT_ARCHITECTURE_STALE_TEXT");
   });
 
   it("reuses the base within the process without a second model call", async () => {

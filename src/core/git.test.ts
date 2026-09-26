@@ -5,6 +5,7 @@ import { afterEach, describe, it, expect } from "vitest";
 import {
   cleanWorktree,
   commit,
+  commitPaths,
   commitSubjectsSince,
   commitOrReuseHead,
   ensureInitialCommit,
@@ -227,8 +228,33 @@ describe("commitSubjectsSince", () => {
   });
 });
 
-describe("cleanWorktree", () => {
-  it("preserves plan-time config writes to a protected tracked file (railhead.json) across reset --hard", async () => {
+describe("commitPaths", () => {
+  it("commits ONLY the named paths, leaving other dirty files untouched", async () => {
+    const cwd = await freshRepo();
+    await writeFile(join(cwd, "base.txt"), "b\n");
+    await commit(cwd, "baseline");
+    // An in-progress feature file stays dirty; only the arc update commits.
+    await writeFile(join(cwd, "wip.txt"), "unfinished\n");
+    await mkdir(join(cwd, "docs"), { recursive: true });
+    await writeFile(join(cwd, "docs", "product.md"), "# Arc\n");
+    const sha = await commitPaths(cwd, ["docs/product.md"], "railhead: product arc");
+    expect(sha).not.toBeNull();
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const exec = promisify(execFile);
+    const { stdout: status } = await exec("git", ["status", "--porcelain"], { cwd });
+    expect(status.trim()).toBe("?? wip.txt");
+  });
+
+  it("returns null when the named paths are clean (nothing committed)", async () => {
+    const cwd = await freshRepo();
+    await writeFile(join(cwd, "base.txt"), "b\n");
+    await commit(cwd, "baseline");
+    expect(await commitPaths(cwd, ["base.txt"], "no change")).toBeNull();
+  });
+});
+
+describe("cleanWorktree", () => {  it("preserves plan-time config writes to a protected tracked file (railhead.json) across reset --hard", async () => {
     const cwd = await freshRepo();
     // Simulate: railhead.json is committed at scaffold time with mode:off,
     // then `railhead build` writes mode:full to disk (persistPolicy).

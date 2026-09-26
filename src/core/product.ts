@@ -235,6 +235,22 @@ export function renderProductPlan(plan: ProductPlan): string {
   return out;
 }
 
+/** The arc's decided prose for model prompts — never the roadmap. The
+ * roadmap is run mechanics; a feature-plan prompt needs the identity and the
+ * decided stack, not the step list. */
+export function renderProductBrief(plan: ProductPlan): string {
+  const sections: Array<[string, string | undefined]> = [
+    ["Vision", plan.vision],
+    ["Workflows", plan.workflows],
+    ["Traits", plan.traits],
+    ["Stack", plan.stack],
+  ];
+  return sections
+    .filter(([, body]) => body?.trim())
+    .map(([heading, body]) => `## ${heading}\n${body!.trim()}`)
+    .join("\n\n");
+}
+
 export async function readProductPlan(cwd: string): Promise<ProductPlan | null> {
   let raw: string;
   try {

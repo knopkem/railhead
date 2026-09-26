@@ -278,7 +278,16 @@ export interface RailheadConfig {
     * hatch collapses to "mark the ticket inconclusive"). False for `railhead
     * plan` / `railhead run`.
     */
-   fix_mode?: boolean;
+    fix_mode?: boolean;
+   /**
+    * Feature mode (ADR 0051): the run extends an EXISTING product — the
+    * planner gets the integration posture (no scaffold), the feature plan
+    * docs live in the run's `.scratch/<slug>/docs` namespace, the run's
+    * start checks the verify baseline is green, and the goal review judges
+    * this run's feature scope against the product arc. Set by `railhead
+    * feature`; `railhead build` clears it.
+    */
+   feature_mode?: boolean;
   /**
    * When true, the railhead writes a project-local `opencode.json` whose
    * `permission` block accepts ALL tool calls and external directories — no
@@ -771,6 +780,7 @@ export const DEFAULT_CONFIG: RailheadConfig = {
   persistent_worker: false,
   checkpoint_granularity: "product",
   fix_mode: false,
+  feature_mode: false,
   art_direction: true,
   model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: DEFAULT_MODEL, visual: null, extract: null, goal: null },
   code_review: { mode: "off", inherit_tools: true },
@@ -858,6 +868,7 @@ export async function loadConfig(cwd: string): Promise<RailheadConfig> {
       persistent_worker: j.persistent_worker ?? DEFAULT_CONFIG.persistent_worker,
       checkpoint_granularity: parseCheckpointGranularity(j.checkpoint_granularity) ?? DEFAULT_CONFIG.checkpoint_granularity,
       fix_mode: j.fix_mode ?? DEFAULT_CONFIG.fix_mode,
+      feature_mode: j.feature_mode ?? DEFAULT_CONFIG.feature_mode,
       art_direction: j.art_direction === undefined ? DEFAULT_CONFIG.art_direction : j.art_direction === true,
       model: {
         plan: model.plan ?? DEFAULT_MODEL,

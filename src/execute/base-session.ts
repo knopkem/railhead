@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import { renderPreamble, renderTask } from "../context/preamble.ts";
 import { readPreambleDoc } from "../context/prompt.ts";
 import { writeState } from "../core/ledger.ts";
@@ -69,8 +70,8 @@ async function canonicalPreamble(state: RunState): Promise<string> {
   const [agents, context, design, architecture, coherence] = await Promise.all([
     readPreambleDoc(state.cwd, "AGENTS.md"),
     readPreambleDoc(state.cwd, "CONTEXT.md"),
-    readPreambleDoc(state.cwd, "docs/design.md"),
-    readPreambleDoc(state.cwd, "docs/architecture.md"),
+    readPreambleDoc(state.cwd, join(state.docs_dir, "design.md")),
+    readPreambleDoc(state.cwd, join(state.docs_dir, "architecture.md")),
     readPreambleDoc(state.cwd, "docs/coherence.md"),
   ]);
   return renderPreamble({

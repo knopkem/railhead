@@ -4,8 +4,8 @@ The command entry point and everything that renders to a human.
 
 ## Seams
 
-- `cli.ts` — `main` dispatch (`init`/`build`/`fix`/`run`/`resume`/`status`/`next`/`log`/`reset`/`diagnose`), interactive prompts, usage text, wiring of config/policy/recovery/run. Bundled by esbuild to `dist/cli.js`.
-- `overview.ts` — status table, run report (`buildReport`, `writeReport`), `renderNextActionable` (the next ready ticket in order), and `nowClock`.
+- `cli.ts` — `main` dispatch (`init`/`build`/`fix`/`feature`/`product`/`run`/`resume`/`status`/`next`/`log`/`reset`/`diagnose`), interactive prompts, usage text, wiring of config/policy/recovery/run. Bundled by esbuild to `dist/cli.js`. `cmdFeature` owns the arc transaction: derive the first todo step → build → mark the step `built` only when the run finishes (run outcomes come back as `RunOutcome` from `cmdRun`/`cmdBuild`).
+- `overview.ts` — status table, run report (`buildReport`, `writeReport`), `renderNextActionable` (the next ready ticket in order), `renderArcSummary` (the product arc's status view), and `nowClock`.
 - `live.ts` — one-line live event rendering during a run.
 - `transcript.ts` — full phase transcript for `railhead log`.
 - `diagnose.ts` — `railhead diagnose screenshots` probe.

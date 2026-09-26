@@ -22,6 +22,7 @@ import { requiresRealInputEvidence, type ProjectInterface } from "../config/inte
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { readProductPlan, renderProductBrief } from "../core/product.ts";
 import { nowClock } from "../cli/overview.ts";
 import { readVisionCapabilityFor } from "../execute/vision-probe.ts";
 import { addPendingCheckpoint, clearPendingCheckpoint } from "../core/pending-checkpoints.ts";
@@ -204,8 +205,8 @@ export async function runGoalReview(
   const mission = state.original_prompt ?? "(no mission declared)";
   const runHint = runCommandFromVerify(state.config.verify, allTickets);
 
-  const designDoc = await git.readProjectDoc(state.cwd, "docs/design.md");
-  const architectureDoc = await git.readProjectDoc(state.cwd, "docs/architecture.md");
+  const designDoc = await git.readProjectDoc(state.cwd, join(state.docs_dir, "design.md"));
+  const architectureDoc = await git.readProjectDoc(state.cwd, join(state.docs_dir, "architecture.md"));
   const coherenceDoc = await git.readProjectDoc(state.cwd, "docs/coherence.md");
   const contractsIndex = await loadContracts(state.cwd);
   const contractsSummary = summarizeContracts(contractsIndex);
@@ -273,6 +274,12 @@ export async function runGoalReview(
     console.log(`[${nowClock()}] goal review: probe ${r.status.toUpperCase()} — ${r.entry.behavior}`);
   }
 
+  // ADR 0051: a feature run's goal reviewer judges the feature, scoped by the
+  // product arc. The brief + roadmap ride the prompt only in feature mode —
+  // build goals keep today's shape.
+  const featureMode = state.config.feature_mode === true;
+  const arc = featureMode ? await readProductPlan(state.cwd) : null;
+
   const prompt = buildGoalReviewPrompt({
     originalPrompt: state.original_prompt ?? mission,
     designDoc,
@@ -295,6 +302,11 @@ export async function runGoalReview(
     unverifiedCriteria: unverifiedCriteria.length > 0 ? unverifiedCriteria : undefined,
     coreLoopReady,
     advisory,
+    featureMode,
+    productBrief: arc ? renderProductBrief(arc) : null,
+    roadmapSummary: arc
+      ? arc.steps.map((s) => `${s.number} — ${s.title} [${s.status}]`).join("\n")
+      : null,
     registeredProbes: probeResults.length > 0
       ? probeResults.map((r) => ({ behavior: r.entry.behavior, command: r.entry.command, expect: r.entry.expect, status: r.status, output: r.output }))
       : undefined,

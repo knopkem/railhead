@@ -35,6 +35,28 @@ export async function runVerify(
   return { ok: true, outputs };
 }
 
+/**
+ * ADR 0051: a feature run builds on what exists, so its baseline must be
+ * green before ticket 01 — otherwise the plan's first failure lands on a
+ * pre-existing red and burns the feature's retry budget on someone else's
+ * bug (ADR 0006's premise, checked instead of assumed). Throws with the
+ * `railhead fix` handoff the operator asked for; an empty verify list is
+ * skipped — there is nothing that can be red.
+ */
+export async function assertGreenBaseline(
+  cwd: string,
+  commands: string[],
+  timeoutSec?: number | null,
+): Promise<VerifyResult | null> {
+  if (commands.length === 0) return null;
+  const result = await runVerify(cwd, commands, timeoutSec);
+  if (result.ok) return result;
+  const tail = result.outputs.join("\n---\n").slice(-1500);
+  throw new Error(
+    `feature run refused: the project's verify baseline is already red — nothing in this feature's plan can be gated until the project is green. Run \`railhead fix "<paste the failing output below>"\` first.\n\n${tail}`,
+  );
+}
+
 function runShell(
   cwd: string,
   command: string,

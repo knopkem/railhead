@@ -2,9 +2,15 @@ import { describe, it, expect, vi } from "vitest";
 import {
   planDesignSystemPrompt,
   planTicketsSystemPrompt,
+  planFeatureDesignSystemPrompt,
+  planFeatureTicketsSystemPrompt,
   planFixSystemPrompt,
   planContinuationSystemPrompt,
   buildPlanRevisionPrompt,
+  buildProductSessionPrompt,
+  parseProductReply,
+  buildFeatureStepPrompt,
+  parseFeatureStepReply,
   buildPlanUserFeedbackPrompt,
   buildPlanMarkdown,
   buildPlanGatePrompt,
@@ -126,6 +132,123 @@ describe("planTicketsSystemPrompt — stage 2 (decomposition)", () => {
 
   it("drops the art rule when art direction is disabled", () => {
     expect(planTicketsSystemPrompt({ contractsSummary: "", artDirection: false })).not.toMatch(/OPEN-ENDED CRAFT TICKET/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// feature-mode prompts: ONE feature lands in an EXISTING product
+// ---------------------------------------------------------------------------
+
+const FEATURE_BRIEF = "## Stack\nFEATURE_STACK_LOCKED — decided, never re-decided.\n## Vision\nA trail log the family opens.";
+
+describe("planFeatureDesignSystemPrompt — feature mode stage 1", () => {
+  const p = () =>
+    planFeatureDesignSystemPrompt({
+      contractsSummary: "MODULE_A",
+      productBrief: FEATURE_BRIEF,
+      existingCharter: "Held charter text with CHARTER_VALUABLE_LINE.",
+    });
+
+  it("plans a feature INSIDE an existing, running product — the baseline is green", () => {
+    const text = p();
+    expect(text).toMatch(/EXISTING product/);
+    expect(text).toMatch(/already runs/);
+    expect(text).toMatch(/green before every run starts/);
+  });
+
+  it("carries the decided product brief verbatim and forbids re-deciding the stack", () => {
+    const text = p();
+    expect(text).toContain(FEATURE_BRIEF);
+    expect(text).toMatch(/must not be re-decided/i);
+  });
+
+  it("carries the held coherence contract as normative and does NOT request a fresh authoring", () => {
+    const text = p();
+    expect(text).toContain("CHARTER_VALUABLE_LINE");
+    expect(text).toMatch(/normative/i);
+    expect(text).not.toMatch(/COHERENCE CHARTER/);
+  });
+
+  it("without a held charter it still requests one — a product's first feature may establish it", () => {
+    expect(planFeatureDesignSystemPrompt({ contractsSummary: "" })).toMatch(/COHERENCE CHARTER/);
+  });
+
+  it("names integration with existing seams as a completeness requirement", () => {
+    expect(p()).toMatch(/integration point/);
+    expect(p()).toMatch(/docks into|docks into the existing/i);
+  });
+
+  it("never plans scaffolding or a second entry point", () => {
+    const text = p();
+    expect(text).toMatch(/Do not plan scaffolding/);
+    expect(text).toMatch(/new capability|RESOLUTION/);
+  });
+
+  it("frames verify as guarding the project's existing suite — never weaken, rename, or drop", () => {
+    const text = p();
+    expect(text).toMatch(/ALREADY HAS a working verify suite/);
+    expect(text).toMatch(/never weaken, rename, or drop/);
+  });
+
+  it("uses the feature-first spine, not the whole-app launchable spine", () => {
+    const text = p();
+    expect(text).toMatch(/FEATURE-FIRST ORDER/);
+    expect(text).not.toMatch(/SPINE-FIRST ORDER/);
+    expect(text).not.toMatch(/LAUNCHABLE, VISIBLY CORRECT/);
+  });
+
+  it("keeps design/architecture REQUIRED, contracts summary, and the verify/interface/smoke shape", () => {
+    const text = p();
+    expect(text).toContain("MODULE_A");
+    expect(text).toMatch(/\$VERIFY/);
+    expect(text).toMatch(/\$INTERFACE/);
+    expect(text).toMatch(/\$SMOKE/);
+    expect(text).toMatch(/DESIGN and \$ARCHITECTURE blocks are REQUIRED/);
+  });
+
+  it("keeps art direction for features with a rendered surface", () => {
+    expect(planFeatureDesignSystemPrompt({ contractsSummary: "" })).toMatch(/ART DIRECTION/);
+    expect(planFeatureDesignSystemPrompt({ contractsSummary: "", artDirection: false })).not.toMatch(/ART DIRECTION/);
+  });
+});
+
+describe("planFeatureTicketsSystemPrompt — feature mode stage 2", () => {
+  const p = () => planFeatureTicketsSystemPrompt({ contractsSummary: "MODULE_A" });
+
+  it("never asks for a scaffold-first ticket — the repo already builds", () => {
+    const text = p();
+    expect(text).not.toMatch(/stand up a buildable scaffold/);
+    expect(text).toMatch(/the repo already builds/);
+  });
+
+  it("demands the FIRST ticket be an integration slice that leaves the existing suite green", () => {
+    expect(p()).toMatch(/FIRST ticket is an INTEGRATION slice/);
+    expect(p()).toMatch(/EXISTING verify suite green/);
+  });
+
+  it("keeps the shell owned and shared conventions consumed, not re-derived", () => {
+    const text = p();
+    expect(text).toMatch(/second entry point/);
+    expect(text).toMatch(/re-derive or re-package/);
+  });
+
+  it("uses the feature-first spine instead of the whole-app launchable spine", () => {
+    const text = p();
+    expect(text).toMatch(/FEATURE-FIRST ORDER/);
+    expect(text).not.toMatch(/LAUNCHABLE, VISIBLY CORRECT/);
+  });
+
+  it("keeps the ticket schema, observable criteria, ordering, and quality preferences", () => {
+    const text = p();
+    expect(text).toContain('"open_ended"');
+    expect(text).toMatch(/observable behaviour sentence/);
+    expect(text).toMatch(/run STRICTLY in the order/);
+    expect(text).toContain("Prefer fewer dependencies");
+  });
+
+  it("keeps the single open-ended art ticket rule for rendered features, droppable via artDirection", () => {
+    expect(p()).toMatch(/OPEN-ENDED CRAFT TICKET/);
+    expect(planFeatureTicketsSystemPrompt({ contractsSummary: "", artDirection: false })).not.toMatch(/OPEN-ENDED CRAFT TICKET/);
   });
 });
 
@@ -532,5 +655,105 @@ describe("QUALITY_PREFERENCES", () => {
   it("steers the planner toward stable, model-familiar APIs", () => {
     expect(QUALITY_PREFERENCES).toMatch(/API STABILITY/);
     expect(QUALITY_PREFERENCES).toMatch(/Prefer fewer dependencies/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// product arc session (ADR 0051)
+// ---------------------------------------------------------------------------
+
+describe("buildProductSessionPrompt — the product arc session", () => {
+  it("authors a fresh arc: every step todo, terse sections, on-disk shape", () => {
+    const p = buildProductSessionPrompt({});
+    expect(p).toMatch(/\*\*Status:\*\* todo/);
+    expect(p).toMatch(/AUTHORS? one|this session AUTHORS/i);
+    expect(p).toMatch(/TERSE/);
+    expect(p).toContain("$PRODUCT");
+    expect(p).toContain("$END");
+  });
+
+  it("steering an existing arc preserves its content verbatim and forbids re-deciding the stack", () => {
+    const p = buildProductSessionPrompt({
+      existingPlanMarkdown: "# Arc\n\n## Roadmap\n\n### 1 — First\n\n**Status:** done\n\nHUMAN_PROSE_KEEP.",
+    });
+    expect(p).toContain("HUMAN_PROSE_KEEP.");
+    expect(p).toMatch(/REVISES/);
+    expect(p).toMatch(/stack is DECIDED/);
+  });
+
+  it("carries the domain glossary when present", () => {
+    expect(buildProductSessionPrompt({ existingGlossary: "Trail = a hike." })).toContain("Trail = a hike.");
+  });
+});
+
+describe("parseProductReply", () => {
+  const REPLY = "Sure!\n$PRODUCT\n# Trail\n\n## Vision\nV\n\n## Roadmap\n\n### 1 — One\n\n**Status:** todo\n\ndesc\n$END\ntrailing";
+
+  it("extracts the $PRODUCT block and parses it through the on-disk arc parser", () => {
+    const { plan, warnings } = parseProductReply(REPLY);
+    expect(plan.name).toBe("Trail");
+    expect(plan.steps).toHaveLength(1);
+    expect(plan.steps[0].status).toBe("todo");
+    expect(warnings).toEqual([]);
+  });
+
+  it("tolerates a truncated reply (no $END)", () => {
+    const { plan } = parseProductReply("$PRODUCT\n# T\n\n## Roadmap\n");
+    expect(plan.name).toBe("T");
+  });
+
+  it("throws when no $PRODUCT marker exists — a silent empty arc would erase the roadmap", () => {
+    expect(() => parseProductReply("no markers here")).toThrow(/no readable \$PRODUCT/);
+  });
+
+  it("never reads a $PRODUCT marker inside a fence", () => {
+    const fenced = "Example shape:\n```\n$PRODUCT\n# Ghost\n```\nthen the real one\n$PRODUCT\n# Real\n\n## Roadmap\n";
+    expect(parseProductReply(fenced).plan.name).toBe("Real");
+  });
+});
+
+describe("buildFeatureStepPrompt / parseFeatureStepReply — roadmap step → feature prompt", () => {
+  const p = () =>
+    buildFeatureStepPrompt({
+      stepNumber: 2,
+      stepTitle: "Search",
+      stepDescription: "Search trails by tag.",
+      feedback: "Must hit Enter to submit.",
+      productBrief: "## Stack\nMARK — decided",
+      roadmapSummary: "1 — MVP [done]\n2 — Search [todo]",
+    });
+
+  it("carries the step, the reopen feedback as hard constraints, the decided context, and the roadmap", () => {
+    const text = p();
+    expect(text).toContain("Search trails by tag.");
+    expect(text).toContain("Must hit Enter to submit.");
+    expect(text).toContain("1 — MVP [done]");
+    expect(text).toContain("MARK — decided");
+  });
+
+  it("frames the reply as exactly one $FEATURE_PROMPT block", () => {
+    const text = p();
+    expect(text).toContain("$FEATURE_PROMPT");
+    expect(text).toContain("$END");
+  });
+
+  it("a fresh step (no feedback) says nothing about reopening", () => {
+    const text = buildFeatureStepPrompt({ stepNumber: 1, stepTitle: "A", stepDescription: "d", feedback: null, productBrief: "b", roadmapSummary: "1 — A [todo]" });
+    expect(text).not.toMatch(/REOPENED/);
+  });
+});
+
+describe("parseFeatureStepReply", () => {
+  it("extracts the marker block", () => {
+    expect(parseFeatureStepReply("pre\n$FEATURE_PROMPT\nTHE PROMPT\n$END\npost")).toBe("THE PROMPT");
+  });
+
+  it("falls back to the whole reply when no marker exists (tolerant)", () => {
+    expect(parseFeatureStepReply("just the prompt text")).toBe("just the prompt text");
+  });
+
+  it("never reads a marker inside a fence — falls back instead of eating code", () => {
+    const text = 'Example:\n```\n$FEATURE_PROMPT\nGHOST\n```\n';
+    expect(parseFeatureStepReply(text)).toBe("Example:\n```\n$FEATURE_PROMPT\nGHOST\n```");
   });
 });

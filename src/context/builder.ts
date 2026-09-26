@@ -227,7 +227,7 @@ function continuityBlock(session: BuilderSession): string {
 You have already committed through ticket ${session.committedThrough}${sha}. The repo is at that commit — your changes up to it are committed and verified, so do NOT re-do or rewrite them. Continue from here.`;
   }
   return `## Where the build stands
-No tickets are committed yet — the repo is at its scaffold commit. This is the builder's first (or a post-crash reseeded) invocation.`;
+No tickets are committed yet — the repo is at the commit this run started from (a greenfield scaffold, or the branch point a feature run was cut from). This is the builder's first (or a post-crash reseeded) invocation.`;
 }
 
 function verifyBlock(verify: string[]): string {
@@ -265,11 +265,11 @@ If you touch surface code AFTER a compaction, re-read ${CHARTER_DOC} first — a
 export const DESIGN_DOC = "docs/design.md";
 export const ARCHITECTURE_DOC = "docs/architecture.md";
 
-function designRequestBlock(): string {
+function designRequestBlock(designPath: string): string {
   return `## Design intent (the planner's vision for this build)
 The Design intent section above is the planner's captured vision — the aesthetic, narrative, and quality bar this build is judged against, not only the current ticket's acceptance criteria. Implement toward it; a result that passes the criteria while ignoring it is not done.
 
-If you touch surface code AFTER a compaction, re-read ${DESIGN_DOC} first — after a compaction you no longer hold the vision, and this re-read overrides the "do not re-read files you already hold" output rule.`;
+If you touch surface code AFTER a compaction, re-read ${designPath} first — after a compaction you no longer hold the vision, and this re-read overrides the "do not re-read files you already hold" output rule.`;
 }
 
 /** v2 issue 01: the verbatim re-injection for a surface-ticket invocation. A
@@ -406,6 +406,10 @@ export function buildBuilderPrompt(opts: {
   /** The coherence charter (ADR 0028), injected when the invocation's tickets
    * include a surface ticket. */
   charter?: string | null;
+  /** The design doc's repo path, re-read after a compaction. Feature runs
+   * (ADR 0051) point into their `.scratch/<slug>/docs` namespace; the default
+   * is the root `docs/` path. */
+  designPath?: string;
   /** Issue #106-A: standing file pointers to send INSTEAD of the full
    * contracts/digest content on a warm resume whose session was already told
    * them (seed / post-compaction cadence is the caller's). Mutually exclusive
@@ -459,7 +463,7 @@ export function buildBuilderPrompt(opts: {
   // it, and the instruction block otherwise just points at the file.
   const requestBlocks = renderTask([
     opts.designDoc
-      ? (opts.reinjectDesign && cadenceOptions.surface ? designReinjectBlock(opts.designDoc) : designRequestBlock())
+      ? (opts.reinjectDesign && cadenceOptions.surface ? designReinjectBlock(opts.designDoc) : designRequestBlock(opts.designPath ?? DESIGN_DOC))
       : "",
     opts.architectureDoc ? architectureRequestBlock() : "",
     opts.charter ? charterRequestBlock() : "",

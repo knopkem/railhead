@@ -65,7 +65,10 @@ export interface PlanArgs {
   preset: GatePreset | null;
   overrides: GateOverrides;
   sharpen: boolean | null;
-  mode: "build" | "fix";
+  mode: "build" | "fix" | "feature";
+  /** Feature mode (ADR 0051): force a specific roadmap step (1-based).
+   * Absent for build/fix; null = pick the first todo step. */
+  step: number | null;
 }
 
 const PLAN_BOOL_FLAGS = new Set([
@@ -80,10 +83,11 @@ const PLAN_BOOL_FLAGS = new Set([
 const PLAN_VALUE_FLAGS = new Set([
   "--model",
   "--review", "--vision", "--goal", "--structural",
+  "--step",
 ]);
 
-/** Parse the arguments of `railhead build` / `railhead fix`. */
-export function parsePlanArgs(argv: string[], mode: "build" | "fix"): PlanArgs {
+/** Parse the arguments of `railhead build` / `railhead fix` / `railhead feature`. */
+export function parsePlanArgs(argv: string[], mode: "build" | "fix" | "feature"): PlanArgs {
   const auto = argv.includes("-a") || argv.includes("--auto") || argv.includes("-y") || argv.includes("--yes");
   const cont = argv.includes("-c") || argv.includes("--continue");
   const presets = (["full", "medium", "light", "none"] as const).filter((p) => argv.includes(`--${p}`));
@@ -115,6 +119,7 @@ export function parsePlanArgs(argv: string[], mode: "build" | "fix"): PlanArgs {
   // `--model <value>` is consumed as a pair; a bare `--model` value could
   // otherwise leak into the prompt when the flag's value is missing.
   const prompt = argv.filter((a, i) => !consumedSet.has(a) && !(a.startsWith("-") && a.length > 1)).join(" ").trim();
+  const stepRaw = argValue(argv, "--step");
   return {
     prompt,
     auto,
@@ -126,7 +131,47 @@ export function parsePlanArgs(argv: string[], mode: "build" | "fix"): PlanArgs {
     overrides,
     sharpen,
     mode,
+    step: stepRaw !== null && /^\d+$/.test(stepRaw) ? Number(stepRaw) : null,
   };
+}
+
+export interface ProductArgs {
+  /** The vision (authoring) or steering text (revision) for this session. */
+  instruction: string;
+  auto: boolean;
+  verbose: boolean;
+  modelOverride: string | null;
+}
+
+/** Parse the arguments of `railhead product`: the joined non-flag text is the
+ * operator's input for the session. */
+export function parseProductArgs(argv: string[]): ProductArgs {
+  const consumed: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === "--model" || a === "-m") {
+      consumed.push(a);
+      const v = argv[i + 1];
+      if (v !== undefined && !v.startsWith("-")) {
+        consumed.push(v);
+        i++;
+      }
+    } else if (a === "-a" || a === "--auto" || a === "-y" || a === "--yes" || a === "--verbose") {
+      consumed.push(a);
+    }
+  }
+  const consumedSet = new Set(consumed);
+  return {
+    instruction: argv.filter((a, i) => !consumedSet.has(a) && !(a.startsWith("-") && a.length > 1)).join(" ").trim(),
+    auto: argv.includes("-a") || argv.includes("--auto") || argv.includes("-y") || argv.includes("--yes"),
+    verbose: argv.includes("--verbose"),
+    modelOverride: argValue(argv, "--model") ?? argValueFlag(argv, "-m"),
+  };
+}
+
+function argValueFlag(args: string[], name: string): string | null {
+  const i = args.indexOf(name);
+  return i >= 0 ? (args[i + 1] ?? null) : null;
 }
 
 /** Read a paired boolean override: the enabled flag wins over the disabled
