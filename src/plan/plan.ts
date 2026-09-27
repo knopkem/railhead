@@ -600,11 +600,16 @@ ${ticketSection}`;
 /** Find the lowest index of any of the given markers in `text`, or `text.length`
  * when none match. Shared by the verify/smoke block parsers so each can stop at
  * whichever sibling marker comes next — the plan-marker shape must not let one
- * parser swallow another's region. Case-insensitive on the marker token. */
+ * parser swallow another's region. Markers are line-anchored (the planner emits
+ * one per line): a `$SMOKE` quoted inside a command or a `$ARCHITECTURE` named
+ * in design prose is a mention, not a boundary. SpriteForge's design quoted
+ * `$ARCHITECTURE` in a Goal coverage bullet, which bounded the design block
+ * before its own `$END` and silently dropped the authored coherence contract.
+ * Case-insensitive on the marker token. */
 function earliestSiblingMarker(text: string, markers: string[]): number {
   let earliest = text.length;
   for (const m of markers) {
-    const re = new RegExp(`\\${m}\\b`, "i");
+    const re = new RegExp(`^[ \\t]*\\${m}\\b`, "im");
     const idx = text.search(re);
     if (idx >= 0 && idx < earliest) earliest = idx;
   }
@@ -654,12 +659,12 @@ function commandLines(block: string): string[] {
 /** Extract the $VERIFY ... $SMOKE block from planner output as a list of
  * shell commands. Returns [] when absent, empty, or NONE. The verify block is
  * plan-level metadata (one command set for the whole project), distinct from
- * the per-ticket JSON array that follows. Tolerates any-case markers, blank
- * lines, and surrounding whitespace. Stops at the FIRST of `$INTERFACE`,
- * `$SMOKE` or `$TICKETS` (whichever the planner emitted next) so an interface
- * or smoke block isn't swallowed into the verify list. */
+ * the per-ticket JSON array that follows. Tolerates any-case, line-indented
+ * markers, blank lines, and surrounding whitespace. Stops at the FIRST of
+ * `$INTERFACE`, `$SMOKE` or `$TICKETS` (whichever the planner emitted next) so
+ * an interface or smoke block isn't swallowed into the verify list. */
 export function parseVerifyBlock(text: string): string[] {
-  const startMatch = text.match(/\$verify\s*/i);
+  const startMatch = text.match(/^[ \t]*\$verify\b/im);
   if (!startMatch || startMatch.index === undefined) return [];
   const afterStart = startMatch.index + startMatch[0].length;
   const end = earliestSiblingMarker(text.slice(afterStart), ["$interface", "$smoke", "$tickets"]);
@@ -681,7 +686,7 @@ export function parseVerifyBlock(text: string): string[] {
  * markers' content is design intent with its own consumers (docs/*.md) — it is
  * NOT a launch command. Smoke is launch commands only. */
 export function parseSmokeBlock(text: string): string[] {
-  const startMatch = text.match(/\$smoke\s*/i);
+  const startMatch = text.match(/^[ \t]*\$smoke\b/im);
   if (!startMatch || startMatch.index === undefined) return [];
   const afterStart = startMatch.index + startMatch[0].length;
   const end = earliestSiblingMarker(text.slice(afterStart), ["$design", "$architecture", "$tickets"]);
@@ -698,7 +703,7 @@ export function parseSmokeBlock(text: string): string[] {
  * around it, mirroring how the sibling marker parses degrade. Longest token
  * first so `browser-ui`'s hyphen never splits into a bare `browser` match. */
 export function parseInterfaceBlock(text: string): ProjectInterface | null {
-  const startMatch = text.match(/\$interface\s*/i);
+  const startMatch = text.match(/^[ \t]*\$interface\b/im);
   if (!startMatch || startMatch.index === undefined) return null;
   const afterStart = startMatch.index + startMatch[0].length;
   const end = earliestSiblingMarker(text.slice(afterStart), ["$verify", "$smoke", "$design", "$architecture", "$tickets"]);
@@ -714,11 +719,12 @@ export function parseInterfaceBlock(text: string): ProjectInterface | null {
  *  planner's interpretation of the goal — redefined goal, narrative/theme,
  *  visual identity, quality bar, feel/UX. Returns `null` when absent — the
  *  prompt requests the block but does not abort on its absence (advisory).
- *  Stops at `$END` or, when no `$END` is present, at the next sibling marker
+ *  Starts at the line-anchored marker; stops at the first line-anchored `$END`
+ *  or, when none is present, at the next line-anchored sibling marker
  *  (`$ARCHITECTURE`, `$VERIFY`, `$SMOKE`, `$TICKETS`) so a missing
  *  `$END` does not swallow the rest of the planner output. */
 export function parseDesignBlock(text: string): string | null {
-  const startMatch = text.match(/\$design\s*/i);
+  const startMatch = text.match(/^[ \t]*\$design\b/im);
   if (!startMatch || startMatch.index === undefined) return null;
   const afterStart = startMatch.index + startMatch[0].length;
   const tail = text.slice(afterStart);
@@ -769,10 +775,11 @@ export function splitCoherenceContract(designText: string): { narrative: string 
 /** Extract the $ARCHITECTURE ... $END block from planner output (#34): the
  *  planner's technical intent — Spec back-pointer, Global Constraints, module
  *  map, rationale for decomposition. Returns `null` when absent (advisory;
- *  the prompt requests the block but does not abort). Same marker discipline
- *  as `parseDesignBlock`: stops at `$END` or the next sibling marker. */
+ *  the prompt requests the block but does not abort). Same line-anchored
+ *  marker discipline as `parseDesignBlock`: starts at the line-anchored
+ *  marker, stops at `$END` or the next sibling marker. */
 export function parseArchitectureBlock(text: string): string | null {
-  const startMatch = text.match(/\$architecture\s*/i);
+  const startMatch = text.match(/^[ \t]*\$architecture\b/im);
   if (!startMatch || startMatch.index === undefined) return null;
   const afterStart = startMatch.index + startMatch[0].length;
   const tail = text.slice(afterStart);
@@ -781,11 +788,13 @@ export function parseArchitectureBlock(text: string): string | null {
   return trimmed || null;
 }
 
-/** Slice the doc body from `tail` until the FIRST of: `$END`, any sibling
- * marker, or end-of-string. This prevents a design block whose own `$END`
- * is absent from swallowing a subsequent architecture block's `$END`. */
+/** Slice the doc body from `tail` until the FIRST of: a line-anchored `$END`,
+ * any line-anchored sibling marker, or end-of-string. This prevents a design
+ * block whose own `$END` is absent from swallowing a subsequent architecture
+ * block's `$END`. Line-anchoring keeps an inline `$END` (or sibling) mention
+ * in prose from closing a block that emits its real terminator later. */
 function sliceUntilMarker(tail: string, siblings: string[]): string {
-  const endIdx = tail.search(/\$end\b/i);
+  const endIdx = tail.search(/^[ \t]*\$end\b/im);
   const siblingStop = earliestSiblingMarker(tail, siblings);
   return tail.slice(0, Math.min(endIdx >= 0 ? endIdx : tail.length, siblingStop));
 }

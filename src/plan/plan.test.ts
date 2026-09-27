@@ -561,6 +561,41 @@ $TICKETS
     expect(parseDesignBlock(design)).not.toContain("Modules");
   });
 
+  it("ignores a sibling marker quoted inline in prose — the block's own $END still closes it", () => {
+    const text = `$DESIGN
+## Goal coverage
+- the canvas blits with \`imageSmoothingEnabled = false\` in \`$ARCHITECTURE\` module map.
+## Coherence contract
+### Visual tokens
+TOKENS from src/ui/theme.ts.
+$END
+$ARCHITECTURE
+Module map: renderer.
+$END
+$TICKETS
+[]`;
+    const design = parseDesignBlock(text);
+    expect(design).toContain("## Coherence contract");
+    expect(design).toContain("TOKENS from src/ui/theme.ts");
+    expect(parseArchitectureBlock(text)).toContain("Module map: renderer.");
+  });
+
+  it("ignores an inline $END mention in prose — the line-anchored $END closes the block", () => {
+    const text = `$DESIGN
+Each markdown block ends with \`$END\` on its own line.
+## Coherence contract
+TOKENS here.
+$END
+$ARCHITECTURE
+Modules.
+$END
+$TICKETS
+[]`;
+    const design = parseDesignBlock(text);
+    expect(design).toContain("## Coherence contract");
+    expect(design).toContain("TOKENS here.");
+  });
+
   it("tolerates case-insensitive markers", () => {
     expect(parseDesignBlock("$design\nA design doc.\n$end\n$TICKETS\n[]")).toBe("A design doc.");
     expect(parseArchitectureBlock("$architecture\nStructural decisions.\n$end\n$TICKETS\n[]")).toBe("Structural decisions.");
