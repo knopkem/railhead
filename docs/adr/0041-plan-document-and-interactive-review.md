@@ -95,3 +95,13 @@ cheap relative to a broken run.
 - Auto runs are unchanged: coverage audit, no loop.
 - The final finalize rewrites `PLAN.md` with the ticket breakdown alongside
   `docs/design.md`, `docs/architecture.md`, the ticket files, and origin.json.
+
+## Amendment (2026-09-27): interactive fix runs start without the second prompt
+
+The "fix mode keeps the explicit start question" carve-out was friction with no
+decision in it: the fix planner's single call is the whole plan, and the user
+already supplied the bug report and answered any pre-plan interview. An
+interactive `railhead fix` now flows from the printed plan straight into the
+run, exactly like an accepted interactive build plan. `-c`/`--continue` still
+skips the question for interactive feature runs.
+

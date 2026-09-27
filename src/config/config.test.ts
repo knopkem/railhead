@@ -193,19 +193,19 @@ describe("loadConfig", () => {
     expect(cfg.max_phase_steps).toBe(10);
   });
 
-  it("defaults max_phase_steps to 120", async () => {
+  it("defaults max_phase_steps to 240", async () => {
     const cfg = await loadConfig(await makeCwd(null));
-    expect(cfg.max_phase_steps).toBe(120);
+    expect(cfg.max_phase_steps).toBe(240);
   });
 
-  it("scales max_phase_steps from max_context_tokens (64k → 120, floored)", async () => {
+  it("scales max_phase_steps from max_context_tokens (64k → 240, floored)", async () => {
     const cfg = await loadConfig(await makeCwd('{"max_context_tokens":64000}'));
-    expect(cfg.max_phase_steps).toBe(120);
+    expect(cfg.max_phase_steps).toBe(240);
   });
 
-  it("scales max_phase_steps from max_context_tokens (128k → 128)", async () => {
+  it("floors a 128k context at the 240 fallback rather than the 128 scaling slope", async () => {
     const cfg = await loadConfig(await makeCwd('{"max_context_tokens":128000}'));
-    expect(cfg.max_phase_steps).toBe(128);
+    expect(cfg.max_phase_steps).toBe(240);
   });
 
   it("scales max_phase_steps from max_context_tokens (250k → 250)", async () => {

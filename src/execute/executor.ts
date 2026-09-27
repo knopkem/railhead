@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { appendEvent } from "../core/ledger.ts";
 import { renderEventLine } from "../cli/live.ts";
@@ -162,7 +162,7 @@ export async function startPersistentWorker(opts: { cwd: string; quiet?: boolean
   if (url === null) {
     // Server didn't come up — fall back to standalone mode. Don't kill the
     // child if it's still trying (rare); let the detach + process exit clean up.
-    try { process.kill(-child.pid!, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+    killProcessGroup(child);
     if (!opts.quiet) {
       console.log(`[${nowClock()}] persistent worker: opencode serve did not start within 30s — falling back to standalone subprocesses per phase`);
     }
@@ -224,6 +224,45 @@ export async function stopPersistentWorker(): Promise<void> {
       clearTimeout(grace);
       resolve();
     }
+  });
+}
+
+/** How long a deliberately-killed phase process group gets to honor SIGTERM
+ * before the group is SIGKILLed. */
+const KILL_ESCALATION_GRACE_MS = 2_000;
+
+/** How long the stdio pipes get to close after the direct child exits before
+ * the group is SIGKILLed. Normally `close` follows `exit` immediately; a
+ * pending pipe means an orphaned grandchild is holding it, and that orphan
+ * only dies to SIGKILL. */
+const ORPHAN_PIPE_GRACE_MS = 250;
+
+/** SIGTERM the child's whole process group, escalating to SIGKILL. A one-shot
+ * group SIGTERM races a shell that is forking its next command: the fork can
+ * land after the group signal, orphaning a grandchild that inherits the stdio
+ * pipes, so `close` waits on the orphan's own timeout instead of the kill.
+ * SIGKILL after the direct child's exit reaps that orphan promptly; SIGKILL
+ * after the grace covers a child that ignores SIGTERM outright. Once the
+ * group is gone both escalations are no-ops. */
+const escalationArmed = new WeakSet<ChildProcess>();
+function killProcessGroup(child: ChildProcess): void {
+  try {
+    process.kill(-child.pid!, "SIGTERM");
+  } catch {
+    child.kill("SIGTERM");
+  }
+  if (escalationArmed.has(child)) return;
+  escalationArmed.add(child);
+  const sigkill = (): void => {
+    try {
+      process.kill(-child.pid!, "SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+  };
+  setTimeout(sigkill, KILL_ESCALATION_GRACE_MS).unref();
+  child.once("exit", () => {
+    setTimeout(sigkill, ORPHAN_PIPE_GRACE_MS).unref();
   });
 }
 
@@ -903,7 +942,7 @@ export async function executeOpendCode(
     stalled = true;
     const p = livePrefix ? `${livePrefix} ` : "";
     sink(`${p}✖ no output for ${stallTimeoutSec}s — killing opencode process (stalled)`);
-    try { process.kill(-child.pid!, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+    killProcessGroup(child);
   };
   // Issue #96: the absolute phase wall-clock cap. Unlike the stall timer
   // (re-armed on every byte) and the model-time cap (per step), this bounds
@@ -918,7 +957,7 @@ export async function executeOpendCode(
     if (errorMessage === null) errorMessage = msg;
     const p = livePrefix ? `${livePrefix} ` : "";
     sink(`${p}✖ ${msg} — killing opencode process`);
-    try { process.kill(-child.pid!, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+    killProcessGroup(child);
   };
   let wallTimer: NodeJS.Timeout | null = null;
   if (wallCapMs !== Infinity) wallTimer = setTimeout(killForWallClock, wallCapMs);
@@ -960,7 +999,7 @@ export async function executeOpendCode(
     const estNow = reconcileBase + streamedTokens;
     const est = estNow > 0 ? `~${Math.round(estNow / 1000)}k request, ` : "";
     sink(`${p}✖ model-stalled: step exceeded the ${maxStepModelSec}s model-time budget (${est}${modelStallElapsedSec}s elapsed, ${partsCompleted} part${partsCompleted === 1 ? "" : "s"} completed) — killing opencode process`);
-    try { process.kill(-child.pid!, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+    killProcessGroup(child);
   };
   if (modelCapMs !== Infinity) {
     modelTimer = setInterval(() => {
@@ -993,7 +1032,7 @@ export async function executeOpendCode(
           haltReasonText = halt;
           const p = livePrefix ? `${livePrefix} ` : "";
           sink(`${p}✖ halt signal: an agent wrote the halt file (${halt}) — killing opencode process`);
-          try { process.kill(-child.pid!, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+          killProcessGroup(child);
           return;
         }
         // Issue #84 (ADR 0022 S0.1): capture the durable session handle from
@@ -1016,7 +1055,7 @@ export async function executeOpendCode(
             markerEarlyExit = true;
             const p = livePrefix ? `${livePrefix} ` : "";
             sink(`${p}✓ stop marker already emitted — killing opencode process early`);
-            try { process.kill(-child.pid!, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+            killProcessGroup(child);
             return;
           }
           // Issue #53: check the accumulated peak BEFORE the step runs. The
@@ -1032,7 +1071,7 @@ export async function executeOpendCode(
               sink(`${p}✖ peak tokens ${peakTokens} exceeded 95% of budget ${maxContextTokens} — killing before the next step runs`);
               budgetKillReason = `request ceiling exceeded — peak ${peakTokens} tokens crossed 95% of the ${maxContextTokens}-token budget`;
               budgetExceeded = true;
-              try { process.kill(-child.pid!, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+              killProcessGroup(child);
               return;
             }
             // Issue #84: telemetry-only on the durable builder — compaction
@@ -1057,9 +1096,7 @@ export async function executeOpendCode(
             budgetKillReason = `exceeded step budget (${stepCap} steps)`;
             const p = livePrefix ? `${livePrefix} ` : "";
             sink(`${p}✖ step budget exceeded (${stepCap} steps) — killing opencode process`);
-            // Kill the entire process group so shell-spawned children (cargo,
-            // sleep, etc.) die too. SIGTERM first; escalate if needed.
-            try { process.kill(-child.pid!, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+            killProcessGroup(child);
             return;
           }
         }
@@ -1181,7 +1218,7 @@ export async function executeOpendCode(
           if (killGuards) {
             sink(`${p}✖ peak tokens ${peakTokens} exceeded 95% of budget ${maxContextTokens} — killing subprocess`);
             budgetKillReason = `request ceiling exceeded — peak ${peakTokens} tokens crossed 95% of the ${maxContextTokens}-token budget`;
-            try { process.kill(-child.pid!, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+            killProcessGroup(child);
             budgetExceeded = true;
             return;
           }
@@ -1205,7 +1242,7 @@ export async function executeOpendCode(
               sink(`${p}✖ in-flight estimate ${estNow} tokens exceeded 95% of budget ${maxContextTokens} — killing mid-step before the next request is sent`);
               budgetKillReason = `request ceiling exceeded — in-flight estimate ${estNow} tokens crossed 95% of the ${maxContextTokens}-token budget`;
               budgetExceeded = true;
-              try { process.kill(-child.pid!, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+              killProcessGroup(child);
               return;
             }
             // Issue #84: telemetry-only on the durable builder.
@@ -1232,7 +1269,7 @@ export async function executeOpendCode(
               spinLoop = true;
               const p = livePrefix ? `${livePrefix} ` : "";
               sink(`${p}✖ spin loop: ${consecutiveErrors} consecutive identical errored tool calls — killing opencode process`);
-              try { process.kill(-child.pid!, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+              killProcessGroup(child);
               return;
             }
           } else if (sig === null && line.includes('"tool_use"')) {
@@ -1268,7 +1305,7 @@ export async function executeOpendCode(
               const msg = `${DEGRADED_TARGET_PREFIX} ${toolTimeoutAt.length} tool request timeouts within the last ${Math.round(toolTimeoutWindowMs / 1000)}s — the interaction target is wedged, not merely slow; killing opencode process to end the timeout spiral`;
               errorMessage = msg;
               sink(`${p}✖ ${msg}`);
-              try { process.kill(-child.pid!, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+              killProcessGroup(child);
               return;
             }
           }
@@ -1299,7 +1336,7 @@ export async function executeOpendCode(
               errorMessage = msg;
               const p = livePrefix ? `${livePrefix} ` : "";
               sink(`${p}✖ ${msg} — killing opencode process`);
-              try { process.kill(-child.pid!, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+              killProcessGroup(child);
               return;
             }
           }

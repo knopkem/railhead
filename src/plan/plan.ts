@@ -819,13 +819,37 @@ function ticketRegions(text: string): string[] {
   return regions;
 }
 
+/** Repair the recurring weak-planner JSON slip where the optional probe recipe
+ * is emitted as a BARE unquoted line inside a `criteria` array:
+ *
+ *     "behaviour sentence",
+ *     probe: launch; act; assert",
+ *
+ * The schema carries the probe INSIDE the criterion string, newline-escaped
+ * (`"behaviour sentence\n  probe: launch; act; assert"`). The bare form makes
+ * EVERY ticket object malformed, so the scanner drops them all and a complete
+ * plan reads as "no readable tickets" — the combat heightmap-run failure.
+ * Fold the bare line back into the preceding string so the documented probe
+ * grammar (`criterionProbe`) receives the shape it expects. Only a real
+ * newline can trigger this: valid JSON never contains one inside a string, so
+ * well-formed output passes through untouched. */
+function repairBareProbeLines(candidate: string): string {
+  return (
+    candidate
+      // `probe:` text still carries its closing quote: `"c",\n  probe: x",`
+      .replace(/",?[ \t]*\r?\n[ \t]*(probe[ \t]*:[ \t]*)([^\n]*?)"([ \t]*(?:,|\]|\r?\n))/gi, '\\n  $1$2"$3')
+      // no closing quote at all, terminated by the array's comma/bracket: `"c",\n  probe: x\n]`
+      .replace(/",?[ \t]*\r?\n[ \t]*(probe[ \t]*:[ \t]*)([^\n]*?)[ \t]*\r?\n([ \t]*[\]},])/gi, '\\n  $1$2"\n$3')
+  );
+}
+
 /** The lossy object→ticket map the whole plan parse is built on: a candidate
  * string yields every readable `{…}` ticket object in it, skipping prose,
  * fences, and mid-array corruption. Never throws; the caller decides how to
  * treat an empty result. */
 function ticketsFromJson(candidate: string): PlanTicket[] {
   const tickets: PlanTicket[] = [];
-  for (const o of scanJsonObjects(candidate)) {
+  for (const o of scanJsonObjects(repairBareProbeLines(candidate))) {
     const t = o as Partial<PlanTicket>;
     if (typeof t.title === "string" && t.title.trim()) {
       tickets.push({

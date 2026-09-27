@@ -465,4 +465,41 @@ describe("ensureVisionForGates", () => {
     expect(refusals).toHaveLength(1);
     expect(refusals[0]!.reason).toContain("no goal model is configured");
   });
+
+  it("reuses a current-version pass, so a verified model costs nothing at run start", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "vision-probe-"));
+    await recordVisionCapability(cwd, out());
+    const { records, refusals } = await ensureVisionForGates({
+      cwd,
+      requests: [
+        { gate: "visual", model: "test/model" },
+        { gate: "goal", model: "test/model" },
+      ],
+    });
+    expect(probeCalls).toBe(0);
+    expect(records).toEqual([]);
+    expect(refusals).toEqual([]);
+  });
+
+  it("re-probes a recorded blind verdict instead of caching the 'no'", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "vision-probe-"));
+    probeBehavior = "blind";
+    await ensureVisionForGates({ cwd, requests: [{ gate: "visual", model: "test/model" }] });
+    const spent = probeCalls;
+    const { refusals } = await ensureVisionForGates({ cwd, requests: [{ gate: "visual", model: "test/model" }] });
+    expect(probeCalls).toBeGreaterThan(spent);
+    expect(refusals).toHaveLength(1);
+  });
+
+  it("ignores a pass from an older probe version and re-measures", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "vision-probe-"));
+    await recordVisionCapability(cwd, out());
+    const raw = JSON.parse(await readFile(capabilityFilePath(cwd), "utf8"));
+    raw.probes = raw.probes.map((r: { probe_version: number }) => ({ ...r, probe_version: 0 }));
+    await writeFile(capabilityFilePath(cwd), JSON.stringify(raw), "utf8");
+    const { records, refusals } = await ensureVisionForGates({ cwd, requests: [{ gate: "visual", model: "test/model" }] });
+    expect(probeCalls).toBe(1);
+    expect(records).toHaveLength(1);
+    expect(refusals).toEqual([]);
+  });
 });

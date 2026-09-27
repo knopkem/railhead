@@ -704,11 +704,11 @@ export async function ensureInitialized(cwd: string, yes: boolean = false): Prom
 }
 
 /**
- * ADR 0036: a vision-dependent gate must not run on a model the railhead has
- * measured blind. Every invocation that will use one probes the seat models
- * first — always, because a local server can swap the checkpoint behind a
- * model id — and refuses in seconds, before the plan or the run spends hours.
- * The probe result is recorded for the report and for prompt injection.
+ * ADR 0036 (amended): a vision-dependent gate must not run on a model the
+ * railhead has measured blind. The invocation reuses a recorded current-version
+ * PASS and probes only a seat with none — a model changed since init is
+ * measured before the plan or the run spends hours, while a verified model
+ * costs nothing at run start.
  *
  * The refusal is interactive-aware: an unattended run (no TTY, or `build -a`)
  * still hard-fails — silently dropping a requested gate is worse than
@@ -729,14 +729,13 @@ async function ensureVisionGates<M extends { visual: GateMode; goal: GateMode }>
 ): Promise<M> {
   const requests = visionGateRequests(modes, models);
   if (requests.length === 0) return modes;
-  console.log("vision probe required — a vision-dependent review gate is enabled (ADR 0036)");
   const { records, refusals } = await ensureVisionForGates({
     cwd,
     requests,
     maxContextTokens: config.max_context_tokens,
   });
   for (const record of records) {
-    console.log(`vision probe: ${record.model} can read images (verified ${record.verified_at})`);
+    if (record.reads_images) console.log(`vision probe: ${record.model} can read images (verified ${record.verified_at})`);
   }
   if (refusals.length === 0) return modes;
   for (const refusal of refusals) {
@@ -1050,8 +1049,10 @@ async function cmdBuild(cwd: string, prefs: PlanArgs, internal: { arcStepNumber?
     await git.writeProjectDoc(cwd, "prompt", enrichedPrompt);
     // ADR 0041 (amended): accepting the interactive plan IS the start
     // decision — tickets are created and the build begins with no second
-    // prompt. Fix mode (no plan review) keeps the explicit start question.
-    const acceptedPlan = !auto && mode === "build";
+    // prompt. Fix mode has no plan review at all: the run starts as soon as
+    // the fix plan is written. `-c`/`--continue` stays the explicit start
+    // signal for the remaining interactive shapes.
+    const acceptedPlan = !auto && (mode === "build" || mode === "fix");
     const startNow = auto || cont || acceptedPlan || await askYesNo("Start this run now?", true);
     if (startNow) {
       return await cmdRun(cwd, [outDir, ...(verbose ? ["--verbose"] : [])], { fromPlan: true, verifySeeded });
@@ -1481,8 +1482,8 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean; v
   // before a fresh run spends hours, and before a resume continues one. An
   // interactive operator may instead continue with the blind gates off (the
   // downgrade is in-memory here — railhead.json is untouched). A run started
-  // from `build` already probed in this process seconds ago, so it does not
-  // pay for the same measurement twice.
+  // from `build` shares the recorded passes that check just used, so it does
+  // not pay for the same measurement twice.
   let visionModes = {
     visual: (config.visual_review?.mode ?? "off") as GateMode,
     goal: (config.goal_review?.mode ?? "off") as GateMode,
@@ -1493,8 +1494,9 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean; v
 
   // ADR 0036: a surfaced project also wants a current implement-seat record,
   // so the builder's visual self-check reflects the model actually running
-  // today. Unlike a gate this seat does not re-probe every run — it reuses a
-  // current-version record and skips models a gate probe already covered.
+  // today. Like a gate, a current-version pass is reused; only a missing or
+  // negative record pays a probe. Models a gate already probed this invocation
+  // are skipped.
   if (isRenderedSurface(config.projectInterface)) {
     const probed = new Set(visionGateRequests(visionModes, visionModels).map((r) => r.model).filter((m): m is string => m !== null));
     const implVision = await ensureImplementerVision({ cwd, model: visionModels.implement, skip: probed, maxContextTokens: config.max_context_tokens });

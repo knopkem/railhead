@@ -466,7 +466,11 @@ async function runPlanInner(options: {
   const existingGlossary = await readProjectDoc(cwd, "CONTEXT.md");
   const productPlan = mode === "feature" ? await readProductPlan(cwd) : null;
   const productBrief = productPlan ? renderProductBrief(productPlan) : undefined;
-  const existingCharter = mode === "feature" ? await readProjectDoc(cwd, CHARTER_DOC) : null;
+  // ADR 0028/0051: the repo's held coherence charter (docs/coherence.md).
+  // Feature prompts inject it (the look is DECIDED); every mode reads it so a
+  // plan that does not re-author the section leaves the held contract in place
+  // and does not claim its surface tickets will run charter-less.
+  const existingCharter = await readProjectDoc(cwd, CHARTER_DOC);
   // ADR 0051: the exact roadmap step this feature plan builds. The plan gate
   // judges the step (description + feedback), and the plan's origin records
   // the identity so run-end/resume can finish the arc transaction.
@@ -731,10 +735,11 @@ function hardenerTicket(): PlanTicket {
   planLedger: string;
   mode: PlanMode;
   artDirection?: boolean;
-  /** ADR 0051: a feature plan into a product whose coherence charter already
-   * exists. The charter is the visual authority — the plan neither re-authors
-   * it nor gets the deterministic whole-look craft ticket, and the missing-
-   * charter warning stays silent. */
+  /** ADR 0028/0051: the repo already holds a non-empty coherence charter
+   * (docs/coherence.md). A feature plan treats it as the visual authority —
+   * no re-authoring, no deterministic whole-look craft ticket. Any plan that
+   * does not re-author the section leaves the held file in place, so the
+   * missing-charter warning stays silent. */
   heldCharter?: boolean;
   /** ADR 0051: the roadmap step this feature plan builds, persisted into the
    * plan's origin.json so run-end/resume can mark it `built`. */
@@ -751,6 +756,10 @@ function hardenerTicket(): PlanTicket {
   // docs/coherence.md, and only a genuinely NEW surface warrants a craft
   // ticket — a decision the planner makes, not a deterministic append.
   const featureWithHeldCharter = mode === "feature" && opts.heldCharter === true;
+  // A charter on disk governs this run's surface tickets whether or not this
+  // plan re-authored the section (ADR 0028); only a run with no charter at all
+  // is genuinely charter-less.
+  const charterHeld = opts.heldCharter === true;
   const artDirectionRequired = artDirection !== false && isRenderedSurface(projectInterface) && !featureWithHeldCharter;
   // Issue #34: extract the planner's design and architecture intent from
   // $DESIGN / $ARCHITECTURE marker blocks. In fix mode they stay optional.
@@ -765,8 +774,8 @@ function hardenerTicket(): PlanTicket {
   // the narrative: a second charter copy there would ride into surface prompts
   // twice and drift stale against its amended twin. A plan without the section
   // — or without a $DESIGN at all — writes no charter artifact; the plan-time
-  // guard below warns (never fails) when surface tickets exist but no charter
-  // was authored.
+  // guard below warns (never fails) when surface tickets exist and the repo
+  // holds no charter either.
   const { narrative: designNarrative, charter: coherenceContract } = designDoc
     ? splitCoherenceContract(designDoc)
     : { narrative: null, charter: null };
@@ -784,7 +793,11 @@ function hardenerTicket(): PlanTicket {
     await writeProjectDoc(cwd, architectureDocPath, architectureDoc + "\n");
   }
   let coherenceAuthored = false;
-  if (coherenceContract) {
+  // ADR 0028: a fix plan never authors a charter — the planner cannot inspect
+  // the repo, so re-authoring could clobber the contract that governs its
+  // corrective flow. A section a fix model happens to emit is dropped; the
+  // held charter (if any) stays authoritative.
+  if (coherenceContract && mode !== "fix") {
     await writeProjectDoc(cwd, "docs/coherence.md", coherenceContract + "\n");
     coherenceAuthored = true;
   }
@@ -856,11 +869,14 @@ function hardenerTicket(): PlanTicket {
   }
 
   // Issue #99 (ADR 0028): plan-time guard. A surfaced plan that authored no
-  // charter section WARNS (never fails) — the recall-biased gate's observable,
-  // and the input for the report.md escalation. If this fires repeatedly in
+  // charter section WARNS (never fails) only when the repo holds no charter
+  // either — a held docs/coherence.md already governs these surface tickets
+  // (feature mode: ADR 0051; fix mode: ADR 0028), and the warning's "without a
+  // coherence charter" claim would be false. The recall-biased gate's
+  // observable and the report.md escalation input. If this fires repeatedly in
   // practice, revisit a post-plan distill pass (Decision 1), not now.
   const surfaceTickets = ordered.filter((t) => touchesVisualSurface(t));
-  if (surfaceTickets.length > 0 && !coherenceAuthored && !featureWithHeldCharter) {
+  if (surfaceTickets.length > 0 && !coherenceAuthored && !charterHeld) {
     console.warn(
       `[plan] warning: ${surfaceTickets.length} ticket(s) appear to touch a visual surface (${surfaceTickets.map((t) => t.number).join(", ")}) but the plan's $DESIGN block has no \`## Coherence contract\` section — surface tickets will build without a coherence charter (ADR 0028). Add the section to $DESIGN or accept the drift.`,
     );

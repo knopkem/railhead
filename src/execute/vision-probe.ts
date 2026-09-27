@@ -435,22 +435,26 @@ export interface VisionGateRefusal {
   reason: string;
 }
 
-/** Probe each distinct seat model once (always — a model id's backing model can
- * change under it, so a cached "yes" is not evidence), record the outcomes, and
- * COLLECT the gates that cannot run vision-verified. This function no longer
- * refuses itself: the caller decides what a refusal means — an unattended run
- * still hard-fails, but an interactive operator may choose to continue with
- * the affected gates off (a user with no vision-capable model at hand).
- * Budgets are deliberately tight and independent of the run's phase limits: a
- * probe is three steps of work, and a wedged probe must never inherit a
- * multi-hour stall tolerance. */
+/** Check each distinct seat model against the recorded measurements, record any
+ * new outcomes, and COLLECT the gates that cannot run vision-verified. A
+ * current-version PASS is reused, so a verified project pays nothing at run
+ * start (ADR 0036 amendment); a model with no pass — never measured, measured
+ * blind, or measured inconclusively — is probed now, because a stale "no"
+ * silently disables vision work and a flaky probe produced exactly that.
+ * This function does not refuse itself: the caller decides what a refusal
+ * means — an unattended run still hard-fails, but an interactive operator may
+ * choose to continue with the affected gates off (a user with no
+ * vision-capable model at hand). Budgets are deliberately tight and
+ * independent of the run's phase limits: a probe is three steps of work, and a
+ * wedged probe must never inherit a multi-hour stall tolerance. */
 export async function ensureVisionForGates(options: {
   cwd: string;
   requests: VisionGateRequest[];
   maxContextTokens?: number | null;
 }): Promise<{ records: VisionCapabilityRecord[]; refusals: VisionGateRefusal[] }> {
   const { cwd, requests } = options;
-  const byModel = new Map<string, VisionProbeOutcome>();
+  const cached = await readVisionCapabilities(cwd);
+  const byModel = new Map<string, VisionProbeOutcome | null>();
   const records: VisionCapabilityRecord[] = [];
   const refusals: VisionGateRefusal[] = [];
   for (const request of requests) {
@@ -462,19 +466,24 @@ export async function ensureVisionForGates(options: {
       });
       continue;
     }
-    let outcome = byModel.get(request.model);
-    if (!outcome) {
-      outcome = await runVisionProbe({
-        cwd,
-        model: request.model,
-        maxContextTokens: options.maxContextTokens ?? null,
-        maxSteps: 12,
-        stallTimeoutSec: 120,
-      });
-      byModel.set(request.model, outcome);
-      records.push(await recordVisionCapability(cwd, outcome));
+    if (!byModel.has(request.model)) {
+      const pass = cached.find((r) => r.model === request.model && r.probe_version === PROBE_VERSION && r.reads_images);
+      if (pass) {
+        byModel.set(request.model, null);
+      } else {
+        const outcome = await runVisionProbe({
+          cwd,
+          model: request.model,
+          maxContextTokens: options.maxContextTokens ?? null,
+          maxSteps: 12,
+          stallTimeoutSec: 120,
+        });
+        byModel.set(request.model, outcome);
+        records.push(await recordVisionCapability(cwd, outcome));
+      }
     }
-    if (!outcome.ok) {
+    const outcome = byModel.get(request.model);
+    if (outcome && !outcome.ok) {
       refusals.push({ gate: request.gate, model: request.model, reason: describeProbeFailure(request, outcome) });
     }
   }
@@ -506,10 +515,10 @@ export function describeVisionOutcome(outcome: VisionProbeOutcome): string {
 
 /** ADR 0036: the implementer's visual self-check is optional, so a surfaced
  * run measures the implement seat only when no current-version PASS covers
- * today's model — a gate always re-probes; this seat does not pay that cost on
- * every run once verified. A negative or inconclusive record is re-probed every
- * invocation: a stale "no" silently disables the self-check (the opt-out §4
- * rejects), and it is the false-negative direction that a flaky probe
+ * today's model — a pass is reused across invocations, so a verified seat
+ * never pays a per-run re-probe. A negative or inconclusive record IS re-probed
+ * every invocation: a stale "no" silently disables the self-check (the opt-out
+ * §4 rejects), and it is the false-negative direction that a flaky probe
  * produced. `skip` names models already probed this invocation (the gate
  * seats), so an all-one-model config probes once. */
 export async function ensureImplementerVision(options: {

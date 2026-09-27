@@ -1256,6 +1256,64 @@ describe("runPlan — coherence charter (issue #99 / ADR 0028)", () => {
     await runPlan({ cwd, prompt: "a math library", model: null });
     expect(await readProjectDoc(cwd, "docs/coherence.md")).toBeNull();
   });
+
+  it("a fix plan against a repo that already holds a charter does not warn charter-less (ADR 0028)", async () => {
+    const cwd = await freshCwd();
+    await writeProjectDoc(cwd, CHARTER_DOC, "### Visual tokens\nHELD_CHARTER_MARKER: tokens.\n");
+    mockExec.mockImplementation(async (_prompt, options) => {
+      // Fix mode is ONE call. The fix prompt never asks for a coherence
+      // contract — the held docs/coherence.md governs the corrective flow.
+      await emitText(options.ledgerDir, options.phaseFile, "$VERIFY\nnpm test\n$INTERFACE\nbrowser-ui\n$SMOKE\nnpm run dev\n$DESIGN\nGoal: fix the river.\n$END\n$ARCHITECTURE\nModules: renderer.\n$END\n$TICKETS\n[{\"title\":\"River\",\"what\":\"fix the river\",\"criteria\":[\"the river renders with visible width\"]}]\n");
+      return okResult();
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await runPlan({ cwd, prompt: "the river is a line", model: null, mode: "fix" });
+      expect(await readProjectDoc(cwd, CHARTER_DOC)).toContain("HELD_CHARTER_MARKER");
+      expect(warn.mock.calls.join("\n")).not.toMatch(/without a coherence charter/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a fix plan never authors a charter: a section the model emits is dropped, not written over the held one", async () => {
+    const cwd = await freshCwd();
+    await writeProjectDoc(cwd, CHARTER_DOC, "### Visual tokens\nHELD_CHARTER_MARKER: tokens.\n");
+    mockExec.mockImplementation(async (_prompt, options) => {
+      await emitText(options.ledgerDir, options.phaseFile, "$VERIFY\nnpm test\n$DESIGN\nGoal: fix the river.\n## Coherence contract\n### Visual tokens\nFRESH_SECTION_MUST_NOT_LAND.\n### Layout model\nCanvas.\n### Chrome rules\nOne recipe.\n$END\n$ARCHITECTURE\nModules: renderer.\n$END\n$TICKETS\n[{\"title\":\"River\",\"what\":\"fix the river\",\"criteria\":[\"the river renders with visible width\"]}]\n");
+      return okResult();
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await runPlan({ cwd, prompt: "the river is a line", model: null, mode: "fix" });
+      const coherence = await readProjectDoc(cwd, CHARTER_DOC);
+      expect(coherence).toContain("HELD_CHARTER_MARKER");
+      expect(coherence).not.toContain("FRESH_SECTION_MUST_NOT_LAND");
+      expect(warn.mock.calls.join("\n")).not.toMatch(/without a coherence charter/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a build plan that omits the section does not claim charter-less surface tickets while a held charter exists", async () => {
+    const cwd = await freshCwd();
+    await writeProjectDoc(cwd, CHARTER_DOC, "### Visual tokens\nHELD_CHARTER_MARKER: tokens.\n");
+    mockExec.mockImplementation(async (_prompt, options) => {
+      await emitStaged(options, {
+        plan: planPayload({ iface: "browser-ui", design: "Goal: rework the terrain look." }),
+        tickets: '[{"title":"Terrain","what":"rework the tones","criteria":["the terrain renders new tones"]}]',
+      });
+      return okResult();
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await runPlan({ cwd, prompt: "rework the look", model: null });
+      expect(await readProjectDoc(cwd, CHARTER_DOC)).toContain("HELD_CHARTER_MARKER");
+      expect(warn.mock.calls.join("\n")).not.toMatch(/without a coherence charter/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe("maybeGenerateAgentsMd", () => {

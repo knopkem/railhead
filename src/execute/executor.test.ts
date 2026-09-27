@@ -1,9 +1,9 @@
 import { mkdtemp, writeFile, mkdir, readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { describeExecFailure, executeFreshPhase, executeOpendCode, isQuotaError, isToolTimeout, isTransientError, resetWorkerForTest, stepTimingMs, windowedStepRates, writePayloadOf, configureContextGuard, resetContextGuardForTest } from "./executor.ts";
 import { resetProviderHealthForTest, setProviderHealth } from "./provider-health.ts";
 import { estimateTokens } from "./diff-filter.ts";
@@ -47,6 +47,71 @@ function restorePath(restorePath: string) {
   process.env.PATH = restorePath;
 }
 
+// The executor's guards run on whichever clock a test installs; the fake
+// opencode subprocess and the harness polling need the real one. Capture the
+// real timers before any test installs fake ones.
+const realSetTimeout = setTimeout;
+const realNow = Date.now;
+const realDelay = (ms: number): Promise<void> =>
+  new Promise((resolve) => realSetTimeout(resolve, ms));
+
+/** Poll with the real clock until `pred` holds. The subprocess reports through
+ * the ledger and real files, never the faked clock. */
+async function waitFor(pred: () => boolean, timeoutMs = 10_000): Promise<void> {
+  const start = realNow();
+  while (!pred()) {
+    if (realNow() - start > timeoutMs) throw new Error("waitFor timed out");
+    await realDelay(5);
+  }
+}
+
+/** Run `fn` on vitest fake timers so the executor's guards fire on
+ * `vi.advanceTimersByTimeAsync` instead of real seconds. */
+async function withFakeTimers<T>(fn: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers();
+  try {
+    return await fn();
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
+/** Await a phase without depending on the test-timeout clock: give it a real
+ * beat to close, then advance the fake clock (landing a pending guard or the
+ * SIGKILL escalation) and wait again. */
+async function settle<T>(phase: Promise<T>): Promise<T> {
+  for (let i = 0; i < 20; i++) {
+    const done = await Promise.race([phase.then((value) => ({ value })), realDelay(250).then(() => null)]);
+    if (done !== null) return done.value;
+    await vi.advanceTimersByTimeAsync(1_000);
+  }
+  throw new Error("phase did not settle");
+}
+
+/** Ledger contents for a phase, "" before the first event lands. */
+function phaseLedger(ledgerDir: string, phaseFile: string): string {
+  try {
+    return readFileSync(join(ledgerDir, "events", `${phaseFile}.jsonl`), "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function ledgerCount(ledgerDir: string, phaseFile: string, needle: string): number {
+  return phaseLedger(ledgerDir, phaseFile).split(needle).length - 1;
+}
+
+/** A shell loop that holds the emitter until the test writes the gate file:
+ * the deterministic stand-in for the mid-stream delays these tests care about,
+ * with no real seconds burned. */
+function gateLoop(gate: string): string {
+  return `while [ ! -f '${gate}' ]; do sleep 0.05; done`;
+}
+
+function gatePath(label: string, suffix = ""): string {
+  return join(tmpdir(), `${label}-${process.pid}-${Date.now()}${suffix}`);
+}
+
 function stepStartLine(): string {
   return JSON.stringify({ type: "step_start", timestamp: Date.now(), part: { type: "step-start", id: "p1", messageID: "m1", sessionID: "s1", snapshot: "x" } });
 }
@@ -81,7 +146,7 @@ describe("executeOpendCode step budget", () => {
     // executor should kill us when the 4th step_start arrives (cap = 3).
     const startLine = stepStartLine().replace(/'/g, "'\\''");
     const finishLine = stepFinishLine().replace(/'/g, "'\\''");
-    const emitter = `printf '${startLine}\\n${finishLine}\\n' ; sleep 0.2 ; printf '${startLine}\\n${finishLine}\\n' ; sleep 0.2 ; printf '${startLine}\\n${finishLine}\\n' ; sleep 0.2 ; printf '${startLine}\\n${finishLine}\\n' ; sleep 30`;
+    const emitter = `printf '${startLine}\\n${finishLine}\\n' ; sleep 0.2 ; printf '${startLine}\\n${finishLine}\\n' ; sleep 0.2 ; printf '${startLine}\\n${finishLine}\\n' ; sleep 0.2 ; printf '${startLine}\\n${finishLine}\\n' ; sleep 3`;
     const env = await makeFakeOpencode(emitter);
     try {
       const result = await executeOpendCode("test prompt", {
@@ -168,6 +233,40 @@ describe("executeOpendCode step budget", () => {
 });
 
 /**
+ * A guard kill must end shell-spawned grandchildren too: the group signal can
+ * race the shell's fork of its next command, and the orphan that inherits the
+ * stdio pipes would otherwise keep `close` pending until its own timeout.
+ */
+describe("executeOpendCode kill escalation", () => {
+  it("escalates to SIGKILL when a SIGTERM-ignoring grandchild holds the pipes, so a killed phase still closes promptly", async () => {
+    const start = stepStartLine().replace(/'/g, "'\\''");
+    const finish = stepFinishLine().replace(/'/g, "'\\''");
+    // The deterministic shape of the race: a grandchild is already alive when
+    // the step budget kills, ignores SIGTERM, and inherits stdout, so `close`
+    // waits on it until the SIGKILL escalation ends it.
+    const emitter = `sh -c 'trap "" TERM; sleep 30' & printf '%s\\n%s\\n' '${start}' '${finish}' ; sleep 0.2 ; printf '%s\\n' '${start}' ; sleep 30`;
+    const env = await makeFakeOpencode(emitter);
+    try {
+      const t0 = Date.now();
+      const result = await executeOpendCode("test prompt", {
+        cwd: env.cwd,
+        ledgerDir: env.ledgerDir,
+        phaseFile: "kill-escalation",
+        model: null,
+        maxSteps: 1,
+        stallTimeoutSec: null,
+        live: false,
+        heartbeat: false,
+      });
+      expect(result.status).toBe("budget_exceeded");
+      expect(Date.now() - t0).toBeLessThan(10_000);
+    } finally {
+      restorePath(env.restorePath);
+    }
+  }, 60000);
+});
+
+/**
  * The step-count budget above guards a model looping across many steps. It
  * cannot catch the opposite failure: ONE step that never returns (a bash
  * tool call waiting on stdin, a dev server started by mistake), where step
@@ -176,63 +275,86 @@ describe("executeOpendCode step budget", () => {
  */
 describe("executeOpendCode stall timeout", () => {
   it("kills a silent subprocess and returns status timeout", async () => {
-    const env = await makeFakeOpencode("sleep 5");
-    try {
-      const result = await executeOpendCode("test prompt", {
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "stall-kill",
-        model: null,
-        stallTimeoutSec: 1,
-        live: false,
-        heartbeat: false,
-      });
-      expect(result.status).toBe("timeout");
-    } finally {
-      restorePath(env.restorePath);
-    }
+    await withFakeTimers(async () => {
+      const spawned = gatePath("stall-kill");
+      const env = await makeFakeOpencode(`: > '${spawned}' ; sleep 5`);
+      try {
+        const phase = executeOpendCode("test prompt", {
+          cwd: env.cwd,
+          ledgerDir: env.ledgerDir,
+          phaseFile: "stall-kill",
+          model: null,
+          stallTimeoutSec: 1,
+          live: false,
+          heartbeat: false,
+        });
+        await waitFor(() => existsSync(spawned));
+        await vi.advanceTimersByTimeAsync(1_000);
+        const result = await settle(phase);
+        expect(result.status).toBe("timeout");
+      } finally {
+        restorePath(env.restorePath);
+      }
+    });
   }, 60000);
 
   it("resets the stall clock on every output, so a slow multi-step phase is never penalized", async () => {
-    const start = stepStartLine().replace(/'/g, "'\\''");
-    const finish = stepFinishLine().replace(/'/g, "'\\''");
-    // Five step_start+step_finish pairs spaced 0.4s apart (2s total) — each
-    // print must reset the 1s stall clock, so the process finishes normally
-    // despite running longer than the stall threshold overall.
-    const emitter = `for i in 1 2 3 4 5; do printf '${start}\\n${finish}\\n' ; sleep 0.4 ; done`;
-    const env = await makeFakeOpencode(emitter);
-    try {
-      const result = await executeOpendCode("test prompt", {
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "stall-reset",
-        model: null,
-        stallTimeoutSec: 1,
-        live: false,
-        heartbeat: false,
-      });
-      expect(result.status).toBe("ok");
-    } finally {
-      restorePath(env.restorePath);
-    }
+    await withFakeTimers(async () => {
+      const start = stepStartLine().replace(/'/g, "'\\''");
+      const finish = stepFinishLine().replace(/'/g, "'\\''");
+      // Five step_start+step_finish pairs 0.3s apart on the fake clock (1.5s
+      // total) — each print must re-arm the 1s stall clock, so the process
+      // finishes normally despite outliving the threshold overall.
+      const gates = [0, 1, 2, 3, 4].map((i) => gatePath("stall-reset", `-${i}`));
+      const emitter = `${gates.map((g) => `printf '${start}\\n${finish}\\n' ; ${gateLoop(g)}`).join(" ; ")} ; exit 0`;
+      const env = await makeFakeOpencode(emitter);
+      try {
+        const phase = executeOpendCode("test prompt", {
+          cwd: env.cwd,
+          ledgerDir: env.ledgerDir,
+          phaseFile: "stall-reset",
+          model: null,
+          stallTimeoutSec: 1,
+          live: false,
+          heartbeat: false,
+        });
+        for (let i = 0; i < gates.length; i++) {
+          await waitFor(() => ledgerCount(env.ledgerDir, "stall-reset", '"type":"step_start"') >= i + 1);
+          await vi.advanceTimersByTimeAsync(300);
+          await writeFile(gates[i], "");
+        }
+        const result = await settle(phase);
+        expect(result.status).toBe("ok");
+      } finally {
+        restorePath(env.restorePath);
+      }
+    });
   }, 60000);
 
   it("disables stall detection when stallTimeoutSec is null", async () => {
-    const env = await makeFakeOpencode("sleep 2");
-    try {
-      const result = await executeOpendCode("test prompt", {
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "stall-disabled",
-        model: null,
-        stallTimeoutSec: null,
-        live: false,
-        heartbeat: false,
-      });
-      expect(result.status).toBe("ok");
-    } finally {
-      restorePath(env.restorePath);
-    }
+    await withFakeTimers(async () => {
+      const gate = gatePath("stall-disabled");
+      const env = await makeFakeOpencode(`${gateLoop(gate)} ; exit 0`);
+      try {
+        const phase = executeOpendCode("test prompt", {
+          cwd: env.cwd,
+          ledgerDir: env.ledgerDir,
+          phaseFile: "stall-disabled",
+          model: null,
+          stallTimeoutSec: null,
+          live: false,
+          heartbeat: false,
+        });
+        // Well past the 3600s DEFAULT_STALL_TIMEOUT_SEC: a null timeout must
+        // arm no stall clock at all, not a default one.
+        await vi.advanceTimersByTimeAsync(3_700_000);
+        await writeFile(gate, "");
+        const result = await settle(phase);
+        expect(result.status).toBe("ok");
+      } finally {
+        restorePath(env.restorePath);
+      }
+    });
   }, 60000);
 });
 
@@ -353,7 +475,7 @@ describe("executeOpendCode halt detection (gh #111)", () => {
     // Emit one full step, then drop `.railhead/STOP`, then emit another line:
     // the executor must detect the file at the next line and kill, returning
     // status "halted" with the reason (an honest stop, not a failure).
-    const emitter = `printf '${start}\\n${finish}\\n' ; sleep 0.1 ; mkdir -p .railhead ; printf 'fundamental flaw\\n' > .railhead/STOP ; printf '${start}\\n' ; sleep 30`;
+    const emitter = `printf '${start}\\n${finish}\\n' ; sleep 0.1 ; mkdir -p .railhead ; printf 'fundamental flaw\\n' > .railhead/STOP ; printf '${start}\\n' ; sleep 3`;
     const env = await makeFakeOpencode(emitter);
     try {
       const result = await executeOpendCode("test prompt", {
@@ -381,7 +503,7 @@ describe("executeOpendCode token budget guard (#53)", () => {
     // exited right after that event could slip through as "ok").
     const start = stepStartLine().replace(/'/g, "'\\''");
     const over = stepFinishLineWithTokens(5000).replace(/'/g, "'\\''");
-    const emitter = `printf '${start}\\n${over}\\n' ; sleep 0.2 ; printf '${start}\\n' ; sleep 30`;
+    const emitter = `printf '${start}\\n${over}\\n' ; sleep 0.2 ; printf '${start}\\n' ; sleep 3`;
     const env = await makeFakeOpencode(emitter);
     try {
       const result = await executeOpendCode("test prompt", {
@@ -457,7 +579,7 @@ describe("executeOpendCode token budget guard (#53)", () => {
     // Budget is 10000; 95% = 9500. A peak of 9600 must trigger the kill.
     const start = stepStartLine().replace(/'/g, "'\\''");
     const over = stepFinishLineWithTokens(9600).replace(/'/g, "'\\''");
-    const emitter = `printf '${start}\\n${over}\\n' ; sleep 0.2 ; printf '${start}\\n' ; sleep 30`;
+    const emitter = `printf '${start}\\n${over}\\n' ; sleep 0.2 ; printf '${start}\\n' ; sleep 3`;
     const env = await makeFakeOpencode(emitter);
     try {
       const result = await executeOpendCode("test prompt", {
@@ -534,41 +656,51 @@ describe("executeOpendCode token budget guard (#53)", () => {
  */
 describe("executeOpendCode in-flight token estimate (#82)", () => {
   it("shows a rising in-flight estimate in the heartbeat while one step streams content and never finishes", async () => {
-    // One step_start, then four ~4000-char assistant chunks spaced out over
-    // ~1.4s, then a clean exit — NO step_finish, so peakTokens never moves.
-    // The heartbeat (every 0.3s) must show ctx climbing chunk by chunk.
-    const start = stepStartLine().replace(/'/g, "'\\''");
-    const chunk = (n: number) => textEvent("x".repeat(4000 * n)).replace(/'/g, "'\\''");
-    const emitter = `printf '%s\\n' '${start}' ; printf '%s\\n' '${chunk(1)}' ; sleep 0.35 ; printf '%s\\n' '${chunk(2)}' ; sleep 0.35 ; printf '%s\\n' '${chunk(3)}' ; sleep 0.35 ; printf '%s\\n' '${chunk(4)}' ; exit 0`;
-    const env = await makeFakeOpencode(emitter);
-    const ests: number[] = [];
-    try {
-      const result = await executeOpendCode("test prompt", {
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "inflight-est-heartbeat",
-        model: null,
-        stallTimeoutSec: null,
-        maxStepModelSec: null,
-        heartbeat: true,
-        heartbeatIntervalSec: 0.3,
-        liveSink: (line: string) => {
-          const m = line.match(/ctx (\d+(?:\.\d+)?)k/);
-          if (line.includes("running") && m) ests.push(parseFloat(m[1]));
-        },
-      });
-      // Sanity: the process finished on its own.
-      expect(result.status).toBe("ok");
-      // Several heartbeats fired while the step was streaming.
-      expect(ests.length).toBeGreaterThanOrEqual(3);
-      // The estimate never drops (monotone in the reconciled base + streamed
-      // tokens), rises chunk over chunk, and ends at all four chunks.
-      for (let i = 1; i < ests.length; i++) expect(ests[i]).toBeGreaterThanOrEqual(ests[i - 1]);
-      expect(ests[ests.length - 1]).toBeGreaterThan(ests[0]);
-      expect(ests[ests.length - 1]).toBeGreaterThanOrEqual(3.0);
-    } finally {
-      restorePath(env.restorePath);
-    }
+    // One step_start, then four ~4000-char assistant chunks released one per
+    // fake heartbeat interval, then a clean exit — NO step_finish, so
+    // peakTokens never moves. The heartbeat must show ctx climbing chunk by
+    // chunk.
+    await withFakeTimers(async () => {
+      const start = stepStartLine().replace(/'/g, "'\\''");
+      const chunk = (n: number) => textEvent("x".repeat(4000 * n)).replace(/'/g, "'\\''");
+      const gates = [1, 2, 3, 4].map((i) => gatePath("inflight-est-heartbeat", `-${i}`));
+      const emitter = `printf '%s\\n' '${start}' ; ${gates.map((g, i) => `printf '%s\\n' '${chunk(i + 1)}' ; ${gateLoop(g)}`).join(" ; ")} ; exit 0`;
+      const env = await makeFakeOpencode(emitter);
+      const ests: number[] = [];
+      try {
+        const phase = executeOpendCode("test prompt", {
+          cwd: env.cwd,
+          ledgerDir: env.ledgerDir,
+          phaseFile: "inflight-est-heartbeat",
+          model: null,
+          stallTimeoutSec: null,
+          maxStepModelSec: null,
+          heartbeat: true,
+          heartbeatIntervalSec: 0.3,
+          liveSink: (line: string) => {
+            const m = line.match(/ctx (\d+(?:\.\d+)?)k/);
+            if (line.includes("running") && m) ests.push(parseFloat(m[1]));
+          },
+        });
+        for (let i = 0; i < gates.length; i++) {
+          await waitFor(() => ledgerCount(env.ledgerDir, "inflight-est-heartbeat", '"type":"text"') >= i + 1);
+          await vi.advanceTimersByTimeAsync(300);
+          await writeFile(gates[i], "");
+        }
+        const result = await settle(phase);
+        // Sanity: the process finished on its own.
+        expect(result.status).toBe("ok");
+        // Several heartbeats fired while the step was streaming.
+        expect(ests.length).toBeGreaterThanOrEqual(3);
+        // The estimate never drops (monotone in the reconciled base + streamed
+        // tokens), rises chunk over chunk, and ends at all four chunks.
+        for (let i = 1; i < ests.length; i++) expect(ests[i]).toBeGreaterThanOrEqual(ests[i - 1]);
+        expect(ests[ests.length - 1]).toBeGreaterThan(ests[0]);
+        expect(ests[ests.length - 1]).toBeGreaterThanOrEqual(3.0);
+      } finally {
+        restorePath(env.restorePath);
+      }
+    });
   }, 60000);
 
   it("kills mid-step when the in-flight estimate crosses 95% of the budget during one never-finishing step", async () => {
@@ -675,27 +807,31 @@ describe("executeOpendCode in-flight token estimate (#82)", () => {
     // request's complete context (100 + 900 cache-read) crosses it and must
     // kill. Before cache was counted this phase passed as "ok" while holding
     // a 1k-token context against a 1k budget.
-    const start = stepStartLine().replace(/'/g, "'\\''");
-    const finish = stepFinishLineWithCache(100, 900, 0).replace(/'/g, "'\\''");
-    const emitter = `printf '%s\\n%s\\n' '${start}' '${finish}' ; sleep 30`;
-    const env = await makeFakeOpencode(emitter);
-    try {
-      const result = await executeOpendCode("test prompt", {
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "cache-inclusive-kill",
-        model: null,
-        maxContextTokens: 1_000,
-        guardMode: "kill",
-        stallTimeoutSec: null,
-        maxStepModelSec: null,
-        live: false,
-        heartbeat: false,
-      });
-      expect(result.status).toBe("budget_exceeded");
-    } finally {
-      restorePath(env.restorePath);
-    }
+    await withFakeTimers(async () => {
+      const start = stepStartLine().replace(/'/g, "'\\''");
+      const finish = stepFinishLineWithCache(100, 900, 0).replace(/'/g, "'\\''");
+      const emitter = `printf '%s\\n%s\\n' '${start}' '${finish}' ; sleep 3`;
+      const env = await makeFakeOpencode(emitter);
+      try {
+        const phase = executeOpendCode("test prompt", {
+          cwd: env.cwd,
+          ledgerDir: env.ledgerDir,
+          phaseFile: "cache-inclusive-kill",
+          model: null,
+          maxContextTokens: 1_000,
+          guardMode: "kill",
+          stallTimeoutSec: null,
+          maxStepModelSec: null,
+          live: false,
+          heartbeat: false,
+        });
+        await waitFor(() => phaseLedger(env.ledgerDir, "cache-inclusive-kill").includes('"type":"step_finish"'));
+        const result = await settle(phase);
+        expect(result.status).toBe("budget_exceeded");
+      } finally {
+        restorePath(env.restorePath);
+      }
+    });
   }, 60000);
 });
 
@@ -1091,7 +1227,7 @@ describe("executeOpendCode stopAfterVerdict (#60)", () => {
     // escapes that printf would otherwise turn into real line breaks.)
     const start = stepStartLine().replace(/'/g, "'\\''");
     const verdict = textEvent("$VISUAL_PASS\n$END\nLEARNED: capture this exactly once").replace(/'/g, "'\\''");
-    const emitter = `printf '%s\\n%s\\n' '${start}' '${verdict}' ; sleep 0.3 ; printf '%s\\n%s\\n' '${start}' '${verdict}' ; sleep 30`;
+    const emitter = `printf '%s\\n%s\\n' '${start}' '${verdict}' ; sleep 0.3 ; printf '%s\\n%s\\n' '${start}' '${verdict}' ; sleep 3`;
     const env = await makeFakeOpencode(emitter);
     try {
       const result = await executeOpendCode("test prompt", {
@@ -1141,35 +1277,41 @@ describe("executeOpendCode stopAfterVerdict (#60)", () => {
 
 describe("executeOpendCode stopAfterBlocked (ADR 0040)", () => {
   it("kills at the next step boundary on a terminal $BLOCKED and returns the parsed report", async () => {
-    const start = stepStartLine().replace(/'/g, "'\\''");
-    const marker = textEvent("$BLOCKED ticket=07 kind=verification-unavailable reason=needs a live viewer").replace(/'/g, "'\\''");
-    const emitter = `printf '%s\\n%s\\n' '${start}' '${marker}' ; sleep 2 ; printf '%s\\n%s\\n' '${start}' '${marker}' ; sleep 2`;
-    const env = await makeFakeOpencode(emitter);
-    try {
-      const result = await executeOpendCode("test prompt", {
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "blocked-early",
-        model: null,
-        stopAfterMarker: CHECKPOINT_RE,
-        stopAfterBlocked: true,
-        stallTimeoutSec: null,
-        live: false,
-        heartbeat: false,
-      });
-      expect(result.status).toBe("ok");
-      expect(result.steps).toBe(1);
-      expect(result.block).toEqual({
-        ticket: "07",
-        kind: "verification-unavailable",
-        reason: "needs a live viewer",
-        malformedKind: false,
-      });
-      const raw = await readFile(join(env.ledgerDir, "events", "blocked-early.jsonl"), "utf8");
-      expect(raw).toContain("$BLOCKED ticket=07");
-    } finally {
-      restorePath(env.restorePath);
-    }
+    await withFakeTimers(async () => {
+      const start = stepStartLine().replace(/'/g, "'\\''");
+      const marker = textEvent("$BLOCKED ticket=07 kind=verification-unavailable reason=needs a live viewer").replace(/'/g, "'\\''");
+      const gate = gatePath("blocked-early");
+      const emitter = `printf '%s\\n%s\\n' '${start}' '${marker}' ; ${gateLoop(gate)} ; printf '%s\\n%s\\n' '${start}' '${marker}' ; sleep 3`;
+      const env = await makeFakeOpencode(emitter);
+      try {
+        const phase = executeOpendCode("test prompt", {
+          cwd: env.cwd,
+          ledgerDir: env.ledgerDir,
+          phaseFile: "blocked-early",
+          model: null,
+          stopAfterMarker: CHECKPOINT_RE,
+          stopAfterBlocked: true,
+          stallTimeoutSec: null,
+          live: false,
+          heartbeat: false,
+        });
+        await waitFor(() => phaseLedger(env.ledgerDir, "blocked-early").includes("$BLOCKED ticket=07"));
+        await writeFile(gate, "");
+        const result = await settle(phase);
+        expect(result.status).toBe("ok");
+        expect(result.steps).toBe(1);
+        expect(result.block).toEqual({
+          ticket: "07",
+          kind: "verification-unavailable",
+          reason: "needs a live viewer",
+          malformedKind: false,
+        });
+        const raw = await readFile(join(env.ledgerDir, "events", "blocked-early.jsonl"), "utf8");
+        expect(raw).toContain("$BLOCKED ticket=07");
+      } finally {
+        restorePath(env.restorePath);
+      }
+    });
   }, 60000);
 
   it("does not arm on a prose mention of the format that is not the last line", async () => {
@@ -1207,28 +1349,34 @@ describe("executeOpendCode stopAfterMarker (checkpoint contract, #84 S0.2)", () 
     // signal — applies to ANY stop marker. A custom marker must get the
     // identical boundary-kill, and the marker text must survive into the
     // ledger for the railhead's ticket bookkeeping.
-    const start = stepStartLine().replace(/'/g, "'\\''");
-    const marker = textEvent("$CHECKPOINT ticket=01").replace(/'/g, "'\\''");
-    const emitter = `printf '%s\\n%s\\n' '${start}' '${marker}' ; sleep 2 ; printf '%s\\n%s\\n' '${start}' '${marker}' ; sleep 2`;
-    const env = await makeFakeOpencode(emitter);
-    try {
-      const result = await executeOpendCode("test prompt", {
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "checkpoint-early",
-        model: null,
-        stopAfterMarker: /\$CHECKPOINT\b/i,
-        stallTimeoutSec: null,
-        live: false,
-        heartbeat: false,
-      });
-      expect(result.status).toBe("ok");
-      expect(result.steps).toBe(1);
-      const raw = await readFile(join(env.ledgerDir, "events", "checkpoint-early.jsonl"), "utf8");
-      expect(raw).toContain("$CHECKPOINT ticket=01");
-    } finally {
-      restorePath(env.restorePath);
-    }
+    await withFakeTimers(async () => {
+      const start = stepStartLine().replace(/'/g, "'\\''");
+      const marker = textEvent("$CHECKPOINT ticket=01").replace(/'/g, "'\\''");
+      const gate = gatePath("checkpoint-early");
+      const emitter = `printf '%s\\n%s\\n' '${start}' '${marker}' ; ${gateLoop(gate)} ; printf '%s\\n%s\\n' '${start}' '${marker}' ; sleep 3`;
+      const env = await makeFakeOpencode(emitter);
+      try {
+        const phase = executeOpendCode("test prompt", {
+          cwd: env.cwd,
+          ledgerDir: env.ledgerDir,
+          phaseFile: "checkpoint-early",
+          model: null,
+          stopAfterMarker: /\$CHECKPOINT\b/i,
+          stallTimeoutSec: null,
+          live: false,
+          heartbeat: false,
+        });
+        await waitFor(() => phaseLedger(env.ledgerDir, "checkpoint-early").includes("$CHECKPOINT ticket=01"));
+        await writeFile(gate, "");
+        const result = await settle(phase);
+        expect(result.status).toBe("ok");
+        expect(result.steps).toBe(1);
+        const raw = await readFile(join(env.ledgerDir, "events", "checkpoint-early.jsonl"), "utf8");
+        expect(raw).toContain("$CHECKPOINT ticket=01");
+      } finally {
+        restorePath(env.restorePath);
+      }
+    });
   }, 60000);
 
   it("does not early-kill when the marker never appears (the run continues to its natural end)", async () => {
@@ -1338,7 +1486,7 @@ describe("executeOpendCode spin-loop detection", () => {
     // Emit the same errored tool call 5 times, sleeping between each so the
     // stall timer resets each time (the model IS producing output, just the
     // same output — that's the spin loop the detector must catch).
-    const emitter = `printf '${escaped}\\n' ; sleep 0.3 ; printf '${escaped}\\n' ; sleep 0.3 ; printf '${escaped}\\n' ; sleep 0.3 ; printf '${escaped}\\n' ; sleep 0.3 ; printf '${escaped}\\n' ; sleep 30`;
+    const emitter = `printf '${escaped}\\n' ; sleep 0.3 ; printf '${escaped}\\n' ; sleep 0.3 ; printf '${escaped}\\n' ; sleep 0.3 ; printf '${escaped}\\n' ; sleep 0.3 ; printf '${escaped}\\n' ; sleep 3`;
     const env = await makeFakeOpencode(emitter);
     try {
       const result = await executeOpendCode("test prompt", {
@@ -1512,7 +1660,7 @@ describe("executeOpendCode non-convergent-edit detection (gh #105)", () => {
     const w1 = completedWriteLine("src/model/history.test.ts", "line one\nline two\n");
     const w2 = completedWriteLine("src/model/history.test.ts", "line one\n  line two\n");
     const w3 = completedWriteLine("src/model/history.test.ts", "line one\nline two");
-    const emitter = `${pct(w1)} ; sleep 0.2 ; ${pct(w2)} ; sleep 0.2 ; ${pct(w3)} ; sleep 30`;
+    const emitter = `${pct(w1)} ; sleep 0.2 ; ${pct(w2)} ; sleep 0.2 ; ${pct(w3)} ; sleep 3`;
     const env = await makeFakeOpencode(emitter);
     try {
       const result = await executeOpendCode("test prompt", {
@@ -1562,7 +1710,7 @@ describe("executeOpendCode non-convergent-edit detection (gh #105)", () => {
     const other = completedWriteLine("src/scratch.ts", "scratch\n");
     // a, a, different-path, a, a, a → different-path resets; 3 identical after
     // it still trips the count.
-    const emitter = `${pct(w1)} ; sleep 0.05 ; ${pct(w1)} ; sleep 0.05 ; ${pct(other)} ; sleep 0.05 ; ${pct(w1)} ; sleep 0.05 ; ${pct(w1)} ; sleep 0.05 ; ${pct(w1)} ; sleep 30`;
+    const emitter = `${pct(w1)} ; sleep 0.05 ; ${pct(w1)} ; sleep 0.05 ; ${pct(other)} ; sleep 0.05 ; ${pct(w1)} ; sleep 0.05 ; ${pct(w1)} ; sleep 0.05 ; ${pct(w1)} ; sleep 3`;
     const env = await makeFakeOpencode(emitter);
     try {
       const result = await executeOpendCode("test prompt", {
@@ -1586,7 +1734,7 @@ describe("executeOpendCode non-convergent-edit detection (gh #105)", () => {
     const checkout = completedBashLine("git checkout -- src/model/history.test.ts");
     // write, write, bash(git checkout), write — the checkout must NOT reset
     // the streak; the third identical rewrite trips the count.
-    const emitter = `${pct(w1)} ; sleep 0.05 ; ${pct(w1)} ; sleep 0.05 ; ${pct(checkout)} ; sleep 0.05 ; ${pct(w1)} ; sleep 30`;
+    const emitter = `${pct(w1)} ; sleep 0.05 ; ${pct(w1)} ; sleep 0.05 ; ${pct(checkout)} ; sleep 0.05 ; ${pct(w1)} ; sleep 3`;
     const env = await makeFakeOpencode(emitter);
     try {
       const result = await executeOpendCode("test prompt", {
@@ -1634,141 +1782,174 @@ describe("executeOpendCode non-convergent-edit detection (gh #105)", () => {
  */
 describe("executeOpendCode model-time cap (#78)", () => {
   it("does not kill a step whose wall is a running tool — tool time is excluded from the cap", async () => {
-    // A step_start, then a tool_use in `running` state that holds for ~3s
-    // while the cap is 1s. If running-tool wall counted as model time, the
-    // phase would be killed ~1s in; it must survive until the terminal event.
-    const start = stepStartLine().replace(/'/g, "'\\''");
-    const running = toolUseLine("running").replace(/'/g, "'\\''");
-    const completed = toolUseLine("completed").replace(/'/g, "'\\''");
-    const finish = stepFinishLine().replace(/'/g, "'\\''");
-    const emitter = `printf '%s\\n' '${start}' ; sleep 0.6 ; printf '%s\\n' '${running}' ; sleep 3 ; printf '%s\\n%s\\n%s\\n' '${completed}' '${finish}' ; exit 0`;
-    const env = await makeFakeOpencode(emitter);
-    try {
-      const result = await executeOpendCode("test prompt", {
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "model-cap-tool",
-        model: null,
-        stallTimeoutSec: null,
-        maxStepModelSec: 1,
-        live: false,
-        heartbeat: false,
-      });
-      expect(result.status).toBe("ok");
-      expect(result.steps).toBe(1);
-    } finally {
-      restorePath(env.restorePath);
-    }
+    // A step_start, then a tool_use in `running` state that holds for 3 fake
+    // seconds while the cap is 1s. If running-tool wall counted as model time,
+    // the phase would be killed ~1s in; it must survive until the terminal
+    // event.
+    await withFakeTimers(async () => {
+      const start = stepStartLine().replace(/'/g, "'\\''");
+      const running = toolUseLine("running").replace(/'/g, "'\\''");
+      const completed = toolUseLine("completed").replace(/'/g, "'\\''");
+      const finish = stepFinishLine().replace(/'/g, "'\\''");
+      const gate = gatePath("model-cap-tool");
+      const emitter = `printf '%s\\n' '${start}' ; printf '%s\\n' '${running}' ; ${gateLoop(gate)} ; printf '%s\\n%s\\n%s\\n' '${completed}' '${finish}' ; exit 0`;
+      const env = await makeFakeOpencode(emitter);
+      try {
+        const phase = executeOpendCode("test prompt", {
+          cwd: env.cwd,
+          ledgerDir: env.ledgerDir,
+          phaseFile: "model-cap-tool",
+          model: null,
+          stallTimeoutSec: null,
+          maxStepModelSec: 1,
+          live: false,
+          heartbeat: false,
+        });
+        await waitFor(() => phaseLedger(env.ledgerDir, "model-cap-tool").includes('"running"'));
+        await vi.advanceTimersByTimeAsync(3_000);
+        await writeFile(gate, "");
+        const result = await settle(phase);
+        expect(result.status).toBe("ok");
+        expect(result.steps).toBe(1);
+      } finally {
+        restorePath(env.restorePath);
+      }
+    });
   }, 60000);
 
   it("kills a step with no running tool and no part completion past the cap, reporting a model-stall timeout", async () => {
     // A step_start followed by NOTHING — the pixeledit thrash shape: the model
     // server is alive but producing nothing. The silence stall timer is
     // disabled (null) so only the model-time cap can fire.
-    const start = stepStartLine().replace(/'/g, "'\\''");
-    const emitter = `printf '%s\\n' '${start}' ; sleep 6`;
-    const env = await makeFakeOpencode(emitter);
-    try {
-      const result = await executeOpendCode("test prompt", {
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "model-cap-kill",
-        model: null,
-        stallTimeoutSec: null,
-        maxStepModelSec: 1,
-        live: false,
-        heartbeat: false,
-      });
-      expect(result.status).toBe("timeout");
-      expect(result.steps).toBe(1);
-      // The errorMessage names the failure so describeExecFailure can tell a
-      // model-time stall from a silence stall (issue #80 routes them apart).
-      expect(result.errorMessage).toMatch(/^model-stalled:/);
-      expect(result.errorMessage).toContain("model-time budget");
-      expect(result.errorMessage).toContain("0 parts completed");
-    } finally {
-      restorePath(env.restorePath);
-    }
+    await withFakeTimers(async () => {
+      const start = stepStartLine().replace(/'/g, "'\\''");
+      const emitter = `printf '%s\\n' '${start}' ; sleep 6`;
+      const env = await makeFakeOpencode(emitter);
+      try {
+        const phase = executeOpendCode("test prompt", {
+          cwd: env.cwd,
+          ledgerDir: env.ledgerDir,
+          phaseFile: "model-cap-kill",
+          model: null,
+          stallTimeoutSec: null,
+          maxStepModelSec: 1,
+          live: false,
+          heartbeat: false,
+        });
+        await waitFor(() => phaseLedger(env.ledgerDir, "model-cap-kill").includes('"type":"step_start"'));
+        await vi.advanceTimersByTimeAsync(1_500);
+        const result = await settle(phase);
+        expect(result.status).toBe("timeout");
+        expect(result.steps).toBe(1);
+        // The errorMessage names the failure so describeExecFailure can tell a
+        // model-time stall from a silence stall (issue #80 routes them apart).
+        expect(result.errorMessage).toMatch(/^model-stalled:/);
+        expect(result.errorMessage).toContain("model-time budget");
+        expect(result.errorMessage).toContain("0 parts completed");
+      } finally {
+        restorePath(env.restorePath);
+      }
+    });
   }, 60000);
 
   it("names the estimated request size in the model-stall errorMessage once context is known", async () => {
     // A real first step (input 5000 → peak 5k), then a second step that grinds
     // with no output — the kill evidence should estimate the request size.
-    const start = stepStartLine().replace(/'/g, "'\\''");
-    const realFinish = stepFinishLineWithTokens(5000).replace(/'/g, "'\\''");
-    const emitter = `printf '%s\\n%s\\n' '${start}' '${realFinish}' ; sleep 0.2 ; printf '%s\\n' '${start}' ; sleep 6`;
-    const env = await makeFakeOpencode(emitter);
-    try {
-      const result = await executeOpendCode("test prompt", {
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "model-cap-est",
-        model: null,
-        stallTimeoutSec: null,
-        maxStepModelSec: 1,
-        live: false,
-        heartbeat: false,
-      });
-      expect(result.status).toBe("timeout");
-      expect(result.errorMessage).toMatch(/^model-stalled:/);
-      expect(result.errorMessage).toContain("~5k");
-      expect(result.errorMessage).toContain("elapsed");
-    } finally {
-      restorePath(env.restorePath);
-    }
-  }, 60000);
-
-  it("disables the model-time cap when maxStepModelSec is null or 0", async () => {
-    // A step that idles 2.5s past a 1s cap would die if the cap were armed —
-    // with it disabled (null/0) the step survives to its step_finish.
-    const start = stepStartLine().replace(/'/g, "'\\''");
-    const finish = stepFinishLine().replace(/'/g, "'\\''");
-    const emitter = `printf '%s\\n' '${start}' ; sleep 2.5 ; printf '%s\\n' '${finish}' ; exit 0`;
-    for (const maxStepModelSec of [null, 0]) {
+    await withFakeTimers(async () => {
+      const start = stepStartLine().replace(/'/g, "'\\''");
+      const realFinish = stepFinishLineWithTokens(5000).replace(/'/g, "'\\''");
+      const emitter = `printf '%s\\n%s\\n' '${start}' '${realFinish}' ; sleep 0.2 ; printf '%s\\n' '${start}' ; sleep 6`;
       const env = await makeFakeOpencode(emitter);
       try {
-        const result = await executeOpendCode("test prompt", {
+        const phase = executeOpendCode("test prompt", {
           cwd: env.cwd,
           ledgerDir: env.ledgerDir,
-          phaseFile: `model-cap-off-${String(maxStepModelSec)}`,
+          phaseFile: "model-cap-est",
           model: null,
           stallTimeoutSec: null,
-          maxStepModelSec,
+          maxStepModelSec: 1,
           live: false,
           heartbeat: false,
         });
-        expect(result.status).toBe("ok");
-        expect(result.steps).toBe(1);
+        await waitFor(() => ledgerCount(env.ledgerDir, "model-cap-est", '"type":"step_start"') >= 2);
+        await vi.advanceTimersByTimeAsync(1_500);
+        const result = await settle(phase);
+        expect(result.status).toBe("timeout");
+        expect(result.errorMessage).toMatch(/^model-stalled:/);
+        expect(result.errorMessage).toContain("~5k");
+        expect(result.errorMessage).toContain("elapsed");
       } finally {
         restorePath(env.restorePath);
       }
-    }
+    });
+  }, 60000);
+
+  it("disables the model-time cap when maxStepModelSec is null or 0", async () => {
+    // A step that idles well past a 1s cap (and past the 3600s default a
+    // disabled value must not fall back to) survives to its step_finish.
+    await withFakeTimers(async () => {
+      const start = stepStartLine().replace(/'/g, "'\\''");
+      const finish = stepFinishLine().replace(/'/g, "'\\''");
+      for (const maxStepModelSec of [null, 0]) {
+        const phaseFile = `model-cap-off-${String(maxStepModelSec)}`;
+        const gate = gatePath(phaseFile);
+        const emitter = `printf '%s\\n' '${start}' ; ${gateLoop(gate)} ; printf '%s\\n' '${finish}' ; exit 0`;
+        const env = await makeFakeOpencode(emitter);
+        try {
+          const phase = executeOpendCode("test prompt", {
+            cwd: env.cwd,
+            ledgerDir: env.ledgerDir,
+            phaseFile,
+            model: null,
+            stallTimeoutSec: null,
+            maxStepModelSec,
+            live: false,
+            heartbeat: false,
+          });
+          await waitFor(() => phaseLedger(env.ledgerDir, phaseFile).includes('"type":"step_start"'));
+          await vi.advanceTimersByTimeAsync(3_700_000);
+          await writeFile(gate, "");
+          const result = await settle(phase);
+          expect(result.status).toBe("ok");
+          expect(result.steps).toBe(1);
+        } finally {
+          restorePath(env.restorePath);
+        }
+      }
+    });
   }, 60000);
 
   it("does not count the inter-step gap toward the cap (a completed step, then opencode preparing the next request)", async () => {
-    // Step 1 completes; opencode then sits ~2.5s (cap 1s) before the next
-    // step_start. That gap is the silence timer's case, not the model cap —
-    // it must NOT kill a phase that finished its step and is starting another.
-    const start = stepStartLine().replace(/'/g, "'\\''");
-    const finish = stepFinishLine().replace(/'/g, "'\\''");
-    const emitter = `printf '%s\\n%s\\n' '${start}' '${finish}' ; sleep 2.5 ; printf '%s\\n%s\\n' '${start}' '${finish}' ; exit 0`;
-    const env = await makeFakeOpencode(emitter);
-    try {
-      const result = await executeOpendCode("test prompt", {
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "model-cap-interstep",
-        model: null,
-        stallTimeoutSec: null,
-        maxStepModelSec: 1,
-        live: false,
-        heartbeat: false,
-      });
-      expect(result.status).toBe("ok");
-      expect(result.steps).toBe(2);
-    } finally {
-      restorePath(env.restorePath);
-    }
+    // Step 1 completes; opencode then sits 3 fake seconds (cap 1s) before the
+    // next step_start. That gap is the silence timer's case, not the model cap
+    // — it must NOT kill a phase that finished its step and is starting another.
+    await withFakeTimers(async () => {
+      const start = stepStartLine().replace(/'/g, "'\\''");
+      const finish = stepFinishLine().replace(/'/g, "'\\''");
+      const gate = gatePath("model-cap-interstep");
+      const emitter = `printf '%s\\n%s\\n' '${start}' '${finish}' ; ${gateLoop(gate)} ; printf '%s\\n%s\\n' '${start}' '${finish}' ; exit 0`;
+      const env = await makeFakeOpencode(emitter);
+      try {
+        const phase = executeOpendCode("test prompt", {
+          cwd: env.cwd,
+          ledgerDir: env.ledgerDir,
+          phaseFile: "model-cap-interstep",
+          model: null,
+          stallTimeoutSec: null,
+          maxStepModelSec: 1,
+          live: false,
+          heartbeat: false,
+        });
+        await waitFor(() => phaseLedger(env.ledgerDir, "model-cap-interstep").includes('"type":"step_finish"'));
+        await vi.advanceTimersByTimeAsync(3_000);
+        await writeFile(gate, "");
+        const result = await settle(phase);
+        expect(result.status).toBe("ok");
+        expect(result.steps).toBe(2);
+      } finally {
+        restorePath(env.restorePath);
+      }
+    });
   }, 60000);
 });
 
@@ -2106,29 +2287,35 @@ describe("base-session fork args and fallback (#133)", () => {
 
 describe("executeOpendCode stopAfterCheckpoint ticket capture (ADR 0022 S0.2, #84)", () => {
   it("stops at the $CHECKPOINT marker and reports which ticket it named", async () => {
-    const start = stepStartLine().replace(/'/g, "'\\''");
-    const marker = textEvent("$CHECKPOINT ticket=03").replace(/'/g, "'\\''");
-    const emitter = `printf '%s\\n%s\\n' '${start}' '${marker}' ; sleep 2 ; printf '%s\\n%s\\n' '${start}' '${marker}' ; sleep 2`;
-    const env = await makeFakeOpencode(emitter);
-    try {
-      const result = await executeOpendCode("test prompt", {
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "checkpoint-ticket",
-        model: null,
-        stopAfterMarker: CHECKPOINT_RE,
-        stallTimeoutSec: null,
-        live: false,
-        heartbeat: false,
-      });
-      expect(result.status).toBe("ok");
-      expect(result.steps).toBe(1);
-      expect(result.checkpointTicket).toBe("03");
-      const raw = await readFile(join(env.ledgerDir, "events", "checkpoint-ticket.jsonl"), "utf8");
-      expect(raw).toContain("$CHECKPOINT ticket=03");
-    } finally {
-      restorePath(env.restorePath);
-    }
+    await withFakeTimers(async () => {
+      const start = stepStartLine().replace(/'/g, "'\\''");
+      const marker = textEvent("$CHECKPOINT ticket=03").replace(/'/g, "'\\''");
+      const gate = gatePath("checkpoint-ticket");
+      const emitter = `printf '%s\\n%s\\n' '${start}' '${marker}' ; ${gateLoop(gate)} ; printf '%s\\n%s\\n' '${start}' '${marker}' ; sleep 3`;
+      const env = await makeFakeOpencode(emitter);
+      try {
+        const phase = executeOpendCode("test prompt", {
+          cwd: env.cwd,
+          ledgerDir: env.ledgerDir,
+          phaseFile: "checkpoint-ticket",
+          model: null,
+          stopAfterMarker: CHECKPOINT_RE,
+          stallTimeoutSec: null,
+          live: false,
+          heartbeat: false,
+        });
+        await waitFor(() => phaseLedger(env.ledgerDir, "checkpoint-ticket").includes("$CHECKPOINT ticket=03"));
+        await writeFile(gate, "");
+        const result = await settle(phase);
+        expect(result.status).toBe("ok");
+        expect(result.steps).toBe(1);
+        expect(result.checkpointTicket).toBe("03");
+        const raw = await readFile(join(env.ledgerDir, "events", "checkpoint-ticket.jsonl"), "utf8");
+        expect(raw).toContain("$CHECKPOINT ticket=03");
+      } finally {
+        restorePath(env.restorePath);
+      }
+    });
   }, 60000);
 
   it("reports the ticket on a CLEAN natural exit — the marker as the model's last line, no kill needed", async () => {
@@ -2186,29 +2373,35 @@ describe("executeOpendCode stopAfterCheckpoint ticket capture (ADR 0022 S0.2, #8
     // The reconcile seat passes its own stopAfterMarker; it is NOT the
     // checkpoint grammar, so the generic own-line terminal anchor must arm the
     // early exit (otherwise the arbiter would loop until its step budget).
-    const start = stepStartLine().replace(/'/g, "'\\''");
-    const marker = textEvent("1. fixed the off-by-one\n$RECONCILE_END").replace(/'/g, "'\\''");
-    const emitter = `printf '%s\\n%s\\n' '${start}' '${marker}' ; sleep 2 ; printf '%s\\n' '${start}' ; sleep 1`;
-    const env = await makeFakeOpencode(emitter);
-    try {
-      const result = await executeOpendCode("test prompt", {
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "reconcile-stop",
-        model: null,
-        stopAfterMarker: /\$RECONCILE_END\b/i,
-        stallTimeoutSec: null,
-        live: false,
-        heartbeat: false,
-      });
-      expect(result.status).toBe("ok");
-      // Only the first step ran: the second step_start killed the phase at the
-      // boundary once the marker had armed (a phase that kept looping would
-      // have run the second step to completion).
-      expect(result.steps).toBe(1);
-    } finally {
-      restorePath(env.restorePath);
-    }
+    await withFakeTimers(async () => {
+      const start = stepStartLine().replace(/'/g, "'\\''");
+      const marker = textEvent("1. fixed the off-by-one\n$RECONCILE_END").replace(/'/g, "'\\''");
+      const gate = gatePath("reconcile-stop");
+      const emitter = `printf '%s\\n%s\\n' '${start}' '${marker}' ; ${gateLoop(gate)} ; printf '%s\\n' '${start}' ; sleep 3`;
+      const env = await makeFakeOpencode(emitter);
+      try {
+        const phase = executeOpendCode("test prompt", {
+          cwd: env.cwd,
+          ledgerDir: env.ledgerDir,
+          phaseFile: "reconcile-stop",
+          model: null,
+          stopAfterMarker: /\$RECONCILE_END\b/i,
+          stallTimeoutSec: null,
+          live: false,
+          heartbeat: false,
+        });
+        await waitFor(() => phaseLedger(env.ledgerDir, "reconcile-stop").includes("$RECONCILE_END"));
+        await writeFile(gate, "");
+        const result = await settle(phase);
+        expect(result.status).toBe("ok");
+        // Only the first step ran: the second step_start killed the phase at the
+        // boundary once the marker had armed (a phase that kept looping would
+        // have run the second step to completion).
+        expect(result.steps).toBe(1);
+      } finally {
+        restorePath(env.restorePath);
+      }
+    });
   }, 60000);
 });
 
@@ -2247,7 +2440,7 @@ describe("executeOpendCode telemetry-only kill guards (ADR 0022 §5, #84)", () =
   it("still kills on the 95% crossing under an explicit guardMode kill", async () => {
     const start1 = stepStartLine().replace(/'/g, "'\\''");
     const big = stepFinishLineWithTokens(9_800).replace(/'/g, "'\\''");
-    const emitter = `printf '%s\\n%s\\n' '${start1}' '${big}' ; sleep 30`;
+    const emitter = `printf '%s\\n%s\\n' '${start1}' '${big}' ; sleep 3`;
     const env = await makeFakeOpencode(emitter);
     try {
       const result = await executeOpendCode("test prompt", {
@@ -2301,7 +2494,7 @@ describe("executeOpendCode telemetry-only kill guards (ADR 0022 §5, #84)", () =
     const big = stepFinishLineWithTokens(9_800).replace(/'/g, "'\\''");
     const start2 = stepStartLine().replace(/'/g, "'\\''");
     const finish = stepFinishLine().replace(/'/g, "'\\''");
-    const killEmitter = `printf '%s\\n%s\\n' '${start1}' '${big}' ; sleep 30`;
+    const killEmitter = `printf '%s\\n%s\\n' '${start1}' '${big}' ; sleep 3`;
     const quickEmitter = `printf '%s\\n%s\\n%s\\n%s\\n' '${start1}' '${big}' '${start2}' '${finish}' ; sleep 0.2 ; printf 'done\\n'`;
     const killEnv = await makeFakeOpencode(killEmitter);
     const quickEnv = await makeFakeOpencode(quickEmitter);
@@ -2342,26 +2535,31 @@ describe("executeOpendCode telemetry-only kill guards (ADR 0022 §5, #84)", () =
   it("keeps the #78 model-time floor armed under telemetry (a thrashing builder still dies)", async () => {
     // Telemetry disarms only the request-ceiling kills (#81/#82) — the #78
     // throughput floor (0 tok/s thrash) remains the builder's health check.
-    const start = stepStartLine().replace(/'/g, "'\\''");
-    const emitter = `printf '%s\\n' '${start}' ; sleep 6`;
-    const env = await makeFakeOpencode(emitter);
-    try {
-      const result = await executeOpendCode("test prompt", {
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "telemetry-thrash",
-        model: null,
-        stallTimeoutSec: null,
-        maxStepModelSec: 1,
-        guardMode: "telemetry",
-        live: false,
-        heartbeat: false,
-      });
-      expect(result.status).toBe("timeout");
-      expect(result.errorMessage).toMatch(/^model-stalled:/);
-    } finally {
-      restorePath(env.restorePath);
-    }
+    await withFakeTimers(async () => {
+      const start = stepStartLine().replace(/'/g, "'\\''");
+      const emitter = `printf '%s\\n' '${start}' ; sleep 6`;
+      const env = await makeFakeOpencode(emitter);
+      try {
+        const phase = executeOpendCode("test prompt", {
+          cwd: env.cwd,
+          ledgerDir: env.ledgerDir,
+          phaseFile: "telemetry-thrash",
+          model: null,
+          stallTimeoutSec: null,
+          maxStepModelSec: 1,
+          guardMode: "telemetry",
+          live: false,
+          heartbeat: false,
+        });
+        await waitFor(() => phaseLedger(env.ledgerDir, "telemetry-thrash").includes('"type":"step_start"'));
+        await vi.advanceTimersByTimeAsync(1_500);
+        const result = await settle(phase);
+        expect(result.status).toBe("timeout");
+        expect(result.errorMessage).toMatch(/^model-stalled:/);
+      } finally {
+        restorePath(env.restorePath);
+      }
+    });
   }, 60000);
 });
 
@@ -2583,29 +2781,34 @@ describe("executeOpendCode degraded-target detection (#96)", () => {
 
 describe("executeOpendCode phase wall-clock cap (#96)", () => {
   it("kills the subprocess with a wall-clock timeout when the WHOLE phase outlives phaseWallSec, even while it keeps emitting output", async () => {
-    // The emitter streams a step pair, then keeps sleeping/printing — a
-    // slow-but-LOUD phase the silence stall timer (re-armed on every byte)
-    // would never catch. The absolute wall cap must kill it.
-    const start = stepStartLine().replace(/'/g, "'\\''");
-    const finish = stepFinishLine().replace(/'/g, "'\\''");
-    const emitter = `printf '${start}\\n${finish}\\n' ; sleep 1.5 ; printf '${start}\\n${finish}\\n' ; sleep 30`;
-    const env = await makeFakeOpencode(emitter);
-    try {
-      const result = await executeOpendCode("test prompt", {
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "wall-kill",
-        model: null,
-        phaseWallSec: 2,
-        stallTimeoutSec: null,
-        live: false,
-        heartbeat: false,
-      });
-      expect(result.status).toBe("timeout");
-      expect(result.errorMessage).toContain("wall-clock:");
-    } finally {
-      restorePath(env.restorePath);
-    }
+    // The emitter streams a step pair, then keeps printing — a slow-but-LOUD
+    // phase the silence stall timer (re-armed on every byte) would never
+    // catch. The absolute wall cap must kill it.
+    await withFakeTimers(async () => {
+      const start = stepStartLine().replace(/'/g, "'\\''");
+      const finish = stepFinishLine().replace(/'/g, "'\\''");
+      const emitter = `printf '${start}\\n${finish}\\n' ; while : ; do printf '${start}\\n${finish}\\n' ; sleep 0.1 ; done`;
+      const env = await makeFakeOpencode(emitter);
+      try {
+        const phase = executeOpendCode("test prompt", {
+          cwd: env.cwd,
+          ledgerDir: env.ledgerDir,
+          phaseFile: "wall-kill",
+          model: null,
+          phaseWallSec: 2,
+          stallTimeoutSec: null,
+          live: false,
+          heartbeat: false,
+        });
+        await waitFor(() => phaseLedger(env.ledgerDir, "wall-kill").includes('"type":"step_finish"'));
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await settle(phase);
+        expect(result.status).toBe("timeout");
+        expect(result.errorMessage).toContain("wall-clock:");
+      } finally {
+        restorePath(env.restorePath);
+      }
+    });
   }, 60000);
 
   it("does not cap the phase when phaseWallSec is null (the default)", async () => {
@@ -2717,70 +2920,84 @@ describe("executeOpendCode heartbeat throughput", () => {
     // step_finish at t0+400 with 10 output tokens → decode 10 tok / 200ms =
     // 50 tok/s, e2e 10 tok / 400ms = 25 tok/s. Step 2 hangs so heartbeats
     // fire with step 1 in the rate window.
-    const t0 = Date.now();
-    const esc = (s: string) => s.replace(/'/g, "'\\''");
-    const emitter = `printf '%s\\n' '${esc(startAt(t0))}' ; sleep 0.2 ; printf '%s\\n' '${esc(textAt(t0 + 200))}' ; sleep 0.1 ; printf '%s\\n' '${esc(textAt(t0 + 300))}' ; sleep 0.1 ; printf '%s\\n' '${esc(finishAt(t0 + 400, 10))}' ; printf '%s\\n' '${esc(startAt(t0 + 400))}' ; sleep 5 ; exit 0`;
-    const env = await makeFakeOpencode(emitter);
-    const lines: string[] = [];
-    try {
-      const result = await executeOpendCode("test prompt", {
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "hb-rate-decode",
-        model: null,
-        stallTimeoutSec: null,
-        maxStepModelSec: null,
-        heartbeat: true,
-        heartbeatIntervalSec: 0.3,
-        liveSink: (line: string) => {
-          if (line.includes("running")) lines.push(line);
-        },
-      });
-      expect(result.status).toBe("ok");
-      const withRates = lines.filter((l) => l.includes("tok/s"));
-      expect(withRates.length).toBeGreaterThanOrEqual(1);
-      for (const l of withRates) {
-        expect(l).toContain("· 50 tok/s");
-        expect(l).toContain("· e2e 25.0 tok/s");
+    await withFakeTimers(async () => {
+      const t0 = Date.now();
+      const esc = (s: string) => s.replace(/'/g, "'\\''");
+      const gate = gatePath("hb-rate-decode");
+      const emitter = `printf '%s\\n' '${esc(startAt(t0))}' ; printf '%s\\n' '${esc(textAt(t0 + 200))}' ; printf '%s\\n' '${esc(textAt(t0 + 300))}' ; printf '%s\\n' '${esc(finishAt(t0 + 400, 10))}' ; printf '%s\\n' '${esc(startAt(t0 + 400))}' ; ${gateLoop(gate)} ; exit 0`;
+      const env = await makeFakeOpencode(emitter);
+      const lines: string[] = [];
+      try {
+        const phase = executeOpendCode("test prompt", {
+          cwd: env.cwd,
+          ledgerDir: env.ledgerDir,
+          phaseFile: "hb-rate-decode",
+          model: null,
+          stallTimeoutSec: null,
+          maxStepModelSec: null,
+          heartbeat: true,
+          heartbeatIntervalSec: 0.3,
+          liveSink: (line: string) => {
+            if (line.includes("running")) lines.push(line);
+          },
+        });
+        await waitFor(() => phaseLedger(env.ledgerDir, "hb-rate-decode").includes('"type":"step_finish"'));
+        await vi.advanceTimersByTimeAsync(600);
+        await writeFile(gate, "");
+        const result = await settle(phase);
+        expect(result.status).toBe("ok");
+        const withRates = lines.filter((l) => l.includes("tok/s"));
+        expect(withRates.length).toBeGreaterThanOrEqual(1);
+        for (const l of withRates) {
+          expect(l).toContain("· 50 tok/s");
+          expect(l).toContain("· e2e 25.0 tok/s");
+        }
+      } finally {
+        restorePath(env.restorePath);
       }
-    } finally {
-      restorePath(env.restorePath);
-    }
+    });
   }, 60000);
 
   it("shows only the e2e rate when the finished steps streamed no text (prefill never feeds tok/s)", async () => {
     // Step 1 emits no text/reasoning: its 400ms wall is prefill + decode and
     // cannot be split, so it feeds the e2e rate only — 10 tok / 400ms = 25.
-    const t0 = Date.now();
-    const esc = (s: string) => s.replace(/'/g, "'\\''");
-    const emitter = `printf '%s\\n' '${esc(startAt(t0))}' ; sleep 0.4 ; printf '%s\\n' '${esc(finishAt(t0 + 400, 10))}' ; printf '%s\\n' '${esc(startAt(t0 + 400))}' ; sleep 5 ; exit 0`;
-    const env = await makeFakeOpencode(emitter);
-    const lines: string[] = [];
-    try {
-      const result = await executeOpendCode("test prompt", {
-        cwd: env.cwd,
-        ledgerDir: env.ledgerDir,
-        phaseFile: "hb-rate-e2e-only",
-        model: null,
-        stallTimeoutSec: null,
-        maxStepModelSec: null,
-        heartbeat: true,
-        heartbeatIntervalSec: 0.3,
-        liveSink: (line: string) => {
-          if (line.includes("running")) lines.push(line);
-        },
-      });
-      expect(result.status).toBe("ok");
-      const withRates = lines.filter((l) => l.includes("tok/s"));
-      expect(withRates.length).toBeGreaterThanOrEqual(1);
-      for (const l of withRates) {
-        expect(l).toContain("· e2e 25.0 tok/s");
-        // No bare decode bit: "· <digits> tok/s" must not appear.
-        expect(l).not.toMatch(/· \d+ tok\/s/);
+    await withFakeTimers(async () => {
+      const t0 = Date.now();
+      const esc = (s: string) => s.replace(/'/g, "'\\''");
+      const gate = gatePath("hb-rate-e2e-only");
+      const emitter = `printf '%s\\n' '${esc(startAt(t0))}' ; printf '%s\\n' '${esc(finishAt(t0 + 400, 10))}' ; printf '%s\\n' '${esc(startAt(t0 + 400))}' ; ${gateLoop(gate)} ; exit 0`;
+      const env = await makeFakeOpencode(emitter);
+      const lines: string[] = [];
+      try {
+        const phase = executeOpendCode("test prompt", {
+          cwd: env.cwd,
+          ledgerDir: env.ledgerDir,
+          phaseFile: "hb-rate-e2e-only",
+          model: null,
+          stallTimeoutSec: null,
+          maxStepModelSec: null,
+          heartbeat: true,
+          heartbeatIntervalSec: 0.3,
+          liveSink: (line: string) => {
+            if (line.includes("running")) lines.push(line);
+          },
+        });
+        await waitFor(() => phaseLedger(env.ledgerDir, "hb-rate-e2e-only").includes('"type":"step_finish"'));
+        await vi.advanceTimersByTimeAsync(600);
+        await writeFile(gate, "");
+        const result = await settle(phase);
+        expect(result.status).toBe("ok");
+        const withRates = lines.filter((l) => l.includes("tok/s"));
+        expect(withRates.length).toBeGreaterThanOrEqual(1);
+        for (const l of withRates) {
+          expect(l).toContain("· e2e 25.0 tok/s");
+          // No bare decode bit: "· <digits> tok/s" must not appear.
+          expect(l).not.toMatch(/· \d+ tok\/s/);
+        }
+      } finally {
+        restorePath(env.restorePath);
       }
-    } finally {
-      restorePath(env.restorePath);
-    }
+    });
   }, 60000);
 });
 

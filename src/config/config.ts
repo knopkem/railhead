@@ -183,7 +183,7 @@ export interface RailheadConfig {
    * kills the subprocess. Guards against models that enter infinite tool
    * loops — e.g. guessing filenames wrong, getting "file not found", and
    * retrying forever. `null` = scaled from max_context_tokens (see
-   * `resolveStepBudget`), falling back to 50 when no context budget is set.
+   * `resolveStepBudget`), falling back to 240 when no context budget is set.
    */
   max_phase_steps?: number | null;
   /**
@@ -730,11 +730,14 @@ export const DEFAULT_MAX_REPLANS = 2;
 export const DEFAULT_INFRA_BACKOFF_SEC = [60, 300, 900, 1800];
 
 /** Fallback step budget when no context budget is configured, and the floor
- * for `resolveStepBudget`. 120 covers a hard ticket on a small model — the
- * ADR 0040 incident ticket needed 95 steps, and a routine first ticket
- * already uses ~50, so 80 left less than one retry of headroom. The durable
- * builder resumes across the cap, so hitting it is wasteful, never fatal. */
-const FALLBACK_STEP_BUDGET = 120;
+ * for `resolveStepBudget`. 240: the ADR 0040 incident ticket needed 95 steps
+ * on the model that sized the old 120 floor, and local seats run the same
+ * ticket shape longer (slower per step, more retries), exhausting a phase
+ * before the work is done. The durable builder resumes across the cap, so
+ * hitting it is wasteful, never fatal — the higher floor buys slow models
+ * headroom at the cost of a little wasted wall time when a phase truly
+ * spirals. */
+const FALLBACK_STEP_BUDGET = 240;
 
 /** Default request ceiling when no model limit can be detected and no explicit
  * ceiling is configured. Issue #79: 64k — ADR 0014's working-context operating
@@ -748,11 +751,11 @@ export const DEFAULT_CONTEXT_TOKENS = 64_000;
  * consumes roughly 1k tokens of output + tool I/O on average (some steps
  * are a one-line text reply, others are a read+write+test sequence).
  * The budget scales linearly so a 250k context gets ~250 steps (enough for
- * a complex ticket that reads many files and iterates on verify) and a
- * 128k context ~128.
+ * a complex ticket that reads many files and iterates on verify); a 128k
+ * context still gets the 240 floor.
  *
- * Floors at the fallback (120) so small contexts still get enough steps for
- * a hard ticket — the floor is the real default below a ~120k window; the
+ * Floors at the fallback (240) so small contexts still get enough steps for
+ * a hard ticket — the floor is the real default below a ~240k window; the
  * old /2000 slope made the scaling dead below 160k (64k → 32, floor wins),
  * which is why 80 read as an arbitrary constant rather than a derivation.
  */

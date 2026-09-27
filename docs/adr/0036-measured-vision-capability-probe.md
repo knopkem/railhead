@@ -220,3 +220,30 @@ Changes:
 
 This closes the two items the previous amendment deferred (enlarged cells;
 re-probing once with a fresh permutation before refusing).
+
+## Amendment (2026-09-27): a measured pass is cached; only a failure is re-measured
+
+§2's "always re-probed" rule taxed every ordinary invocation: the default
+`light` preset raises visual and goal, so each `build`/`feature`/`fix` — and
+each standalone `run`/`resume` with those gates on — paid a fresh probe per
+distinct seat model (30–60s each, two attempts on a failure) before any
+planner or builder work, even for a model measured minutes earlier. The
+operator decision is to trust the recorded PASS.
+
+Changes:
+
+1. `ensureVisionForGates` reuses a current-version PASS from
+   `.railhead/capabilities.json`; a model with no pass — never measured,
+   measured blind, or measured inconclusively — is probed now. The implement
+   seat already cached only a pass (§5 of the 2026-09-25 amendment), so both
+   paths now share one policy. The refusal direction is unchanged: a blind
+   verdict still refuses (or offers the interactive downgrade).
+2. `railhead init` still measures the distinct implement/visual/goal models
+   and records the outcomes; a model absent from the record is measured lazily
+   at its next invocation, then cached.
+3. The freshness cost is accepted, not hidden: a checkpoint swapped behind a
+   passing model id is no longer caught by every invocation. To force a
+   re-measurement, delete the model's record from
+   `.railhead/capabilities.json`; raising `PROBE_VERSION` invalidates every
+   prior record. §2's "always re-probed" rule and the "Cache-skip" non-goal
+   are superseded by 1–3.

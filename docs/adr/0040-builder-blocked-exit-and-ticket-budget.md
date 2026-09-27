@@ -271,3 +271,20 @@ the observed incident bound it last (27.4m against 32.9m) — and explicit
 or disable either. A ticket that spends the third window without a green
 verify stops as before, now with a fresh session's output in the ledger
 rather than a dead-end diagnosis.
+
+## Amendment 4 (2026-09-27): the floor doubles for local models
+
+The 120-step floor (Amendment 2) was sized to the incident ticket's 95 steps
+on the model that ran it. Local seats are reported to exhaust a 120-step
+phase on the same ticket shape — slower per step, more retries against a
+weaker model — before the work is done. A cap hit is a wasted invocation,
+never lost work: the durable builder resumes across it. The floor therefore
+doubles to 240.
+
+`resolveStepBudget` keeps its `max(floor, contextTokens/1000)` shape, so the
+floor now governs up to a ~240k window and larger contexts still scale
+linearly. `ticket_step_budget`'s default (`3 × max_phase_steps`) doubles with
+it, and the wall budget (`2 × slowest invocation`, 30m floor) still bounds
+the checkpoint-less thrash the step cap would otherwise have to catch. An
+operator who wants the old bound sets `max_phase_steps` explicitly; `0`
+disables as before.

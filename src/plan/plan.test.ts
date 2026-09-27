@@ -27,6 +27,7 @@ import {
   splitCoherenceContract,
   QUALITY_PREFERENCES,
 } from "./plan.ts";
+import { criterionBehavior, criterionProbe } from "../core/ticket.ts";
 
 // ---------------------------------------------------------------------------
 // stage prompts
@@ -680,6 +681,38 @@ describe("parsePlanJson", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("folds a bare unquoted probe line back into its criterion (combat heightmap-run failure)", () => {
+    const { tickets, unparsed } = parsePlanRegions(
+      '$TICKETS\n[\n{"title":"a","what":"w","criteria":["behaviour one",\n   probe: launch the app; act; assert 1px line",\n"behaviour two"],"open_ended":false}\n]',
+    );
+    expect(tickets).toHaveLength(1);
+    expect(unparsed).toBe(0);
+    expect(tickets[0].criteria).toEqual([
+      "behaviour one\n  probe: launch the app; act; assert 1px line",
+      "behaviour two",
+    ]);
+    expect(criterionProbe(tickets[0].criteria![0])).toBe("launch the app; act; assert 1px line");
+  });
+
+  it("leaves a well-formed escaped probe criterion untouched", () => {
+    const { tickets, unparsed } = parsePlanRegions(
+      '[{"title":"x","what":"w","criteria":["behaviour one\\n  probe: launch; act; assert","behaviour two"]}]',
+    );
+    expect(unparsed).toBe(0);
+    expect(tickets[0].criteria).toEqual(["behaviour one\n  probe: launch; act; assert", "behaviour two"]);
+  });
+
+  it("folds a bare probe line that carries no closing quote", () => {
+    const { tickets, unparsed } = parsePlanRegions(
+      '$TICKETS\n[\n{"title":"a","what":"w","criteria":["behaviour one",\n  probe: launch; act; assert\n],\n"group":"g"}\n]',
+    );
+    expect(tickets).toHaveLength(1);
+    expect(unparsed).toBe(0);
+    expect(criterionBehavior(tickets[0].criteria![0])).toBe("behaviour one");
+    expect(criterionProbe(tickets[0].criteria![0])).toBe("launch; act; assert");
+    expect(tickets[0].group).toBe("g");
   });
 
   it("skips an unbalanced trailing object and reports the unparsed count (truncation is visible)", () => {
