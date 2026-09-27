@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createRunState, frontier, newBuilderState, type RunMeta, type RunState } from "./state.ts";
+import { createRunState, frontier, isFinished, newBuilderState, type RunMeta, type RunState } from "./state.ts";
 import { normalizeState } from "./ledger.ts";
 import type { RailheadConfig } from "../config/config.ts";
 
@@ -41,6 +41,13 @@ describe("frontier", () => {
       { ...rawStates[0], number: "02", title: "b", file: "02-b.md", status: "ready", blocked_by: ["01-a.md"] },
     ]);
     expect(frontier(state).map((t) => t.number)).toEqual(["02"]);
+  });
+});
+
+describe("isFinished", () => {
+  it("treats superseded as terminal — a replanned run never resumes", () => {
+    expect(isFinished("superseded")).toBe(true);
+    expect(isFinished("running")).toBe(false);
   });
 });
 

@@ -7,7 +7,7 @@ Everything that judges a ticket after implementation: the shared review-agent ru
 - `reviewer.ts` — `runReviewAgent`, `parseVerdict`, severity classification (`classifySeverity`, `isBlocker`), `reviewSummary`. All review seats share this. A non-ok reviewer invocation THROWS (infra, routed via the caller's failure ladder) — a pass is impossible without a transcript (ADR 0050).
 - `gate.ts` — pure retry-budget state machine: `advanceRetry`, `GateCounters`, `INITIAL_COUNTERS`. No I/O.
 - `corrective.ts` — `[BLOCKER]` findings become corrective tickets that run through the full gate inline before the originating review may pass.
-- `replan.ts` — classifies goal-review findings, builds the replan prompt, renumbers the regenerated frontier into the run's global sequence, `drainFrontier`.
+- `replan.ts` — classifies goal-review findings, builds the replan prompt, renumbers the regenerated frontier into the run's global sequence, `drainFrontier`. Two triggers share `runReplanPhase`: the reviewer's `$REPLAN` marker and the ADR 0055 capacity split (`replanFromCapacity` — regenerates the uncommitted frontier including the interrupted ticket as smaller tickets, capped by `max_replans`).
 - `visual-loop.ts` / `goal-loop.ts` / `structural-loop.ts` — cadence scheduling and round execution per gate; `owed-gates.ts` replays gates owed across a stop (ADR 0038).
 - `evidence.ts` — transcript predicates (screenshots, real interaction, app launch) used to keep reviewers honest.
 - `goal-review.ts`, `structural-review.ts`, `visual.ts`, `interaction-smoke.ts` — prompt builders and verdict parsers per gate. `goal-review.ts` owns the `$PROBE` block parser (`parseProbeBlock`) and `dropClosedFindings` (probe-closed findings are never re-found).

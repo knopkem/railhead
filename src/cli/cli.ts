@@ -32,7 +32,7 @@ import {
   type RailheadConfig,
 } from "../config/config.ts";
 import * as git from "../core/git.ts";
-import { latestRun, ledgerDir, listPhases, readState, readStderrLines, writeState, eventPath, findRunForBranch, removeRun } from "../core/ledger.ts";
+import { latestRun, ledgerDir, listPhases, readState, readStderrLines, writeState, eventPath, findRunForBranch, supersedeRunsForBranch, removeRun } from "../core/ledger.ts";
 import { parsePlanArgs, parseProductArgs, parseRunArgs, argValue, type PlanArgs, type ProductArgs } from "../config/args.ts";
 import {
   GATES,
@@ -198,8 +198,9 @@ function usage() {
    init [--free] [-y]                     scaffold a default railhead.json in the current directory
         all five model seats (plan/implement/review/visual/goal) are asked up front and default to
         the opencode default; each is probed once for availability, context limit, vision and reasoning.
-        review cadence is written OFF here (code=light, run-end only) — presets and
-        per-gate flags set them per run at plan time (issue #73)
+        review cadence is written OFF here (all gates) — presets and
+        per-gate flags set them per run at plan time (issue #73); the default
+        light preset schedules a smart-triggered code review + run-end passes
         --free:   auto-discover free models (cost=0) from \`opencode models\` and assign the
                   best-scoring model to each of the five seats, then run the same capability probe
         -y/--yes: skip all prompts — every seat uses the opencode default, context = min detected
@@ -681,15 +682,16 @@ async function cmdInit(cwd: string, yes: boolean = false, free: boolean = false)
   }
 
   // No enablement/cadence questions: gates are written with their defaults
-  // (code=light run-end; visual/goal/structural=off) and presets at plan time
-  // raise them (issue #73). Visual/goal seats still hold a model — never null —
-  // so raising a mode needs no config edit (issue #74).
+  // (all off) and presets at plan time raise them (issue #73) — the light
+  // preset, e.g., schedules a smart-triggered code review (ADR 0056) plus the
+  // run-end goal/visual/structural passes. Visual/goal seats still hold a model
+  // — never null — so raising a mode needs no config edit (issue #74).
   const cfg = visionCfg;
   await writeFile(target, JSON.stringify(cfg, null, 2) + "\n", "utf8");
   console.log(`wrote ${target}`);
   console.log(`models: plan=${describeModel(cfg.model.plan)} implement=${describeModel(cfg.model.implement)} review=${describeModel(cfg.model.review)} visual=${describeModel(cfg.model.visual)} goal=${describeModel(cfg.model.goal)}`);
   console.log(`context budget: ${Math.round(contextBudget / 1000)}k tokens`);
-  console.log(`review cadence: code=light (run-end); visual/goal/structural=off — raise gates at plan time with --full/--medium/--light/--none or per-gate flags`);
+  console.log(`review cadence: all gates off — raise them at plan time with --full/--medium/--light/--none or per-gate flags (--light: smart-triggered code review + run-end goal/visual/structural)`);
   console.log(`edit ${target} to change these, then run \`railhead build -a "<what to build>"\`.`);
 }
 
@@ -877,10 +879,13 @@ async function cmdBuild(cwd: string, prefs: PlanArgs, internal: { arcStepNumber?
   modes = await ensureVisionGates(cwd, modes, models, config, { canAsk: !auto, persists: true });
 
   // Persist the resolved cadence so a resume / later `railhead run` honors it
-  // without re-passing the flags.
-  await persistPolicy(cwd, config, { gateModes: modes });
+  // without re-passing the flags. The code trigger rides along: the light
+  // preset persists `smart` (the resolved severity mode stays `medium`), and
+  // any non-light resolution persists `always` so a prior light plan's smart
+  // trigger cannot survive a `--medium`/`--full` re-plan.
+  await persistPolicy(cwd, config, { gateModes: modes, codeReviewTrigger: modes.codeTrigger ?? "always" });
   console.log(
-    `review cadence: code=${modes.code} visual=${modes.visual} goal=${modes.goal} structural=${modes.structural}`,
+    `review cadence: code=${modes.code}${modes.codeTrigger === "smart" ? " (smart)" : ""} visual=${modes.visual} goal=${modes.goal} structural=${modes.structural}`,
   );
 
   // Planning interview (ADR 0010, amended by ADR 0042 — gated by the run
@@ -1035,6 +1040,15 @@ async function cmdBuild(cwd: string, prefs: PlanArgs, internal: { arcStepNumber?
     console.log("warning: planner emitted no $VERIFY block; railhead.json verify list unchanged. Edit railhead.json to set build/test commands before running.");
   }
 
+  // Replanning replaced the ticket files in `outDir`: any interrupted run on
+  // this plan's branch now references a frontier that no longer exists. Close
+  // it as superseded here — the plan step is what invalidated it, so the
+  // replacement is recorded now instead of a later resume dead-ending on
+  // "tickets missing from disk" (or silently restoring the old ticket set).
+  for (const id of await supersedeRunsForBranch(cwd, assembleBranch(cwd, outDir))) {
+    console.log(`superseded interrupted run ${id} — this plan replaced its ticket files`);
+  }
+
   if (!existsSync(join(cwd, "AGENTS.md"))) {
     const written = await maybeGenerateAgentsMd({ cwd, prompt: enrichedPrompt, model: models.plan, tickets: ordered, contextBudget, maxSteps: config.max_phase_steps, stallTimeoutSec: config.stall_timeout_sec, maxStepModelSec: config.max_step_model_sec, maxContextTokens: config.max_context_tokens, verbose });
     if (written) console.log(`wrote ${written}`);
@@ -1063,16 +1077,17 @@ async function cmdBuild(cwd: string, prefs: PlanArgs, internal: { arcStepNumber?
 }
 
 interface GateCadenceOption {
-  value: GateMode | "skip-all";
+  value: GateMode | "smart" | "skip-all";
   label: string;
 }
 
 /** Interactive per-gate cadence questionnaire (issue #73). Suggested defaults
  * come from the light preset — the new default run shape. The code-review
- * prompt additionally offers "none — skip all reviews", the shorthand for the
- * --none preset that a user who doesn't know the flag can still pick. */
+ * prompt offers the light preset's `smart` trigger (review only after context
+ * stress) as its default, plus "none — skip all reviews", the shorthand for
+ * the --none preset that a user who doesn't know the flag can still pick. */
 async function askGateCadence(): Promise<{ modes: PresetGateModes; skipAll: boolean }> {
-  const pick = async (question: string, options: readonly GateCadenceOption[], defaultLabel: string): Promise<GateMode | "skip-all"> => {
+  const pick = async (question: string, options: readonly GateCadenceOption[], defaultLabel: string): Promise<GateMode | "smart" | "skip-all"> => {
     const rl = createInterface({ input: process.stdin, output: process.stderr });
     const menu = options.map((o, i) => `  ${i + 1}. ${o.label}`).join("\n");
     const defIndex = options.findIndex((o) => o.label.startsWith(defaultLabel));
@@ -1090,13 +1105,14 @@ async function askGateCadence(): Promise<{ modes: PresetGateModes; skipAll: bool
   const code = await pick(
     "Code review cadence?",
     [
+      { value: "smart", label: "smart — review only after context stress (compaction/retries); BLOCKER + MAJOR retry (default)" },
       { value: "full", label: "full — per-ticket review, BLOCKER + MAJOR retry" },
       { value: "medium", label: "medium — per-ticket review, BLOCKER + MAJOR retry" },
-      { value: "light", label: "light — per-ticket review, BLOCKER full retry + MAJOR one attempt (default)" },
+      { value: "light", label: "light — per-ticket review, BLOCKER full retry + MAJOR one attempt" },
       { value: "off", label: "off — no code review" },
       { value: "skip-all", label: "skip all reviews — none for code/visual/goal/structural (--none)" },
     ],
-    "light",
+    "smart",
   );
   if (code === "skip-all") {
     return { modes: presetGateModes("none"), skipAll: true };
@@ -1130,7 +1146,10 @@ async function askGateCadence(): Promise<{ modes: PresetGateModes; skipAll: bool
     ],
     "light",
   );
-  return { modes: { code: code as GateMode, visual: visual as GateMode, goal: goal as GateMode, structural: structural as GateMode }, skipAll: false };
+  const codeModes = code === "smart"
+    ? { code: "medium" as GateMode, codeTrigger: "smart" as const }
+    : { code: code as GateMode };
+  return { modes: { ...codeModes, visual: visual as GateMode, goal: goal as GateMode, structural: structural as GateMode }, skipAll: false };
 }
 
 /** Gate-override flags whose value is a cadence mode are dropped from the args
@@ -1468,7 +1487,13 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean; v
   for (const gate of GATES.map(([g]) => g)) {
     if (overrides[gate]) gateModes[gate] = overrides[gate]!;
   }
-  const gateReport = await persistPolicy(cwd, config, { gateModes });
+  // An explicit `--review <mode>` names a cadence, so it also resets the
+  // persisted smart trigger to `always` (resolveGateModes' rule) — otherwise
+  // `railhead run --review medium` on a light plan would still stress-skip.
+  const gateReport = await persistPolicy(cwd, config, {
+    gateModes,
+    ...(overrides.code ? { codeReviewTrigger: "always" as const } : {}),
+  });
   for (const gate of gateReport.gatesChanged) {
     const key = GATES.find(([g]) => g === gate)![1];
     console.log(`${key}.mode: ${overrides[gate]} via --${gate === "code" ? "review" : gate}`);
@@ -1511,7 +1536,14 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean; v
     await git.createBranch(cwd, branch);
   }
 
-  if (!args.fresh) {
+  if (args.fresh) {
+    // ADR 0016 (amended): `--fresh` explicitly discards prior state, so any
+    // interrupted run on the branch is closed now; otherwise it would sit there
+    // and be auto-resumed by a later `railhead run` after this run ends.
+    for (const id of await supersedeRunsForBranch(cwd, branch)) {
+      console.log(`superseded interrupted run ${id} — starting fresh`);
+    }
+  } else if (opts.fromPlan !== true) {
     const prior = await findRunForBranch(cwd, branch);
     if (shouldResume(branch, prior?.state ?? null)) {
       // gh #111: refuse auto-resume while the halt file exists — an
@@ -1582,6 +1614,12 @@ async function cmdResume(cwd: string, runIdArg?: string): Promise<void> {
   const runId = runIdArg ?? (await latestRun(cwd));
   const dir = ledgerDir(cwd, runId);
   const state = await readState(dir);
+  // ADR 0054: a superseded run has no frontier left — its ticket files were
+  // replaced by a newer plan. Say so instead of dead-ending in the resume's
+  // missing-tickets invariant check.
+  if (state.status === "superseded") {
+    throw new Error(`run ${runId} was superseded by a fresh plan — nothing to resume. Start the plan with \`railhead run <tickets-dir>\`, or re-plan with \`railhead build\`.`);
+  }
   await git.checkoutBranch(cwd, state.branch);
   // Re-read railhead.json so a mid-run config edit (a switched model, a changed
   // verify list, a raised gate) takes effect on resume — `state.json` holds the

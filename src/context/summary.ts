@@ -145,14 +145,14 @@ export async function writeRunSummary(state: RunState, ledger: string): Promise<
   // ticket logs — no model call, just formatted strings.
   if (extractModel === null) {
     const summary = state.tickets
-      .map((t) => `${t.number} ${t.title} — ${t.status}${(t.unverified?.length ?? 0) > 0 ? `\n  UNVERIFIED CRITERIA (not proven by any seat): ${t.unverified!.join(" | ")}` : ""}${t.logs.length ? `\n  ${t.logs.slice(-3).join("\n  ")}` : ""}`)
+      .map((t) => `${t.number} ${t.title} — ${t.status}${t.review_skip_reason ? `\n  REVIEW: not run (smart — ${t.review_skip_reason})` : ""}${(t.unverified?.length ?? 0) > 0 ? `\n  UNVERIFIED CRITERIA (not proven by any seat): ${t.unverified!.join(" | ")}` : ""}${t.logs.length ? `\n  ${t.logs.slice(-3).join("\n  ")}` : ""}`)
       .join("\n\n");
     const pressure = contextPressureLine(state.tickets);
     await writeFile(join(ledger, "..", "run-summary.md"), `# Run Summary\n\n${pressure ? `${pressure}\n\n` : ""}${summary}\n`, "utf8").catch(() => {});
     return;
   }
   const ticketSummaries = state.tickets.map((t) =>
-    `${t.number} ${t.title} — status: ${t.status}, attempts: ${t.attempts}${(t.context?.compactions ?? 0) > 0 ? `, compactions: ${t.context!.compactions}` : ""}${(t.unverified?.length ?? 0) > 0 ? `, UNVERIFIED CRITERIA: ${t.unverified!.join(" | ")}` : ""}${t.logs.length ? ` | last logs: ${t.logs.slice(-3).join("; ")}` : ""}`,
+    `${t.number} ${t.title} — status: ${t.status}, attempts: ${t.attempts}${t.review_skip_reason ? `, review not run (smart — ${t.review_skip_reason})` : ""}${(t.context?.compactions ?? 0) > 0 ? `, compactions: ${t.context!.compactions}` : ""}${(t.unverified?.length ?? 0) > 0 ? `, UNVERIFIED CRITERIA: ${t.unverified!.join(" | ")}` : ""}${t.logs.length ? ` | last logs: ${t.logs.slice(-3).join("; ")}` : ""}`,
   );
   const prompt = buildRunSummaryPrompt(ticketSummaries);
   const summaryPhase = "run-summary";

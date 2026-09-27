@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   classifyFindings,
   buildReplanPrompt,
+  buildCapacitySplitPrompt,
   meldReplannedTickets,
   drainFrontier,
   type ReplanClassification,
@@ -167,6 +168,50 @@ describe("buildReplanPrompt (#51)", () => {
   it("does not emit verify/design/architecture blocks again", () => {
     const prompt = buildReplanPrompt(base);
     expect(prompt).toMatch(/Do NOT emit \$VERIFY/);
+  });
+});
+
+describe("buildCapacitySplitPrompt (ADR 0055)", () => {
+  const base = {
+    originalPrompt: "Build a sprite editor",
+    ticket: { number: "05", title: "Canvas + pencil vertical", file: "05-canvas.md", what: "Deliver the launchable vertical slice." },
+    finding: "capacity failure: the phase compacted 3 times without finishing — the unit of work does not fit the 100000-token window",
+    committedTickets: [{ number: "04", title: "App shell", file: "04-shell.md" }],
+    uncommittedTickets: [
+      { number: "05", title: "Canvas + pencil vertical", file: "05-canvas.md" },
+      { number: "06", title: "Composite layers", file: "06-composite.md" },
+    ],
+    worktree: "src/render/CanvasSurface.ts | 120 +++++++++\nUntracked files:\nscripts/probe-ticket05.mjs",
+    handoff: "## Remains\n- focus gating",
+    contractsSummary: "CanvasSurface @ src/render/CanvasSurface.ts",
+    digest: null,
+    contextBudget: 100_000,
+  };
+
+  it("carries the capacity evidence and names the interrupted ticket", () => {
+    const prompt = buildCapacitySplitPrompt(base);
+    expect(prompt).toContain("compacted 3 times");
+    expect(prompt).toContain("05-canvas.md");
+    expect(prompt).toMatch(/unit that did not fit/);
+  });
+
+  it("grounds the split in work already on disk and the session's handoff", () => {
+    const prompt = buildCapacitySplitPrompt(base);
+    expect(prompt).toContain("src/render/CanvasSurface.ts | 120");
+    expect(prompt).toContain("scripts/probe-ticket05.mjs");
+    expect(prompt).toContain("focus gating");
+    expect(prompt).toMatch(/do NOT redo/i);
+  });
+
+  it("plans the split tickets to the working budget and away from hand-built harnesses", () => {
+    const prompt = buildCapacitySplitPrompt(base);
+    expect(prompt).toMatch(/60k tokens of working context/);
+    expect(prompt).toMatch(/Do not require the builder to hand-build probe/);
+  });
+
+  it("omits the handoff section when no note was written", () => {
+    const prompt = buildCapacitySplitPrompt({ ...base, handoff: null });
+    expect(prompt).not.toMatch(/Handoff from the interrupted session/);
   });
 });
 

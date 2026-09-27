@@ -12,6 +12,7 @@ import {
   initGit,
   rangeDiff,
   workingDiff,
+  workingTreeSummary,
   readProjectDoc,
   writeProjectDoc,
 } from "./git.ts";
@@ -95,6 +96,31 @@ describe("workingDiff", () => {
     expect(diff).toContain("new-source.ts");
     expect(diff).not.toContain("playwright-mcp");
     expect(diff).not.toContain("screenshot.png");
+  });
+});
+
+describe("workingTreeSummary (ADR 0055)", () => {
+  it("summarizes tracked changes as a diffstat and names untracked files, without the full diff", async () => {
+    const cwd = await freshRepo();
+    await writeFile(join(cwd, "tracked.txt"), "v1\n");
+    await commit(cwd, "baseline");
+    await writeFile(join(cwd, "tracked.txt"), "v1\nv2\n");
+    await mkdir(join(cwd, "scripts"));
+    await writeFile(join(cwd, "scripts", "probe.mjs"), "console.log('probe')\n");
+    const summary = await workingTreeSummary(cwd);
+    expect(summary).toMatch(/tracked\.txt\s+\|/);
+    // Untracked new files must appear too — the interrupted tree's brand-new
+    // modules are exactly what the split planner must not regenerate.
+    expect(summary).toMatch(/scripts\/probe\.mjs\s+\|/);
+    // The planner's window cannot hold the full diff — the summary is a stat.
+    expect(summary).not.toContain("+v2");
+  });
+
+  it("returns an empty string for a clean tree", async () => {
+    const cwd = await freshRepo();
+    await writeFile(join(cwd, "x.txt"), "x\n");
+    await commit(cwd, "x");
+    expect(await workingTreeSummary(cwd)).toBe("");
   });
 });
 

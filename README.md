@@ -12,6 +12,7 @@ per ticket, in plan order
   VERIFY                 your build/test commands; must be green
   SMOKE       optional   launch command stays up (panic / not-found signatures fail)
   REVIEW                 read-only, diff-scoped critique of the change
+                         (light preset: only when the build was stressed)
   COMMIT                 "<NN> — <title>", then the contracts index is updated
   VISUAL      optional   post-commit screenshot review; completes (correctives
                          included) before the next ticket starts
@@ -108,7 +109,7 @@ railhead diagnose screenshots [--model M]  check that a model can take a screens
     "goal":      null,            // null = falls back to visual → review → implement
     "extract":   null             // cheap model, single-shot structured output
   },
-  "code_review":       { "mode": "light" },
+  "code_review":       { "mode": "medium", "trigger": "smart" },  // "trigger": "always" reviews every ticket
   "visual_review":     { "mode": "off", "round_wall_sec": null },
   "goal_review":       { "mode": "off" },  // add "checkpoint_action": "advisory" for advisory goal checkpoints
   "structural_review": { "mode": "off" },
@@ -141,17 +142,18 @@ Railhead warns (never blocks) when `review`/`goal` is weaker than `implement`, o
 
 ## Reviews
 
-Every gate has a cadence mode: `full` | `medium` | `light` | `off`. Presets choose defaults; per-gate flags override. An interactive run (`build`/`fix` with no preset and no per-gate flag) asks each gate's cadence — code review, visual, goal, structural — with the light-preset defaults.
+Every gate has a cadence mode: `full` | `medium` | `light` | `off`. Presets choose defaults; per-gate flags override. The code gate additionally carries a firing trigger — `always`, or `smart` (the `--light` default: review only after context stress). An interactive run (`build`/`fix` with no preset and no per-gate flag) asks each gate's cadence — code review, visual, goal, structural — with the light-preset defaults (the code question offers smart).
 
 | Preset | Code review | Visual | Goal | Structural | Interview |
 |--------|-------------|--------|------|------------|-----------|
 | `--full` | per-ticket, BLOCKER+MAJOR retry | per-ticket + run-end | checkpoints + run-end | checkpoints + run-end | on |
 | `--medium` | per-ticket, BLOCKER+MAJOR retry | run-end | checkpoints | checkpoints | on |
-| `--light` (default) | per-ticket; BLOCKER full retry, MAJOR one attempt | run-end | advisory checkpoints + run-end | run-end | off |
+| `--light` (default) | smart: per-ticket only after context stress; BLOCKER+MAJOR retry | run-end | corrective checkpoints + run-end | run-end | off |
 | `--none` | off | off | off | off | off |
 
 Notes:
 
+- **Smart code review (`--light`, the default):** the per-ticket review is spent only where the build showed context stress or an unusual event — a compaction, more than one build attempt, a builder-session restart, a spec reconciliation, a `$BLOCKED`/unverified exit, or a mid-run replan. A clean single-pass ticket skips the review phase; `report.md` records the coverage ("N run, M skipped") and any skipped ticket a later group/run-end gate flagged, so a green run never implies scrutiny it did not get. A skipped review is "not run", never a pass. `--review medium|full` (or `"trigger": "always"` in `railhead.json`) reviews every ticket.
 - **Severities:** `[BLOCKER]` always retries (up to the cap, then hard-fail). `[MAJOR]` retries through the budget in `medium`/`full`; in `light` it gets one corrective attempt, then soft-passes. Minor findings never retry.
 - **Mid-run vs run-end:** goal and structural fire at group checkpoints as well as at run end; visual fires per-ticket (under `full`) and at run end. When goal review fires at run end it takes visual's whole-app seat — the goal + design-doc frame is stronger.
 - **Corrective tickets:** `[BLOCKER]` findings generate corrective tickets that run the full gate inline before the originating review may pass.

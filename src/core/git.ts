@@ -379,6 +379,21 @@ export async function workingDiff(cwd: string): Promise<string> {
   }
 }
 
+/** A compact working-tree summary for prompts (ADR 0055): the `--stat` form of
+ * the working diff (the `-N` marker makes untracked files appear as new-file
+ * entries), never the full diff. The capacity split planner needs to know what
+ * is already on disk, but the interrupted tree's diff can be far too large for
+ * the planner's own window. */
+export async function workingTreeSummary(cwd: string): Promise<string> {
+  await git(cwd, ["add", "-A", "-N"]);
+  try {
+    const { stdout } = await exec(GIT, ["diff", "HEAD", "--stat"], { cwd, maxBuffer: MAX_BUFFER });
+    return stdout.trim();
+  } finally {
+    await git(cwd, ["reset", "-q"]);
+  }
+}
+
 export function repoRoot(cwd: string): Promise<string> {
   return git(cwd, ["rev-parse", "--show-toplevel"]);
 }

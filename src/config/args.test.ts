@@ -171,8 +171,8 @@ describe("preset gate modes (issue #73)", () => {
     expect(presetGateModes("medium")).toEqual({ code: "medium", visual: "light", goal: "medium", structural: "medium" });
   });
 
-  it("--light: per-ticket code review (BLOCKER+MAJOR retry), light cadence for the other gates (goal checkpoints corrective)", () => {
-    expect(presetGateModes("light")).toEqual({ code: "medium", visual: "light", goal: "light", structural: "light", goalCheckpointAction: "corrective" });
+  it("--light: smart-triggered per-ticket code review (BLOCKER+MAJOR retry when it fires), light cadence for the other gates (goal checkpoints corrective)", () => {
+    expect(presetGateModes("light")).toEqual({ code: "medium", visual: "light", goal: "light", structural: "light", codeTrigger: "smart", goalCheckpointAction: "corrective" });
   });
 
   it("--none turns every gate off", () => {

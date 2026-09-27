@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, expect } from "vitest";
-import { initLedger, resetPhase, eventPath, readStderrLines, listPhases, boundedLog, writeRawLog, rawLogPath, writeState, readState, findRunForBranch, removeRun, ledgerDir, catHeredocBody, appendEvent } from "./ledger.ts";
+import { initLedger, resetPhase, eventPath, readStderrLines, listPhases, boundedLog, writeRawLog, rawLogPath, writeState, readState, findRunForBranch, supersedeRunsForBranch, removeRun, ledgerDir, catHeredocBody, appendEvent } from "./ledger.ts";
 import type { RunState } from "./state.ts";
 import type { RailheadConfig } from "../config/config.ts";
 
@@ -306,6 +306,51 @@ describe("findRunForBranch", () => {
 
     const result = await findRunForBranch(cwd, "run/x");
     expect(result?.runId).toBe("run-20260826-2000");
+  });
+});
+
+describe("supersedeRunsForBranch", () => {
+  it("closes interrupted runs on the branch and leaves terminal/other-branch runs alone", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "led-"));
+    const stopped = ledgerDir(cwd, "run-20260826-1000");
+    const running = ledgerDir(cwd, "run-20260826-1500");
+    const finished = ledgerDir(cwd, "run-20260826-1600");
+    const other = ledgerDir(cwd, "run-20260826-1700");
+    for (const d of [stopped, running, finished, other]) await initLedger(d);
+    await writeState(stopped, makeState("run/x", "stopped"));
+    await writeState(running, makeState("run/x", "running"));
+    await writeState(finished, makeState("run/x", "finished"));
+    await writeState(other, makeState("run/other", "stopped"));
+
+    const ids = await supersedeRunsForBranch(cwd, "run/x");
+
+    expect(ids).toEqual(["run-20260826-1000", "run-20260826-1500"]);
+    expect((await readState(stopped)).status).toBe("superseded");
+    expect((await readState(running)).status).toBe("superseded");
+    expect((await readState(finished)).status).toBe("finished");
+    expect((await readState(other)).status).toBe("stopped");
+  });
+
+  it("records the cause on the run so the report names why it is closed", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "led-"));
+    const dir = ledgerDir(cwd, "run-20260826-1000");
+    await initLedger(dir);
+    await writeState(dir, makeState("run/x", "stopped"));
+
+    await supersedeRunsForBranch(cwd, "run/x");
+
+    expect((await readState(dir)).stop_reason).toMatch(/fresh plan/);
+  });
+
+  it("a superseded run is no longer a candidate for auto-resume", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "led-"));
+    const dir = ledgerDir(cwd, "run-20260826-1000");
+    await initLedger(dir);
+    await writeState(dir, makeState("run/x", "stopped"));
+
+    await supersedeRunsForBranch(cwd, "run/x");
+
+    expect(await findRunForBranch(cwd, "run/x")).toBeNull();
   });
 });
 

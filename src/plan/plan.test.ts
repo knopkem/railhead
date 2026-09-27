@@ -135,6 +135,22 @@ describe("planTicketsSystemPrompt — stage 2 (decomposition)", () => {
   it("drops the art rule when art direction is disabled", () => {
     expect(planTicketsSystemPrompt({ contractsSummary: "", artDirection: false })).not.toMatch(/OPEN-ENDED CRAFT TICKET/);
   });
+
+  // ADR 0055: the decomposition must plan to a working budget, not to the
+  // full window — a ticket planned to need the whole window compact-spirals.
+  it("plans each ticket to ~60% of the seat window when a budget is resolved", () => {
+    const text = planTicketsSystemPrompt({ contractsSummary: "(none)", contextBudget: 100_000 });
+    expect(text).toMatch(/60k tokens of working context/);
+    expect(text).toMatch(/60% of the seat's ~100k window/);
+    // The old guidance is what let a ticket be planned to need the whole window.
+    expect(text).not.toMatch(/not by a context window/);
+  });
+
+  it("still carries a working-budget rule when no budget is resolved (default window)", () => {
+    const text = planTicketsSystemPrompt({ contractsSummary: "(none)" });
+    expect(text).toMatch(/tokens of working context/);
+    expect(text).toMatch(/will be split at runtime/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -262,6 +278,12 @@ describe("planFeatureTicketsSystemPrompt — feature mode stage 2", () => {
     expect(text).toMatch(/needs NO open-ended ticket/);
     expect(text).not.toMatch(/owns everything the user sees/);
     expect(planFeatureTicketsSystemPrompt({ contractsSummary: "", artDirection: false })).not.toMatch(/open-ended craft ticket/i);
+  });
+
+  it("carries the ADR 0055 working budget like the build decomposition", () => {
+    const text = planFeatureTicketsSystemPrompt({ contractsSummary: "MODULE_A", contextBudget: 200_000 });
+    expect(text).toMatch(/120k tokens of working context/);
+    expect(text).toMatch(/60% of the seat's ~200k window/);
   });
 });
 
@@ -796,6 +818,19 @@ describe("QUALITY_PREFERENCES", () => {
   it("steers the planner toward stable, model-familiar APIs", () => {
     expect(QUALITY_PREFERENCES).toMatch(/API STABILITY/);
     expect(QUALITY_PREFERENCES).toMatch(/Prefer fewer dependencies/);
+  });
+
+  it("carries the reuse ladder — platform, then an already-installed dependency, then new code", () => {
+    expect(QUALITY_PREFERENCES).toMatch(/in this order/);
+    expect(QUALITY_PREFERENCES).toMatch(/ALREADY has installed/);
+    expect(QUALITY_PREFERENCES).toMatch(/smallest code that works/);
+    expect(QUALITY_PREFERENCES).toMatch(/Add a NEW dependency only when/);
+  });
+
+  it("exempts security-sensitive primitives from the dependency-avoidance instinct", () => {
+    expect(QUALITY_PREFERENCES).toMatch(/Never hand-roll security-sensitive primitives/);
+    expect(QUALITY_PREFERENCES).toMatch(/authentication, cryptography/);
+    expect(QUALITY_PREFERENCES).toMatch(/never traded away for fewer lines/);
   });
 });
 

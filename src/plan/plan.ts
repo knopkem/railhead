@@ -40,6 +40,22 @@ export interface PlanStageInput {
    * (docs/coherence.md). When held, the design stage honors it instead of
    * authoring a fresh one. */
   existingCharter?: string;
+  /** ADR 0055: the implement seat's context window, used to state the working
+   * budget each ticket is planned to fit. Absent = the default window. */
+  contextBudget?: number;
+}
+
+/** ADR 0055: the fraction of the seat's context window a ticket is planned to
+ * fit. The remainder is reading, tool output, verify output, and compaction
+ * headroom — a unit planned to use the whole window compact-spirals instead of
+ * checkpointing (the spriteforge canvas-pencil-vertical incident). */
+export const WORKING_BUDGET_RATIO = 0.6;
+
+/** The ticket-size rule both decomposition prompts carry (ADR 0055). */
+export function ticketSizeRule(contextBudget?: number): string {
+  const windowK = Math.floor((contextBudget && contextBudget > 0 ? contextBudget : DEFAULT_CONTEXT_TOKENS) / 1000);
+  const workingK = Math.round(windowK * WORKING_BUDGET_RATIO);
+  return `Each ticket is a single VERTICAL slice: a coherent, independently verifiable increment that leaves the build green and demoable when it commits. The builder runs as ONE durable session across all tickets, but each ticket must still complete inside one context window with headroom — plan it to fit roughly ${workingK}k tokens of working context (~${Math.round(WORKING_BUDGET_RATIO * 100)}% of the seat's ~${windowK}k window; the remainder is reading, tool output, and compaction headroom). A ticket that would exceed that budget does not fit the session and will be split at runtime. Split when a ticket mixes independent concerns, cannot be verified on its own, or would exceed the budget; never merge slices to look smaller or pad the queue to look finer. There is no ticket-count ceiling and no file-count cap.`;
 }
 
 const ART_DIRECTION_DESIGN_REQUEST = `The ART DIRECTION requirement: IF the $INTERFACE you declare is a rendered surface (browser-ui, canvas, or native — not terminal or none), the LOOK is part of the deliverable. Add an \`## Art direction\` section to $DESIGN (after Goal coverage, before any Coherence contract) describing the intended look with CONCRETE direction — palette roles as hex values with a stated value separation, distinguishable value bands, actor detail (outline/shading/highlight), background depth, a lighting model with an attenuation rule, and what moves with an easing rule. This section is DIRECTION for the art agent that will create the look — it is not a checklist the build is scored against, and it must not be turned into per-pixel acceptance criteria. Pure model/library/CLI builds (interface terminal/none): omit the section entirely.`;
@@ -99,7 +115,8 @@ function featureArtDirectionTicketsBlock(input: PlanStageInput): string {
 }
 
 export const QUALITY_PREFERENCES = `Quality preferences (apply when choosing technologies and structuring the plan — break ties in this direction, not as hard rules):
-- Prefer fewer dependencies: the stdlib or platform solution over a third-party package that must be installed, pinned, and learned. Add a dependency only when it saves significant work the stdlib cannot do.
+- Prefer fewer dependencies, in this order: the stdlib or a platform feature; a dependency the project ALREADY has installed; the smallest code that works. Add a NEW dependency only when it saves significant work the platform cannot do — a fresh install costs resolution, lockfile churn, and a new failure surface in an unattended run, while an already-installed dependency is nearly free.
+- Never hand-roll security-sensitive primitives (authentication, cryptography, parsing untrusted input) to avoid a dependency — a maintained library beats fresh security code. The reuse ladder is a tie-breaker, never a licence to shrink the deliverable: validation, error handling, and accessibility are never traded away for fewer lines.
 - Prefer small, focused modules with clear interfaces (deep modules: small surface, large impl). Avoid god-objects and catch-all utility files.
 - Avoid premature abstraction: do not introduce interfaces, traits, or generics for needs the spec does not have. Concrete first, abstract when a second caller proves the pattern.
 - Prefer technologies with a strong testing story and fast feedback loops — a framework where tests are easy to write and run in seconds makes every subsequent ticket safer.
@@ -259,7 +276,7 @@ DO NOT run shell commands, write files, or explore the filesystem. You already k
 
 Rules:
 - COVER THE PLAN: every deliverable the plan commits to must be owned by a ticket. Walk the Architecture module map and the Goal coverage checklist; each named module, mechanism, effect, screen, artifact, or quality mechanism gets an owner. Never silently drop plan scope, and never narrow it to look smaller. If the plan under-specifies something a coherent build needs, add the ticket and name it.
-- Each ticket is a single VERTICAL slice: a coherent, independently verifiable increment that leaves the build green and demoable when it commits. The builder runs as ONE durable session across all tickets, so size a ticket by verifiability and natural seams, not by a context window: there is no ticket-count ceiling and no file-count cap. Split when a ticket mixes independent concerns or cannot be verified on its own; merge when a slice is not independently meaningful.
+- ${ticketSizeRule(input.contextBudget)}
 - The FIRST ticket must stand up a buildable scaffold (the project manifest, build scripts, and entry-point tooling the verify list runs), so the very first commit passes the configured verify.
 - The entry point is owned once, early: one shell ticket mounts a minimal running shell so the app is runnable and demoable from the second ticket on; later tickets extend it instead of waiting for a terminal "integrate everything" step.
 - Package shared conventions (coordinate system, scale, units, origins, tokens) into an EARLY ticket's public surface; later tickets build on it rather than re-deriving it inline.
@@ -344,7 +361,7 @@ DO NOT run shell commands, write files, or explore the filesystem. You already k
 
 Rules:
 - COVER THE PLAN: every deliverable the feature plan commits to must be owned by a ticket. Walk the Architecture module map and the Goal coverage checklist; each named module, mechanism, effect, screen, artifact, or quality mechanism gets an owner. Never silently drop plan scope, and never narrow it to look smaller. If the plan under-specifies something a coherent feature needs, add the ticket and name it.
-- Each ticket is a single VERTICAL slice: a coherent, independently verifiable increment that leaves the product green and demoable when it commits. The builder runs as ONE durable session across all tickets, so size a ticket by verifiability and natural seams, not by a context window: there is no ticket-count ceiling and no file-count cap. Split when a ticket mixes independent concerns or cannot be verified on its own; merge when a slice is not independently meaningful.
+- ${ticketSizeRule(input.contextBudget)}
 - The FIRST ticket is an INTEGRATION slice: it lands one working piece of the feature against the running product and leaves the EXISTING verify suite green. Never emit a scaffold or bootstrap ticket — the repo already builds; a feature plan that opens with manifest or shell scaffolding is the classic wrong-mode failure.
 - The app shell's entry point is owned: tickets extend it; no ticket mounts a second entry point or re-creates the project manifest.
 - Shared conventions are decided: tickets consume the product's tokens, units, naming, and the coherence contract — they do not re-derive or re-package them.

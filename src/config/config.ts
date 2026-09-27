@@ -332,11 +332,12 @@ export interface RailheadConfig {
    */
   checkpoint_granularity?: CheckpointGranularity;
   model: ModelConfig;
-  /** Per-ticket code review (v2 issue 01). Only `code_review.mode: "full"`
-   * schedules a per-ticket diff review; the `light`/`medium` presets resolve
-   * this to `"off"` — judged diffs from a same-tier judge caught nothing, and
-   * the goal probes plus the structural review carry the signal. Cadence is
-   * `code_review.mode`; the config default is `"off"`. */
+  /** Per-ticket code review (v2 issue 01). `code_review.mode` sets the
+   * severity thresholds; `code_review.trigger` decides whether the gate is
+   * spent per ticket — `always` reviews every ticket, `smart` only after
+   * context stress (compaction, retries, a session restart, a reconciliation,
+   * a block, or a replan). The `light` preset resolves to `medium` + `smart`;
+   * `--full`/`--medium` resolve `always`; `--none` resolves `off`. */
   code_review?: CodeReviewConfig | null;
   /**
    * Visual review (ADR 0009/0011, issue #73). Cadence is `visual_review.mode`
@@ -407,6 +408,33 @@ export function parseGateMode(s: string | null | undefined): GateMode | null {
   return (GATE_MODES as readonly string[]).includes(v ?? "") ? (v as GateMode) : null;
 }
 
+/**
+ * The per-ticket code review's firing trigger (smart review). Orthogonal to
+ * `mode`, which selects the severity thresholds once the gate runs:
+ * - `always` (default): every ticket's diff is reviewed before commit.
+ * - `smart`: the review phase is spent only where the build showed context
+ *   stress or an unusual event — compaction, more than one build attempt, a
+ *   builder-session restart, a spec reconciliation, a `$BLOCKED`/unverified
+ *   exit, or a mid-run replan. A clean single-pass ticket skips the review
+ *   phase and records that fact; the review itself, when it fires, runs with
+ *   the configured `mode`'s severity rules unchanged.
+ *
+ * The light preset (the default run shape) resolves the code gate to
+ * `medium` + `smart`: judging effort goes where the build was stressed, while
+ * a review that does fire still retries BLOCKER and MAJOR. Any explicit
+ * `--review <mode>` override resolves the trigger back to `always`.
+ */
+export type CodeReviewTrigger = "always" | "smart";
+
+export const CODE_REVIEW_TRIGGERS: readonly CodeReviewTrigger[] = ["always", "smart"];
+
+/** Parse a code-review trigger token, case-insensitive; null when absent or
+ * unrecognized (callers fall back to `always`). */
+export function parseCodeReviewTrigger(s: string | null | undefined): CodeReviewTrigger | null {
+  const v = s?.trim().toLowerCase();
+  return (CODE_REVIEW_TRIGGERS as readonly string[]).includes(v ?? "") ? (v as CodeReviewTrigger) : null;
+}
+
 /** Fires at the gate's mid-run natural cadence (per-ticket for code/visual,
  * group checkpoint for goal/structural). `full` and `medium` only. */
 export const firesMidRun = (mode: GateMode): boolean => mode === "full" || mode === "medium";
@@ -422,6 +450,9 @@ export interface PresetGateModes {
   visual: GateMode;
   goal: GateMode;
   structural: GateMode;
+  /** Smart review: only the light preset sets it for the code gate; absent
+   * means the trigger resolves to `always`. */
+  codeTrigger?: CodeReviewTrigger;
   /** ADR 0029 (#102): the light preset's goal identity — goal mode `light`
    * (run-end corrective batch) + advisory group checkpoints. Only `light` sets
    * it; `medium`/`full` keep inline corrective checkpoints. */
@@ -431,11 +462,13 @@ export interface PresetGateModes {
 /** Per-gate modes for a preset. `--medium` is the distinctive one: per-ticket
  * code review + checkpoint goal/structural (catch problems at group
  * boundaries) but no end-of-run goal/structural pass and no per-ticket visual
- * (issue #73's table). `--light` is the default run shape: the same per-ticket
- * code review plus a run-end goal pass, with the goal judge firing
- * corrective-anchored checkpoints at group boundaries. Both cheap presets
- * schedule the code gate at `medium` — BLOCKER and MAJOR both retry. (v2 issue
- * 01 briefly turned per-ticket code review off in both; reverted.) */
+ * (issue #73's table). `--light` is the default run shape: per-ticket code
+ * review with the smart trigger (review only after context stress — compaction,
+ * retries, a session restart, a reconciliation, a block, or a replan) plus a
+ * run-end goal pass, with the goal judge firing corrective-anchored
+ * checkpoints at group boundaries. Both cheap presets schedule the code gate
+ * at `medium` — once it fires, BLOCKER and MAJOR both retry. (v2 issue 01
+ * briefly turned per-ticket code review off in both; reverted.) */
 export function presetGateModes(preset: GatePreset): PresetGateModes {
   switch (preset) {
     case "full":
@@ -445,6 +478,7 @@ export function presetGateModes(preset: GatePreset): PresetGateModes {
     case "light":
       return {
         code: "medium", visual: "light", goal: "light", structural: "light",
+        codeTrigger: "smart",
         goalCheckpointAction: goalCheckpointActionFor("light") ?? undefined,
       };
     case "none":
@@ -595,8 +629,10 @@ export interface StructuralReviewConfig {
  *   per ticket (issue #96) — reachable via a hand-written `railhead.json`.
  * - `off`: no code review.
  *
- * The presets schedule `medium` (`--light`/`--medium`), `full` (`--full`) or
- * `off` (`--none`), so both cheap presets review every ticket.
+ * `trigger` controls WHETHER the gate is spent on a given ticket: `always`
+ * (default) reviews every ticket; `smart` reviews only tickets whose build
+ * showed stress (see `CodeReviewTrigger`). The light preset schedules
+ * `medium` + `smart`; `--full`/`--medium` schedule `always`.
  *
  * The end-of-run advisory pass (`finalReviewPass`) was removed — it was
  * redundant with per-ticket review and its findings had no teeth. */
@@ -611,6 +647,10 @@ export interface CodeReviewConfig {
    * diff-only seat. Absent = the default (`true`).
    */
   inherit_tools?: boolean;
+  /** `always` (default) or `smart` (see `CodeReviewTrigger`). Persisted, so
+   * resume honors it; an explicit `--review <mode>` override resolves it back
+   * to `always`. */
+  trigger?: CodeReviewTrigger | null;
 }
 
 /** Whether a given finding severity should trigger a retry in the per-ticket
@@ -630,9 +670,11 @@ export const severityTriggersRetry = (
   return mode === "medium" || mode === "full";
 };
 
-/** Whether code review runs per-ticket (mid-run). `off` is the only mode that
- * skips per-ticket review — `light` runs per-ticket review too (BLOCKERs get
- * the full retry budget; MAJORs get one corrective attempt, issue #96). */
+/** Whether code review is configured to run per-ticket (mid-run). `off` is the
+ * only mode that skips per-ticket review entirely. Whether a given ticket's
+ * review actually fires is a separate decision: `code_review.trigger: "always"`
+ * reviews every ticket, while `"smart"` skips the phase on a clean single-pass
+ * build (see `src/execute/review-schedule.ts`). */
 export const codeReviewRunsMidRun = (mode: GateMode): boolean => mode !== "off";
 
 /** v2 issue 01: whether the interaction smoke is on. An explicit
@@ -790,7 +832,7 @@ export const DEFAULT_CONFIG: RailheadConfig = {
   feature_mode: false,
   art_direction: true,
   model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: DEFAULT_MODEL, visual: null, extract: null, goal: null },
-  code_review: { mode: "off", inherit_tools: true },
+  code_review: { mode: "off", inherit_tools: true, trigger: "always" },
   visual_review: { mode: "off", max_rounds: null, round_wall_sec: null, interaction_hints: null },
   goal_review: { mode: "off", fallback_cadence: 4, max_rounds: null, max_replans: DEFAULT_MAX_REPLANS, interaction_hints: null },
   structural_review: { mode: "off" },
@@ -918,6 +960,7 @@ export async function loadConfig(cwd: string): Promise<RailheadConfig> {
             inherit_tools: codeReview.inherit_tools === undefined
               ? DEFAULT_CONFIG.code_review!.inherit_tools
               : codeReview.inherit_tools === true,
+            trigger: parseCodeReviewTrigger(codeReview.trigger) ?? DEFAULT_CONFIG.code_review!.trigger,
           }
         : DEFAULT_CONFIG.code_review,
       visual_review: hasKeys(visualReview)

@@ -14,7 +14,7 @@ import { existsSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { loadTickets, toTicketState, renderTicket, type Ticket } from "../core/ticket.ts";
 import { readPlanOrigin, checkPlanOrigin, readPlanWallMs } from "../plan/plan-identity.ts";
-import { replanFromCheckpoint } from "../gates/replan.ts";
+import { replanFromCheckpoint, replanFromCapacity } from "../gates/replan.ts";
 import type { BlockReport } from "../core/blocked.ts";
 import { describeExecFailure, executeOpendCode, executeFreshPhase, killActiveChild, withPersistentWorker, startPersistentWorker, stopPersistentWorker, configureContextGuard } from "./executor.ts";
 import { baseSessionId, ensureBaseSession, forkPhase } from "./base-session.ts";
@@ -46,6 +46,7 @@ export { detectGroupCheckpoints } from "../gates/goal-loop.ts";
 export { nextTicketNumber } from "../gates/corrective.ts";
 import { DEFAULT_MAX_REPLANS, DEFAULT_MODEL, codeReviewRunsMidRun, contextBudget, effectiveContextTokens, firesAtRunEnd, firesMidRun, goalFiresCheckpointsMidRun, interactionSmokeEnabled, querySeatContextWindows, resolveModels, seatContextBudget, seatContextCeilings, severityTriggersRetry, visualFiresAtRunEnd, type CheckpointGranularity } from "../config/config.ts";
 import { analyzePhase, summarizePhaseFiles } from "../core/telemetry.ts";
+import { codeReviewSchedule } from "./review-schedule.ts";
 import { advanceRetry, INITIAL_COUNTERS, type GateCounters, type GateLimits } from "../gates/gate.ts";
 import { ensureProjectGitignore, ensureProjectOpenCodePermissions, frameworkExternalDirsForVerify, detectFramework, frameworkSmokeRun, RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
 import { nowClock, scopeLabel } from "../cli/overview.ts";
@@ -73,7 +74,7 @@ import {
 } from "../context/learnings.ts";
 import { readDigest } from "../context/digest.ts";
 import { queryReasoningCapability } from "../core/models.ts";
-import { buildBuilderPrompt, buildBuilderFindingsPrompt, type BuilderTicket, type GateFeedback } from "../context/builder.ts";
+import { buildBuilderPrompt, buildBuilderFindingsPrompt, buildHandoffPrompt, handoffPath, HANDOFF_MARKER, type BuilderTicket, type GateFeedback } from "../context/builder.ts";
 import { nextBuilderUnit, checkpointTarget, type BuilderUnit } from "./builder-units.ts";
 import { CHECKPOINT_RE, readCheckpointTicket } from "../core/checkpoint.ts";
 import { builderRecoveryFor } from "./builder-loop.ts";
@@ -779,6 +780,15 @@ async function committedTicket(
 export async function processTicket(state: RunState, ledger: string, ticket: TicketState): Promise<TicketOutcome> {
   ticket.status = "in_progress";
   ticket.start_commit = await git.headCommit(state.cwd);
+  // Smart review (code_review.trigger: "smart"): the stress signals are
+  // deltas/aggregates over this ticket's whole lifecycle, so capture the
+  // baselines before anything runs — `ticket.attempts` is overwritten by the
+  // loop's first turn (a resumed ticket must not lose attempts an earlier
+  // process recorded) and a stale skip reason from an earlier pass must not
+  // survive a retry that later reviews.
+  const priorAttempts = ticket.attempts ?? 0;
+  const restartsAtStart = state.builder?.restarts.length ?? 0;
+  ticket.review_skip_reason = undefined;
   await writeState(ledger, state);
 
   const allParsed = await loadTickets(state.tickets_dir);
@@ -915,10 +925,24 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
       ticket.logs.push(err);
       ticket.ladder_rung = impl.rung.rung;
       ticket.last_failure_class = impl.rung.class;
+      // ADR 0055: a capacity verdict means the UNIT does not fit the window,
+      // not the code — re-scope the unit first (split the uncommitted frontier
+      // into smaller tickets, preserving verify-green work and the session's
+      // handoff), and only fall back to the fresh-session-on-the-same-unit
+      // recovery when the split is unavailable or fails. The frontier was
+      // replaced, so there is nothing left to drive for this Ticket: back to
+      // the run loop, which picks up the regenerated frontier.
+      if (impl.rung.class === "capacity") {
+        const split = await splitCapacityTicket(state, ledger, ticket, parsed, attempt, err);
+        if (split) {
+          await writeState(ledger, state);
+          return "ok";
+        }
+      }
       // Issue #95 / ADR 0022 §5: the builder's response to a terminal infra
       // verdict is NOT the classic prompt-shrink (which races the session's
-      // compacter) — it is builderRecoveryFor's split: capacity/diagnosed/
-      // fatal-config are terminal classes, and all three force a FRESH
+      // compacter) — it is builderRecoveryFor's split: diagnosed/fatal-config
+      // (and capacity when the ADR 0055 split could not run) force a FRESH
       // session from the last green commit. (blip/server-state never reach
       // here — the ladder retried them on the same id before exhausting to a
       // terminal rung.) The gate machine the shared per-ticket loop branches
@@ -987,6 +1011,9 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
         const usedReplans = state.replan_count ?? 0;
         if (usedReplans < maxReplans) {
           state.replan_count = usedReplans + 1;
+          // Smart review (code_review.trigger: smart): a re-scoped plan is an
+          // "unusual" signal — arm the next review decision to fire.
+          state.smart_review_armed = true;
           console.log(`[${nowClock()}]   ${ticket.number} plan-defect block — auto-replan ${usedReplans + 1}/${maxReplans}`);
           const replanned = await replanFromCheckpoint(
             state,
@@ -1369,21 +1396,57 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
 
     // Working-diff review (gated by code_review.mode, issue #73). `full` and
     // `medium` review the working diff per ticket — blocking findings feed the
-    // retry loop (ADR 0005). `light`/`off` commit after verify: `light`
-    // defers code review to the run-end pass over committed diffs, `off`
-    // skips the gate entirely.
+    // retry loop (ADR 0005). `off` skips the gate entirely. `code_review.trigger`
+    // then decides WHETHER the gate is spent: `always` reviews every ticket,
+    // `smart` only where the build showed context stress (see
+    // review-schedule.ts).
     const codeMode = state.config.code_review?.mode ?? "light";
+    const codeTrigger = state.config.code_review?.trigger ?? "always";
     // An open-ended craft ticket's product is the rendered artifact, not the
     // diff; a diff review adds a gate cycle without judging the thing that
     // matters. The run-end visual/goal gate holds that seat. Skip per-ticket
     // review for it regardless of code_review.mode.
     const openEnded = parsed.open_ended === true;
-    if (!codeReviewRunsMidRun(codeMode) || openEnded) {
+    // Smart review (code_review.trigger: "smart"): the review phase is spent
+    // only where the build was stressed. The predicate is pure
+    // (review-schedule.ts); the caller supplies persisted telemetry — merged
+    // compactions across ALL build attempts (not just the marker-bearing one),
+    // attempts including pre-resume ones, session restarts since the ticket
+    // began, the reconcile/block/unverified flags, and the replan arm. A clean
+    // ticket skips and records WHY, never a pass (ADR 0050).
+    let schedule = { run: true, reason: "trigger always" };
+    if (codeTrigger === "smart" && codeReviewRunsMidRun(codeMode) && !openEnded) {
+      const mergedCompactions = implementPhaseFiles.size > 0
+        ? (await summarizePhaseFiles(ledger, implementPhaseFiles)).compactions
+        : ticket.context?.compactions ?? 0;
+      const replanArmed = state.smart_review_armed === true;
+      schedule = codeReviewSchedule({
+        trigger: codeTrigger,
+        compactions: mergedCompactions,
+        attempts: Math.max(priorAttempts, attempt),
+        restarts: (state.builder?.restarts.length ?? 0) - restartsAtStart,
+        reconciled: ticket.reconcile !== undefined && ticket.reconcile !== null,
+        blocked: (ticket.blocks?.length ?? 0) > 0,
+        unverified: (ticket.unverified?.length ?? 0) > 0,
+        replanArmed,
+      });
+      if (replanArmed) {
+        // Consume the arm — it exists to force exactly one review after a
+        // replan, never to keep every later ticket on the review path.
+        state.smart_review_armed = false;
+        await writeState(ledger, state);
+      }
+    }
+    if (!codeReviewRunsMidRun(codeMode) || openEnded || !schedule.run) {
       // No per-ticket review; commit after verify.
       ticket.review_ok = null;
       ticket.review_attempts = 0;
       if (openEnded && codeReviewRunsMidRun(codeMode)) {
         ticket.logs.push(`review ${ticket.number}: skipped (open-ended craft ticket — the artifact is judged by the run-end visual/goal gate, not a diff review)`);
+      } else if (!schedule.run) {
+        ticket.review_skip_reason = schedule.reason;
+        ticket.logs.push(`review ${ticket.number}: not run (smart — ${schedule.reason}; goal/structural checkpoints still judge the built work)`);
+        console.log(`[${nowClock()}]   ${ticket.number} review ⊘ not run (smart — ${schedule.reason})`);
       }
     } else {
       const rawDiff = await git.workingDiff(state.cwd);
@@ -1744,6 +1807,118 @@ function recordBuilderRestart(state: RunState, ticketNumber: string, cause: stri
  * the last green commit (the state.builder continuity fields survive). */
 function dropBuilderSession(state: RunState): void {
   ensureBuilderState(state).session_id = undefined;
+}
+
+/** ADR 0055: the capacity handoff note is one small model turn — enough to
+ * write three short sections, never enough to resume the work. */
+const HANDOFF_MAX_STEPS = 24;
+
+/**
+ * ADR 0055: before a capacity verdict drops the session, one bounded turn asks
+ * that session to write its handoff note. Best effort by design: a failed note
+ * never blocks the split, it only makes the next seed rediscover more.
+ */
+async function builderHandoff(
+  state: RunState,
+  ledger: string,
+  ticket: TicketState,
+  attempt: number,
+): Promise<string | null> {
+  const sessionId = state.builder?.session_id;
+  if (!sessionId) return null;
+  const phaseFile = `${ticket.number}-${String(attempt).padStart(2, "0")}-handoff`;
+  try {
+    const result = await executeOpendCode(buildHandoffPrompt(ticket), {
+      cwd: state.cwd,
+      ledgerDir: ledger,
+      phaseFile,
+      model: state._models?.implement ?? null,
+      agent: RAILHEAD_AGENT_NAMES.build,
+      session: sessionId,
+      fork: false,
+      guardMode: "telemetry",
+      live: !state.quiet,
+      verbose: state.verbose,
+      heartbeat: true,
+      livePrefix: `${ticket.number} handoff`,
+      maxSteps: HANDOFF_MAX_STEPS,
+      stallTimeoutSec: state.config.stall_timeout_sec,
+      maxStepModelSec: state.config.max_step_model_sec,
+      maxContextTokens: contextBudget(state),
+      stopAfterMarker: HANDOFF_MARKER,
+    });
+    if (result.status !== "ok") return null;
+    const note = await readFile(join(state.cwd, handoffPath(ticket.number)), "utf8").catch(() => null);
+    if (!note?.trim()) return null;
+    ticket.logs.push(`handoff ${phaseFile}: wrote ${handoffPath(ticket.number)} (${note.length} chars)`);
+    return note;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * ADR 0055: the capacity recovery. A terminal capacity verdict means the unit,
+ * not the code, does not fit the window — so re-scope the unit before dropping
+ * the session: preserve verify-green work, take the session's handoff note,
+ * and regenerate the uncommitted frontier as smaller tickets. True means the
+ * frontier was replaced (the caller returns to the run loop); false means the
+ * caller falls back to the fresh-session recovery on the same unit.
+ */
+async function splitCapacityTicket(
+  state: RunState,
+  ledger: string,
+  ticket: TicketState,
+  parsed: Ticket,
+  attempt: number,
+  diagnosis: string,
+): Promise<boolean> {
+  if (!state._models?.plan) {
+    console.log(`[${nowClock()}]   ${ticket.number} capacity split unavailable — no planner seat configured; using a fresh session`);
+    return false;
+  }
+  const maxReplans = state.config.goal_review?.max_replans ?? DEFAULT_MAX_REPLANS;
+  if ((state.replan_count ?? 0) >= maxReplans) {
+    console.log(`[${nowClock()}]   ${ticket.number} capacity split refused — max_replans (${maxReplans}) reached; using a fresh session`);
+    return false;
+  }
+
+  if (ticket.verify_ok === true) {
+    try {
+      const diff = await git.workingDiff(state.cwd);
+      if (diff) {
+        const checkpoint = await git.commitOrReuseHead(state.cwd, `${ticket.number} — ${ticket.title} (checkpoint — capacity split, verify green)`);
+        ticket.commit = checkpoint;
+        ensureBuilderState(state).last_green_commit = checkpoint;
+        ticket.logs.push(`checkpoint ${checkpoint} preserved before the capacity split (verify green — the split frontier builds on it)`);
+        console.log(`[${nowClock()}]   ${ticket.number} verify-green work checkpointed at ${checkpoint.slice(0, 8)} before the capacity split`);
+      }
+    } catch (err) {
+      console.log(`[${nowClock()}]   ${ticket.number} checkpoint before the capacity split failed (${String(err)}) — continuing uncheckpointed`);
+    }
+  }
+
+  const handoff = await builderHandoff(state, ledger, ticket, attempt);
+  const worktree = await git.workingTreeSummary(state.cwd).catch(() => "");
+  let split = false;
+  try {
+    split = await replanFromCapacity(state, ledger, {
+      ticket: { number: ticket.number, title: ticket.title, file: ticket.file, what: parsed.what },
+      finding: diagnosis,
+      worktree,
+      handoff,
+    });
+  } catch (err) {
+    // ADR 0055: the split is a recovery, never a new failure mode — a planner
+    // invocation that dies falls back to the fresh-session path below.
+    console.log(`[${nowClock()}]   ${ticket.number} capacity split failed (${String(err)}) — using a fresh session`);
+  }
+  if (!split) return false;
+
+  recordBuilderRestart(state, ticket.number, `capacity split (${diagnosis})`);
+  dropBuilderSession(state);
+  console.log(`[${nowClock()}]   ${ticket.number} capacity split: frontier regenerated as smaller tickets — continuing on a fresh session`);
+  return true;
 }
 
 /** Map a parsed ticket onto the builder prompt's thin ticket shape. */
@@ -2160,6 +2335,9 @@ async function processBuilderGroupUnit(
   const outcome = await processTicket(state, ledger, first);
   if (outcome === "failed") return "failed";
   if (outcome === "halted") return "halted";
+  // ADR 0055: a capacity split replaces the whole uncommitted frontier — the
+  // unit that was being driven is gone, so there is no group commit to stage.
+  if (!state.tickets.includes(first)) return "ok";
   const groupCommit = first.commit;
   if (!groupCommit) throw new Error(`builder group ${first.number}: first member committed without a commit hash`);
 

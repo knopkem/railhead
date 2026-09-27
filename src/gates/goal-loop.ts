@@ -507,6 +507,9 @@ export async function runGoalReview(
       replanTriggered = await replanFromCheckpoint(state, ledger, verdict.findings, group, transcript);
       if (replanTriggered) {
         state.replan_count = replans + 1;
+        // Smart review (code_review.trigger: smart): a re-scoped plan arms the
+        // next review decision to fire even on an otherwise clean ticket.
+        state.smart_review_armed = true;
         console.log(`[${nowClock()}] goal review: replan ${state.replan_count}/${maxReplans} triggered for checkpoint "${group}"`);
         // A run-end replan regenerates a frontier with no build loop left to
         // process it — drain it inline (dependency order) so the new tickets

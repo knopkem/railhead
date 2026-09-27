@@ -309,12 +309,20 @@ describe("loadConfig", () => {
     expect(cfg).toEqual(DEFAULT_CONFIG);
   });
 
-  it("defaults code_review to off (v2 issue 01 — light/medium presets stop scheduling per-ticket review)", async () => {
+  it("defaults code_review to off + trigger always (presets schedule the gate; the bare config default does not)", async () => {
     const cfg = await loadConfig(await makeCwd(null));
     expect(cfg.code_review?.mode).toBe("off");
+    expect(cfg.code_review?.trigger).toBe("always");
     expect(cfg.visual_review?.mode).toBe("off");
     expect(cfg.goal_review?.mode).toBe("off");
     expect(cfg.structural_review?.mode).toBe("off");
+  });
+
+  it("reads code_review.trigger and falls back to `always` for an unrecognised token", async () => {
+    const smart = await loadConfig(await makeCwd(JSON.stringify({ code_review: { mode: "medium", trigger: "smart" } })));
+    expect(smart.code_review?.trigger).toBe("smart");
+    const bogus = await loadConfig(await makeCwd(JSON.stringify({ code_review: { mode: "medium", trigger: "sometimes" } })));
+    expect(bogus.code_review?.trigger).toBe("always");
   });
 
   it("defaults code_review.inherit_tools to true (the reviewer runs on the ordinary tool-bearing seat like every other gate)", async () => {
@@ -509,6 +517,13 @@ describe("preset goal checkpoint action (v2 issue 01, ADR 0029)", () => {
     expect(presetGateModes("full").goalCheckpointAction).toBeUndefined();
     expect(presetGateModes("medium").goalCheckpointAction).toBeUndefined();
     expect(presetGateModes("none").goalCheckpointAction).toBeUndefined();
+  });
+
+  it("only the light preset carries the smart code-review trigger; the other presets resolve `always`", () => {
+    expect(presetGateModes("light").codeTrigger).toBe("smart");
+    expect(presetGateModes("full").codeTrigger).toBeUndefined();
+    expect(presetGateModes("medium").codeTrigger).toBeUndefined();
+    expect(presetGateModes("none").codeTrigger).toBeUndefined();
   });
 });
 

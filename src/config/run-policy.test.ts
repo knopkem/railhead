@@ -104,6 +104,31 @@ describe("resolveGateModes", () => {
     expect(resolveGateModes({ preset: "medium", overrides: emptyOverrides }).goalCheckpointAction).toBeUndefined();
     expect(resolveGateModes({ preset: "full", overrides: emptyOverrides }).goalCheckpointAction).toBeUndefined();
   });
+
+  it("the light preset resolves the smart code trigger; the other presets resolve `always`", () => {
+    expect(resolveGateModes({ preset: "light", overrides: emptyOverrides }).codeTrigger).toBe("smart");
+    expect(resolveGateModes({ preset: "medium", overrides: emptyOverrides }).codeTrigger).toBeUndefined();
+    expect(resolveGateModes({ preset: "full", overrides: emptyOverrides }).codeTrigger).toBeUndefined();
+    expect(resolveGateModes({ preset: "none", overrides: emptyOverrides }).codeTrigger).toBeUndefined();
+  });
+
+  it("an explicit --review override resets the smart trigger to always", () => {
+    const modes = resolveGateModes({
+      preset: "light",
+      overrides: { code: "medium", visual: null, goal: null, structural: null },
+    });
+    expect(modes.code).toBe("medium");
+    expect(modes.codeTrigger).toBe("always");
+  });
+
+  it("a questionnaire answer carrying the smart trigger survives resolution", () => {
+    const answer = {
+      modes: { code: "medium" as const, codeTrigger: "smart" as const, visual: "off" as const, goal: "off" as const, structural: "off" as const },
+      skipAll: false,
+    };
+    const modes = resolveGateModes({ preset: null, overrides: emptyOverrides, answer });
+    expect(modes.codeTrigger).toBe("smart");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -217,6 +242,38 @@ describe("persistPolicy", () => {
       await persistPolicy(cwd, config, { gateModes: { goal: "light" } });
       const raw = await readRaw(cwd);
       expect(raw.goal_review).toEqual({ mode: "light", checkpoint_action: "corrective", max_rounds: 5 });
+    });
+  });
+
+  describe("code review trigger (smart review)", () => {
+    it("persists code_review.trigger when it differs, preserving sibling keys", async () => {
+      const cwd = await makeCwd(JSON.stringify({ code_review: { mode: "medium", inherit_tools: false } }));
+      const config = await loadConfig(cwd);
+      await persistPolicy(cwd, config, { codeReviewTrigger: "smart" });
+      expect((await readRaw(cwd)).code_review).toEqual({ mode: "medium", inherit_tools: false, trigger: "smart" });
+      expect(config.code_review?.trigger).toBe("smart");
+    });
+
+    it("a re-plan off smart clears the trigger back to always (medium/full cannot inherit skipping)", async () => {
+      const cwd = await makeCwd(JSON.stringify({ code_review: { mode: "medium", trigger: "smart" } }));
+      const config = await loadConfig(cwd);
+      await persistPolicy(cwd, config, { gateModes: { code: "medium" }, codeReviewTrigger: "always" });
+      expect((await readRaw(cwd)).code_review).toEqual({ mode: "medium", trigger: "always" });
+      expect(config.code_review?.trigger).toBe("always");
+    });
+
+    it("no trigger decision leaves a hand-written trigger untouched", async () => {
+      const cwd = await makeCwd(JSON.stringify({ code_review: { mode: "medium", trigger: "smart" } }));
+      const config = await loadConfig(cwd);
+      await persistPolicy(cwd, config, { gateModes: { code: "medium" } });
+      expect((await readRaw(cwd)).code_review).toEqual({ mode: "medium", trigger: "smart" });
+    });
+
+    it("an unchanged trigger is a no-op write", async () => {
+      const cwd = await makeCwd(JSON.stringify({ code_review: { mode: "medium", trigger: "smart" } }));
+      const config = await loadConfig(cwd);
+      await persistPolicy(cwd, config, { codeReviewTrigger: "smart" });
+      expect((await readRaw(cwd)).code_review).toEqual({ mode: "medium", trigger: "smart" });
     });
   });
 });

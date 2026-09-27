@@ -11,7 +11,11 @@ export type TicketStatus =
   | "failed"
   | "skipped";
 
-export type RunStatus = "running" | "finished" | "stopped" | "failed";
+/** `superseded` is terminal and not resumable: a fresh plan replaced the
+ * ticket files this run referenced (a re-run of `build`/`fix`/`feature`), so
+ * its frontier is stale by construction. Distinguished from `failed` — nothing
+ * went wrong; the run was deliberately replaced. */
+export type RunStatus = "running" | "finished" | "stopped" | "failed" | "superseded";
 
 export interface ReviewVerdict {
   phase: string;
@@ -107,6 +111,11 @@ export interface TicketState {
   review_ok: boolean | null;
   /** Number of blocking reviews this ticket went through before passing. */
   review_attempts: number;
+  /** Smart review (code_review.trigger: "smart"): why the per-ticket review
+   * phase was skipped — the pure predicate's reason ("no stress"). Absent when
+   * the review ran or the trigger is `always`. A skipped gate is "not run",
+   * never a pass (ADR 0050), so `review_ok` stays null alongside it. */
+  review_skip_reason?: string;
   /** Total elapsed seconds across this ticket's implement/review phases. */
   duration_ms: number;
   /** Every review verdict for this ticket, in order, for the history. */
@@ -258,6 +267,12 @@ export interface RunState {
    * this run has honored so far. Enforced against `goal_review.max_replans`;
    * absent until the first replan fires. */
   replan_count?: number;
+  /** Smart review (code_review.trigger: "smart"): set when a replan or
+   * capacity split regenerates the frontier. The next review decision consumes
+   * it and fires a review even on an otherwise clean ticket — a re-scoped plan
+   * is exactly the "unusual" signal the review exists to catch. Persisted so a
+   * stop between the replan and the next ticket cannot lose the signal. */
+  smart_review_armed?: boolean;
   /** v2 issue 01: the persistent probe registry. The goal review materializes
    * one probe per concrete finding (a command + expected predicate) so a later
    * round re-runs it deterministically instead of re-deriving the same
@@ -366,4 +381,4 @@ export function frontier(state: RunState): TicketState[] {
 }
 
 export const isFinished = (s: RunStatus) =>
-  s === "finished" || s === "stopped" || s === "failed";
+  s === "finished" || s === "stopped" || s === "failed" || s === "superseded";

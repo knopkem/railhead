@@ -909,6 +909,23 @@ describe("runPlan — two-call planning (design -> tickets)", () => {
     expect(result.tickets.filter((t) => t.open_ended === true)).toHaveLength(1);
   });
 
+  it("fix mode declaring a rendered surface gets no deterministic whole-look craft ticket (the fix prompt never asks for art direction)", async () => {
+    const cwd = await freshCwd();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      mockExec.mockImplementation(async (_prompt, options) => {
+        await emitText(options.ledgerDir, options.phaseFile, "$VERIFY\nnpm test\n$INTERFACE\nbrowser-ui\n$SMOKE\nnpm run dev\n$DESIGN\nGoal: reroute roads.\n$END\n$TICKETS\n[{\"title\":\"Reroute roads\",\"what\":\"steep segments are rerouted\",\"criteria\":[\"no road climbs the ridge\"]}]\n");
+        return okResult();
+      });
+      const result = await runPlan({ cwd, prompt: "roads climb hills", model: null, mode: "fix" });
+      expect(result.tickets.map((t) => t.title)).toEqual(["Reroute roads"]);
+      expect(result.tickets.some((t) => t.open_ended === true)).toBe(false);
+      expect(warn.mock.calls.join("\n")).not.toContain("open-ended craft ticket");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("a feature plan with a held charter gets no deterministic whole-look craft ticket and no false charter warning (ADR 0051)", async () => {
     const cwd = await freshCwd();
     await writeProductPlan(cwd, {
@@ -929,6 +946,22 @@ describe("runPlan — two-call planning (design -> tickets)", () => {
       const result = await runPlan({ cwd, prompt: "add search", model: null, mode: "feature", artDirection: true });
       expect(result.tickets.some((t) => t.open_ended === true)).toBe(false);
       expect(warn.mock.calls.join("\n")).not.toMatch(/without a coherence charter/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("feature mode without a held charter gets no deterministic whole-look craft ticket either (craft tickets there are planner-scoped to new surfaces)", async () => {
+    const cwd = await freshCwd();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      mockExec.mockImplementation(async (_prompt, options) => {
+        await emitStaged(options, "$VERIFY\nnpm test\n$INTERFACE\nbrowser-ui\n$SMOKE\nnpm run dev\n$DESIGN\nGoal: search.\n$END\n$ARCHITECTURE\nModules: searchbox.\n$END\n$TICKETS\n[{\"title\":\"Search box\",\"what\":\"type to filter\",\"criteria\":[\"the search panel renders results as you type\"],\"group\":\"search\"}]\n");
+        return okResult();
+      });
+      const result = await runPlan({ cwd, prompt: "add search", model: null, mode: "feature", artDirection: true });
+      expect(result.tickets.some((t) => t.open_ended === true)).toBe(false);
+      expect(warn.mock.calls.join("\n")).not.toContain("open-ended craft ticket");
     } finally {
       warn.mockRestore();
     }

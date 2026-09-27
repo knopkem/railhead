@@ -95,7 +95,7 @@ function okResult(steps = 1, toolCalls = 1) {
 }
 
 /** Identify which kind of phase a mocked executeOpendCode call represents, purely from the options run.ts passes — mirrors how a human reading the ledger would tell them apart. */
-function kindOf(options: { phaseFile: string; agent?: string | null }): "base" | "review" | "contracts" | "implement" | "visual" | "test" | "goal" | "structural" | "replan" | "reconcile" | "interact" {
+function kindOf(options: { phaseFile: string; agent?: string | null }): "base" | "review" | "contracts" | "implement" | "visual" | "test" | "goal" | "structural" | "replan" | "reconcile" | "interact" | "handoff" {
   // Issue #133: the base-session call is not a ticket phase — classify it so
   // scripted mocks keyed on phase kind never treat it as implement/review.
   if (options.agent === "railhead-base" || options.phaseFile === "base-session") return "base";
@@ -107,6 +107,7 @@ function kindOf(options: { phaseFile: string; agent?: string | null }): "base" |
   if (options.phaseFile.startsWith("goal-")) return "goal";
   if (options.phaseFile.startsWith("structural-")) return "structural";
   if (options.phaseFile.startsWith("replan-")) return "replan";
+  if (options.phaseFile.endsWith("-handoff")) return "handoff";
   if (options.phaseFile.endsWith("-reconcile")) return "reconcile";
   // The per-ticket code review runs on the tool-bearing observe seat by default
   // (`code_review.inherit_tools`), so the phase-file suffix, not the agent
@@ -2476,6 +2477,201 @@ describe("code review cadence (issue #73)", () => {
   });
 });
 
+describe("smart review trigger (code_review.trigger)", () => {
+  it("a clean single-pass ticket skips the review phase and records 'no stress' — never a pass", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      code_review: { mode: "medium", trigger: "smart" },
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: null, extract: null },
+    });
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+
+    const reviewPhases: string[] = [];
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else if (kind === "review") {
+        reviewPhases.push(options.phaseFile);
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    expect(reviewPhases).toEqual([]);
+    // A skipped gate is "not run" (ADR 0050): no verdict, review_ok stays null,
+    // and the reason is persisted so no report can read it as green.
+    expect(final.tickets[0].review_ok).toBeNull();
+    expect(final.tickets[0].review_attempts).toBe(0);
+    expect(final.tickets[0].review_skip_reason).toBe("no stress");
+    expect(final.tickets[0].status).toBe("committed");
+    expect(final.tickets[0].logs.some((l) => l.includes("not run (smart — no stress"))).toBe(true);
+  });
+
+  it("a compaction during the build fires the review", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      code_review: { mode: "medium", trigger: "smart" },
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: null, extract: null },
+    });
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+
+    const reviewPhases: string[] = [];
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        // The durable-session builder compacted mid-invocation: the same event
+        // analyzePhase/summarizePhaseFiles count as context stress.
+        await appendEvent(ledgerDir, options.phaseFile, JSON.stringify({ type: "session.compacted" }));
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else if (kind === "review") {
+        reviewPhases.push(options.phaseFile);
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    expect(reviewPhases).toEqual(["01-01-review"]);
+    expect(final.tickets[0].review_ok).toBe(true);
+    expect(final.tickets[0].review_skip_reason).toBeUndefined();
+  });
+
+  it("a verify retry makes the later attempt's review fire", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      // First verify is red (the marker file does not exist yet); the second
+      // build attempt writes it.
+      verify: ["test -f .built"],
+      code_review: { mode: "medium", trigger: "smart" },
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: null, extract: null },
+    });
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+
+    let implementCalls = 0;
+    const reviewPhases: string[] = [];
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        implementCalls++;
+        await writeImplementedFile(cwd);
+        if (implementCalls > 1) await writeFile(join(cwd, ".built"), "ok\n", "utf8");
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else if (kind === "review") {
+        reviewPhases.push(options.phaseFile);
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    expect(implementCalls).toBe(2);
+    expect(reviewPhases).toEqual(["01-02-review"]);
+    expect(final.tickets[0].review_skip_reason).toBeUndefined();
+  });
+
+  it("a replan arm fires one review on an otherwise clean ticket, then clears", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      code_review: { mode: "medium", trigger: "smart" },
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: null, extract: null },
+    });
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+    state.smart_review_armed = true;
+
+    const reviewPhases: string[] = [];
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else if (kind === "review") {
+        reviewPhases.push(options.phaseFile);
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    expect(reviewPhases).toEqual(["01-01-review"]);
+    expect(final.smart_review_armed).toBe(false);
+  });
+
+  it("trigger always reviews a clean ticket even with mode medium", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      code_review: { mode: "medium", trigger: "always" },
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: null, extract: null },
+    });
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+
+    const reviewPhases: string[] = [];
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else if (kind === "review") {
+        reviewPhases.push(options.phaseFile);
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    expect(reviewPhases).toEqual(["01-01-review"]);
+    expect(final.tickets[0].review_skip_reason).toBeUndefined();
+  });
+});
+
 describe("goal review cadence (issue #73)", () => {
   it("light: no checkpoints mid-run, but a goal review fires once at run end", async () => {
     const cwd = await freshRepo();
@@ -3880,6 +4076,7 @@ describe("session builder (issue #95)", () => {
 
     const buildSessions: (string | null | undefined)[] = [];
     const buildPrompts: string[] = [];
+    let replanAttempted = false;
     let builds = 0;
     mockExec.mockImplementation(async (prompt, options) => {
       const kind = kindOf(options);
@@ -3899,6 +4096,14 @@ describe("session builder (issue #95)", () => {
         await emitText(ledgerDir, options.phaseFile, "$CHECKPOINT ticket=" + options.phaseFile.slice(0, 2));
         return builderOk(options.phaseFile.slice(0, 2));
       }
+      if (kind === "replan") {
+        // ADR 0055 tries the capacity split first; this mock's planner emits
+        // nothing parseable, so the split must fall back cleanly to the
+        // fresh-session recovery this test pins.
+        replanAttempted = true;
+        await emitText(ledgerDir, options.phaseFile, "I cannot split this plan.");
+        return okResult();
+      }
       if (kind === "review") {
         await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
       } else {
@@ -3910,14 +4115,83 @@ describe("session builder (issue #95)", () => {
     const final = await runLoop(state, ledgerDir);
 
     expect(final.status).toBe("finished");
+    expect(replanAttempted).toBe(true);
     // The second build must be a FRESH session (the capacity verdict dropped
     // the spiraling one), not a resume of sess-spiral.
     expect(buildSessions).toEqual([null, null, "sess-abc123"]);
     expect(final.builder!.restarts.some((r) => r.cause.includes("capacity"))).toBe(true);
-    // The re-driven invocation is the seeded advance — a findings prompt would
-    // reference work the fresh session never wrote.
+    // The fallback re-driven invocation is the seeded advance — a findings
+    // prompt would reference work the fresh session never wrote.
     expect(buildPrompts[1]).toContain("## Work to do");
     expect(buildPrompts[1]).not.toContain("gate found problems");
+  });
+
+  it("ADR 0055: a capacity verdict splits the uncommitted frontier — handoff note, split replan, fresh seed — instead of re-driving the oversized ticket", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      checkpoint_granularity: "ticket",
+      model: { plan: "plan-model", implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: null, extract: null },
+    });
+    const state = await twoTicketState(cwd, ticketsDir, config);
+    state.original_prompt = "build the greet app";
+
+    const buildSessions: (string | null | undefined)[] = [];
+    const handoffSessions: (string | null | undefined)[] = [];
+    const replanPrompts: string[] = [];
+    let builds = 0;
+    mockExec.mockImplementation(async (prompt, options) => {
+      const kind = kindOf(options);
+      if (options.phaseFile.endsWith("-build")) {
+        builds++;
+        buildSessions.push(options.session);
+        if (builds === 1) {
+          await appendEvent(ledgerDir, options.phaseFile, JSON.stringify({ type: "text", part: { type: "text", text: "(compacted)", metadata: { compaction_continue: true } } }));
+          await appendEvent(ledgerDir, options.phaseFile, JSON.stringify({ type: "text", part: { type: "text", text: "(compacted again)", metadata: { compaction_continue: true } } }));
+          return { ...okResult(), sessionId: "sess-spiral", checkpointTicket: null };
+        }
+        await writeTicketFile(cwd, "02");
+        await emitText(ledgerDir, options.phaseFile, "$CHECKPOINT ticket=" + options.phaseFile.slice(0, 2));
+        return builderOk(options.phaseFile.slice(0, 2));
+      }
+      if (kind === "handoff") {
+        handoffSessions.push(options.session);
+        await writeFile(join(cwd, ".railhead", "handoff-01.md"), "# Handoff — ticket 01\n\n## Done\n- greet scaffold landed\n\n## Remains\n- wire main\n\n## Gotchas\n- none\n", "utf8");
+        await emitText(ledgerDir, options.phaseFile, "$HANDOFF");
+        return okResult();
+      }
+      if (kind === "replan") {
+        replanPrompts.push(prompt);
+        await emitText(ledgerDir, options.phaseFile, '$TICKETS\n[{"title":"Scaffold greet","what":"land the greet module","criteria":["exists"],"open_ended":false},{"title":"Wire main","what":"call greet from main","criteria":["calls greet"],"open_ended":false}]');
+        return okResult();
+      }
+      if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    // The frontier was replaced by the split: ticket 02 is gone, both
+    // regenerated tickets ran and committed.
+    expect(final.tickets.map((t) => t.title)).toEqual(["Scaffold greet", "Wire main"]);
+    expect(final.tickets.every((t) => t.status === "committed")).toBe(true);
+    expect(final.replan_count).toBe(1);
+    // The split preserved the session's working memory (one handoff turn) and
+    // then seeded fresh — it did not resume the spiraled session.
+    expect(handoffSessions).toEqual(["sess-spiral"]);
+    expect(buildSessions[1]).toBeNull();
+    expect(replanPrompts).toHaveLength(1);
+    expect(replanPrompts[0]).toContain("capacity failure");
+    expect(replanPrompts[0]).toContain("Handoff from the interrupted session");
+    expect(replanPrompts[0]).toContain("greet scaffold landed");
+    expect(final.builder!.restarts.some((r) => r.cause.includes("capacity split"))).toBe(true);
   });
 
   it("ADR 0040 amendment 3: a capacity verdict's fresh-session recovery gets its own invocation window under the default step budget", async () => {

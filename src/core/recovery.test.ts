@@ -232,6 +232,12 @@ describe("shouldResume", () => {
     expect(shouldResume("run/x", s)).toBe(false);
   });
 
+  it("returns false for a matching branch with status superseded", () => {
+    const s = state([]);
+    s.status = "superseded";
+    expect(shouldResume("run/x", s)).toBe(false);
+  });
+
   it("returns false for a mismatched branch", () => {
     const s = state([]);
     s.status = "running";

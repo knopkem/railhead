@@ -19,7 +19,7 @@ _Avoid_: fix ticket, follow-up
 **Probe**: a deterministic re-check materialized for a confirmed finding — a shell command plus the substring its output must contain when the behavior holds — registered per group under `.railhead/probes/` (persisted in `state.probes`) so later goal rounds re-run it instead of re-deriving the finding by hand. Never a test framework; language-agnostic by construction.
 _Avoid_: test, check script
 
-**Run**: one execution of the Railhead over a set of Tickets, in plan order, on a single branch. Identified by a `run_id`.
+**Run**: one execution of the Railhead over a set of Tickets, in plan order, on a single branch. Identified by a `run_id`. Re-running a planning command (`build`/`fix`/`feature`) replaces the plan and closes the branch's interrupted Runs as `superseded` (ADR 0054); only `railhead run`/`resume` continue an interrupted Run.
 _Avoid_: job, build, session
 
 **Ledger**: the durable per-Run record of what happened: `state.json` plus one append-only `events.jsonl` per Ticket phase (the `opencode run --format json` stream, verbatim). This is the audit trail and the resume source.

@@ -2,7 +2,9 @@ import { describe, it, expect } from "vitest";
 import {
   buildBuilderPrompt,
   buildBuilderFindingsPrompt,
+  buildHandoffPrompt,
   checkpointDirective,
+  handoffPath,
   type BuilderTicket,
 } from "./builder.ts";
 import { CHECKPOINT_START } from "../core/checkpoint.ts";
@@ -108,6 +110,23 @@ describe("buildBuilderPrompt context economy (builder-seat dependency discipline
   it("does NOT repeat the block on a warm pointer resume (the session holds it from its seed — #106 dedup)", () => {
     const p = builderPrompt({ ...fresh, session: { sessionId: "ses_x" }, contextPointers: { contracts: "railhead.contracts.json" } });
     expect(p).not.toContain("Context economy");
+  });
+});
+
+describe("reuse-before-writing discipline (slow local seats)", () => {
+  it("seeds the reuse ladder and the security/validation exemptions", () => {
+    const p = builderPrompt(fresh);
+    expect(p).toContain("Reuse before writing");
+    expect(p).toMatch(/platform\/standard-library feature/);
+    expect(p).toMatch(/dependency the project already has installed/);
+    expect(p).toMatch(/Add a NEW dependency only when/);
+    expect(p).toMatch(/Never hand-roll authentication, cryptography/);
+    expect(p).toMatch(/Never cut validation, error handling, or accessibility/);
+  });
+
+  it("does NOT repeat the block on a warm pointer resume (the session holds it from its seed — #106 dedup)", () => {
+    const p = builderPrompt({ ...fresh, session: { sessionId: "ses_x" }, contextPointers: { contracts: "railhead.contracts.json" } });
+    expect(p).not.toContain("Reuse before writing");
   });
 });
 
@@ -558,5 +577,36 @@ describe("surface cadence for visual tickets (v2 issue 01)", () => {
     expect(p).toContain("Design intent (verbatim");
     expect(p).toContain("A neon descent.");
     expect(p).toMatch(/verify this ticket with your own eyes/i);
+  });
+});
+
+describe("verification ownership (ADR 0055)", () => {
+  it("tells the builder the gates own acceptance and probe: lines are not its script", () => {
+    const p = builderPrompt(fresh);
+    expect(p).toMatch(/Verification ownership/);
+    expect(p).toMatch(/railhead's own gates/);
+    expect(p).toMatch(/probe:.*describes how THOSE gates will check/i);
+    expect(p).toMatch(/Do not add bespoke probe/);
+  });
+
+  it("carries the rule into findings resumes too (a gate finding must not invite a harness)", () => {
+    const p = builderFindings({
+      ...fresh,
+      feedback: { source: "verify", findings: ["[BLOCKER] the pencil does not paint"] },
+    });
+    expect(p).toMatch(/Verification ownership/);
+  });
+});
+
+describe("capacity handoff prompt (ADR 0055)", () => {
+  it("asks for the note at the protected path and ends on the handoff marker", () => {
+    const p = buildHandoffPrompt(ticket01);
+    expect(p).toContain(handoffPath("01"));
+    expect(p).toContain(".railhead/handoff-01.md");
+    expect(p).toMatch(/## Done/);
+    expect(p).toMatch(/## Remains/);
+    expect(p).toMatch(/## Gotchas/);
+    expect(p).toContain("$HANDOFF");
+    expect(p).toMatch(/Do not edit any other file/);
   });
 });

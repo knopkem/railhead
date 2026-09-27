@@ -149,3 +149,10 @@ gymnastics.
 4. Before `runLoop` enters, tickets on disk match tickets in `state.json`
    (or a descriptive error is thrown).
 5. `railhead reset` removes the run ledger; `--hard` also discards git work.
+
+## Amendment (2026-09-27, ADR 0054)
+
+Auto-resume is for `railhead run`/`resume` only. A `build`/`fix`/`feature`
+re-run re-plans, and the plan supersedes the branch's interrupted runs
+(`status: "superseded"`); the post-plan handoff to `cmdRun` never auto-resumes.
+Invariant 3 above is unchanged for direct `run` invocations.

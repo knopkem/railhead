@@ -4,8 +4,8 @@ The run/ticket data model, its durable persistence, and the bare host adapters. 
 
 ## Seams
 
-- `state.ts` — `RunState`/`TicketState`, `createRunState`, `frontier` (the first ready ticket in order), `isFinished`. The persisted model.
-- `ledger.ts` — `.railhead/run-*` mechanics: `initLedger`, `writeState`/`readState`, `appendEvent`, `extractAssistantText`, `extractPlanText`. Append-only JSONL plus `state.json`; this is the resume source.
+- `state.ts` — `RunState`/`TicketState`, `createRunState`, `frontier` (the first ready ticket in order), `isFinished` (treats `superseded` as terminal). The persisted model.
+- `ledger.ts` — `.railhead/run-*` mechanics: `initLedger`, `writeState`/`readState`, `appendEvent`, `extractAssistantText`, `extractPlanText`, and the resume lookups `findRunForBranch`/`supersedeRunsForBranch` (a replan closes the branch's interrupted runs — ADR 0054). Append-only JSONL plus `state.json`; this is the resume source.
 - `ticket.ts` — the on-disk ticket format and its ordered numbering: `parseTicket`, `renderTicket`, `loadTickets`, `numberTickets`, `titleSlug`, and the criterion probe-line helpers (`criterionBehavior`, `criterionProbe`, `withProbe`). Array order IS execution order.
 - `contracts.ts` — `railhead.contracts.json` index: load/save/merge/slice/verify. This is the O(ticket) context seam (ADR 0008).
 - `probes.ts` — the persistent probe registry (ADR 0043 amendment): `registerProbes`, `probesForGroup`, `materializeProbeScripts`, `runRegisteredProbes`. A probe is a command + expected predicate; entries persist in `state.probes`, scripts under `.railhead/probes/`.

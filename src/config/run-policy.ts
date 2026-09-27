@@ -1,5 +1,5 @@
 import { goalCheckpointActionFor, presetGateModes, updateConfig } from "./config.ts";
-import type { GateMode, GatePreset, GoalCheckpointAction, RailheadConfig, PresetGateModes } from "./config.ts";
+import type { CodeReviewTrigger, GateMode, GatePreset, GoalCheckpointAction, RailheadConfig, PresetGateModes } from "./config.ts";
 import type { GateOverrides } from "./args.ts";
 
 /**
@@ -90,6 +90,12 @@ export function resolveGateModes(input: ResolveGateModesInput): PresetGateModes 
   if (input.answer?.skipAll) {
     modes = presetGateModes("none");
   }
+  // Smart review: an explicit `--review <mode>` is the human naming a cadence,
+  // so it overrides the light preset's stress trigger back to `always` — a
+  // deliberately asked-for review must not be silently stress-skipped.
+  if (input.overrides.code) {
+    modes.codeTrigger = "always";
+  }
   // ADR 0029 (#102): the goal checkpoint action rides the RESOLVED goal gate —
   // goal mode `light` is the advisory-checkpoints identity, whatever base
   // (preset or interactive answer) produced it, and an override off `light`
@@ -138,6 +144,8 @@ export interface PolicyDecisions {
   featureMode?: boolean;
   /** Desired per-gate cadence; only the listed gates are considered. */
   gateModes?: Partial<Record<GateName, GateMode>>;
+  /** Persist `code_review.trigger` to this value. Absent = leave it alone. */
+  codeReviewTrigger?: CodeReviewTrigger;
 }
 
 export interface PersistReport {
@@ -180,6 +188,18 @@ export async function persistPolicy(
       cfg.feature_mode = decisions.featureMode;
     });
     config.feature_mode = decisions.featureMode;
+  }
+  if (decisions.codeReviewTrigger !== undefined) {
+    const now = (config.code_review?.trigger ?? "always") as CodeReviewTrigger;
+    if (now !== decisions.codeReviewTrigger) {
+      actions.push((cfg) => {
+        const c = (cfg.code_review ?? {}) as Record<string, unknown>;
+        c.trigger = decisions.codeReviewTrigger;
+        cfg.code_review = c;
+      });
+      const base = config.code_review ?? { mode: currentGateMode(config, "code") };
+      config.code_review = { ...base, trigger: decisions.codeReviewTrigger };
+    }
   }
   if (decisions.gateModes) {
     for (const [gate, key] of GATES) {

@@ -165,6 +165,32 @@ export async function removeRun(cwd: string, runId: string): Promise<void> {
   await rm(ledgerDir(cwd, runId), { recursive: true, force: true });
 }
 
+/**
+ * Close every interrupted run (running/stopped) on `branch` as `superseded`.
+ * A fresh plan has just replaced the ticket files those runs referenced, so
+ * their frontier is stale: resuming one would either restore the old ticket
+ * set over the new plan (colliding filenames) or dead-end on files the planner
+ * purged. Called by the planning commands once their plan is on disk, so the
+ * replacement is recorded in the old run's own ledger instead of the next
+ * resume discovering it as corruption. Returns the superseded run ids.
+ */
+export async function supersedeRunsForBranch(cwd: string, branch: string): Promise<string[]> {
+  const dir = join(cwd, ".railhead");
+  const stores = await readdir(dir).catch(() => [] as string[]);
+  const superseded: string[] = [];
+  for (const id of stores.filter((r) => r.startsWith("run-")).sort()) {
+    const runDir = ledgerDir(cwd, id);
+    const state = await readState(runDir).catch(() => null);
+    if (!state || state.branch !== branch) continue;
+    if (state.status !== "running" && state.status !== "stopped") continue;
+    state.status = "superseded";
+    state.stop_reason = "superseded by a fresh plan on this branch";
+    await writeState(runDir, state);
+    superseded.push(id);
+  }
+  return superseded;
+}
+
 export async function appendEvent(
   dir: string,
   phaseFile: string,

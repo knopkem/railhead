@@ -553,8 +553,8 @@ async function runPlanInner(options: {
       console.log("[plan] plan accepted — decomposing into tickets");
     }
     const ticketsSystem = feature
-      ? planFeatureTicketsSystemPrompt({ contractsSummary, existingGlossary: existingGlossary ?? undefined, artDirection, existingCharter: existingCharter ?? undefined })
-      : planTicketsSystemPrompt({ contractsSummary, existingGlossary: existingGlossary ?? undefined, artDirection });
+      ? planFeatureTicketsSystemPrompt({ contractsSummary, existingGlossary: existingGlossary ?? undefined, artDirection, existingCharter: existingCharter ?? undefined, contextBudget })
+      : planTicketsSystemPrompt({ contractsSummary, existingGlossary: existingGlossary ?? undefined, artDirection, contextBudget });
     ticketsText = await stage(
       "plan-tickets",
       `${ticketsSystem}\n\nThe validated plan to decompose:\n\n${designText}\n\nOriginal goal: ${prompt}`,
@@ -749,18 +749,20 @@ function hardenerTicket(): PlanTicket {
   const verify = parseVerifyBlock(designText);
   const smoke = parseSmokeBlock(designText);
   const projectInterface = parseInterfaceBlock(designText);
-  // A plan that declares a rendered surface must own the look with an
-  // open-ended craft ticket unless the project disabled art direction.
-  // Undeclared (fix mode) or terminal/none never requires one. A feature plan
-  // with a held charter is the exception: the look is already owned by
-  // docs/coherence.md, and only a genuinely NEW surface warrants a craft
-  // ticket — a decision the planner makes, not a deterministic append.
-  const featureWithHeldCharter = mode === "feature" && opts.heldCharter === true;
+  // Only a BUILD plan is asked to own the look with one open-ended craft
+  // ticket, and only its design stage is asked for the `## Art direction`
+  // section the deterministic fallback executes (the ART_DIRECTION_* blocks in
+  // plan.ts). A fix plan emits $INTERFACE too, but it is told to produce one
+  // fix ticket and is never asked for art direction — appending the whole-look
+  // ticket there turns a bug fix into an open-ended art overhaul pointing at a
+  // section that was never authored. A feature plan scopes any craft ticket to
+  // a genuinely NEW surface (a planner decision, not a deterministic append).
+  // Terminal/none interfaces never require one.
+  const artDirectionRequired = artDirection !== false && mode === "build" && isRenderedSurface(projectInterface);
   // A charter on disk governs this run's surface tickets whether or not this
   // plan re-authored the section (ADR 0028); only a run with no charter at all
   // is genuinely charter-less.
   const charterHeld = opts.heldCharter === true;
-  const artDirectionRequired = artDirection !== false && isRenderedSurface(projectInterface) && !featureWithHeldCharter;
   // Issue #34: extract the planner's design and architecture intent from
   // $DESIGN / $ARCHITECTURE marker blocks. In fix mode they stay optional.
   // When present, the documents are written under docs/ so implementers,
@@ -814,10 +816,10 @@ function hardenerTicket(): PlanTicket {
     throw new Error(`${(err as Error).message}${suffix}`);
   }
   assertTicketsUsable(tickets);
-  // A rendered surface's look must be owned by exactly ONE open-ended craft
-  // ticket. The planner is asked to emit it; when it does not, the railhead
-  // appends the standard art ticket deterministically instead of failing a
-  // plan over a missing ticket.
+  // A build's rendered surface must have its look owned by exactly ONE
+  // open-ended craft ticket. The planner is asked to emit it; when it does
+  // not, the railhead appends the standard art ticket deterministically
+  // instead of failing a plan over a missing ticket.
   if (artDirectionRequired && !tickets.some((t) => t.open_ended === true)) {
     console.warn(
       `[plan] the plan declares a rendered surface but emitted no open-ended craft ticket — appending a standard one that executes docs/design.md's Art direction section`,

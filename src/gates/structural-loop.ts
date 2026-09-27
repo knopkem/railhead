@@ -160,6 +160,11 @@ export async function runStructuralReview(
     runTicket,
     beforeCorrectives: async () => {
       structuralReplanTriggered = await replanFromCheckpoint(state, ledger, verdict.findings, group, transcript);
+      if (structuralReplanTriggered) {
+        // Smart review (code_review.trigger: smart): a re-scoped plan arms the
+        // next review decision to fire even on an otherwise clean ticket.
+        state.smart_review_armed = true;
+      }
       // Run-end replan has no build loop left — drain the regenerated frontier
       // inline; a failed drain flips status and surfaces as a gate failure.
       if (structuralReplanTriggered && opts?.runEnd) {

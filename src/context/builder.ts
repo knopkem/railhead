@@ -369,6 +369,23 @@ Write first, then build to correct. When the ticket needs an external API, write
 When the build proves memory wrong, escalate in order: (1) the dependency's examples/ directory — read ONE example file; (2) the package manifest (features, entry points); (3) a minimal compile probe — a five-line file that imports the API; (4) only after two failed builds on the same symbol, ONE scoped grep (grep -n ... | head -30), never a full file dump.
 Scope every command's output before reading it back (\`2>&1 | tail -30\`, \`--stat\`, \`--name-only\`) — a 10k-token log slows every later step of every later ticket.`;
 
+/** The writer-side twin of CONTEXT_ECONOMY (this seat generates slowly and
+ * every line it writes stays in the repo for later tickets to read): reuse is
+ * cheaper than invention — an already-installed dependency costs no fetch or
+ * resolution, and code never written is code no later ticket reads. Soft
+ * preference, not a licence: security and validation never shrink. Rides the
+ * seeded/full-context prompt only, the same #106 dedup as the read rules. */
+const REUSE_DISCIPLINE = `## Reuse before writing (the code you never write costs nothing)
+Before writing new code, take the first option that holds: a platform/standard-library feature; a dependency the project already has installed; an existing module or helper in this repo (the contracts index names the signatures). Add a NEW dependency only when it does real work the platform cannot — a fresh install adds fetch and resolution failure to an unattended run, so it is a deliberate choice, not a reflex. Never hand-roll authentication, cryptography, or parsers for untrusted input to avoid a dependency — a maintained library beats fresh security code. Never cut validation, error handling, or accessibility to keep a change small.`;
+
+/** ADR 0055: acceptance verification belongs to the railhead's gates, not to
+ * hand-built project infrastructure. The spriteforge canvas-pencil-vertical
+ * incident burned its step budget growing a browser probe harness for the
+ * ticket's `probe:` criteria — work the interaction-smoke and goal gates
+ * already do. Rides every implement invocation. */
+const VERIFICATION_OWNERSHIP = `## Verification ownership (do not build test harnesses)
+The project's declared build/test commands (above) are your test surface. The railhead's own gates — interaction smoke, goal review, visual review — run the app with real input and own acceptance for this ticket's criteria; a criterion's \`probe:\` line describes how THOSE gates will check the behaviour, not work for you to script. Do not add bespoke probe, e2e, or browser-driving scripts to the project. If a criterion resists verification with the project's own commands and your eyes, take the $BLOCKED verification-unavailable exit — never keep growing a harness.`;
+
 const OUTPUT_DISCIPLINE = `## Output discipline
 You run unattended — no human reads your narration, and every prose token you emit stays in the session's context. Be terse. Do not re-read files you already hold; use targeted reads and scoped command output. Only a checkpoint marker (or DONE, in product mode) ends a phase; everything else is work.`;
 
@@ -484,6 +501,8 @@ ${ticketBlocks}`,
       // Full-context sends only: a warm pointer resume already holds the block
       // from its seed (the #106 dedup cadence the content blocks follow).
       opts.contextPointers ? "" : CONTEXT_ECONOMY,
+      opts.contextPointers ? "" : REUSE_DISCIPLINE,
+      VERIFICATION_OWNERSHIP,
       stateBlock,
       requestBlocks,
       checkpointDirective(granularity, tickets, cadenceOptions),
@@ -542,8 +561,44 @@ ${findingsBlock}`,
       verifyBlock(verify),
       design ? designReinjectBlock(design) : "",
       coherence ? charterRequestBlock() : "",
+      VERIFICATION_OWNERSHIP,
       checkpointDirective(granularity, tickets, cadenceOptions),
       outputDisciplineFor(tickets),
     ]),
   };
+}
+
+/** ADR 0055: the terminal marker for the capacity handoff note. */
+export const HANDOFF_MARKER = /\$HANDOFF\b/;
+
+/** The repo path the capacity handoff note is written to. Under `.railhead`,
+ * which `cleanWorktree` protects — the note must survive the split. */
+export function handoffPath(ticketNumber: string): string {
+  return `.railhead/handoff-${ticketNumber}.md`;
+}
+
+/**
+ * ADR 0055: before a capacity verdict drops the builder session, one bounded
+ * invocation asks that same session to write down what it knows — done,
+ * remains, gotchas — so the split replan and the fresh seed after it do not
+ * lose the working memory the repo's documents never held. Mirrors the
+ * `$BLOCKED` handoff discipline: the note is the handoff, not more work.
+ */
+export function buildHandoffPrompt(ticket: { number: string; title: string; file: string }): string {
+  return `The railhead is stopping this unit: it did not fit the model's context window — it compacted repeatedly without reaching its checkpoint. Before this session is dropped and the work is re-scoped into smaller tickets, write a short handoff note so the next session does not rediscover what you already know.
+
+Write ${handoffPath(ticket.number)} with exactly these sections, terse and specific:
+
+# Handoff — ticket ${ticket.number} ${ticket.title}
+
+## Done
+- what is implemented and working on disk right now (name files and behaviours)
+
+## Remains
+- what is unfinished or unverified, in the order it must be finished
+
+## Gotchas
+- what you tried that failed, and what is known about why (failed checks, wrong assumptions, dead ends)
+
+Do not edit any other file. Keep it under 80 lines. When the file is written, end your reply with exactly one line: $HANDOFF`;
 }

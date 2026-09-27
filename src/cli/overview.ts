@@ -91,10 +91,27 @@ export function buildReport(state: RunState, charterInfo?: CharterReportInfo, ca
     lines.push(`- Prompt cache (#130): ${kc(cacheStats.cached)}/${kc(promptTotal)} first-step input tokens reused (${pct}%)`);
   }
   const codeMode = state.config.code_review?.mode ?? "light";
+  const codeTrigger = state.config.code_review?.trigger ?? "always";
   const visualMode = state.config.visual_review?.mode ?? "off";
   const goalMode = state.config.goal_review?.mode ?? "off";
   const structuralMode = state.config.structural_review?.mode ?? "off";
-  lines.push(`- Gate modes (issue #73): code=${codeMode} visual=${visualMode} goal=${goalMode} structural=${structuralMode}`);
+  lines.push(`- Gate modes (issue #73): code=${codeMode}${codeTrigger === "smart" ? " (smart trigger)" : ""} visual=${visualMode} goal=${goalMode} structural=${structuralMode}`);
+  // Smart review coverage (code_review.trigger: "smart"): a green run must
+  // never imply scrutiny it did not get — count reviews run vs skipped with
+  // their reasons, and name the skipped tickets a later group/run-end gate
+  // flagged. The false-negative tally is group-scope, not exact per-ticket
+  // attribution: a skipped ticket counts when a goal/structural record with
+  // findings covers its group (or any run-end record has findings).
+  if (codeTrigger === "smart") {
+    const committed = state.tickets.filter((t) => t.status === "committed");
+    const skipped = committed.filter((t) => t.review_skip_reason);
+    const ran = committed.length - skipped.length;
+    lines.push(`- Smart review coverage: ${ran} review(s) run, ${skipped.length} skipped${skipped.length ? ` (${summarizeSkipReasons(skipped)})` : ""}`);
+    const flagged = smartSkippedFlaggedLater(state, skipped);
+    if (flagged.length > 0) {
+      lines.push(`- Smart review false negatives: ${flagged.length} skipped ticket(s) later flagged by a group/run-end gate — ${flagged.join(", ")}`);
+    }
+  }
   if (charterInfo) {
     lines.push(`- Coherence charter (ADR 0028): ${charterInfo.coherenceAuthored ? "authored (docs/coherence.md)" : "not authored"}`);
     lines.push(`- Surface tickets (coherence/visual gate): ${charterInfo.surfaceTickets.length ? charterInfo.surfaceTickets.join(", ") : "none"}`);
@@ -158,7 +175,9 @@ export function buildReport(state: RunState, charterInfo?: CharterReportInfo, ca
     lines.push(`- Time: ${t.duration_ms ? `${(t.duration_ms / 1000).toFixed(0)}s` : "—"}`);
     lines.push(`- Verify: ${t.verify_ok === null ? "n/a" : t.verify_ok ? "pass" : "fail"}`);
     lines.push(
-      `- Review: ${t.review_ok === null ? "n/a" : t.review_ok ? "pass" : "blocking"}${t.review_attempts ? ` (passed on review ${t.review_attempts})` : ""}`,
+      `- Review: ${t.review_ok === null
+        ? (t.review_skip_reason ? `not run (smart — ${t.review_skip_reason})` : "n/a")
+        : t.review_ok ? "pass" : "blocking"}${t.review_attempts ? ` (passed on review ${t.review_attempts})` : ""}`,
     );
     if (t.last_failure_class) {
       lines.push(`- Failure ladder: ${t.last_failure_class}${t.ladder_rung ? ` (rung ${t.ladder_rung})` : ""}`);
@@ -304,6 +323,38 @@ function k(tokens: number): string {
  * as "32", not a misleading "0.0k"), one-decimal k above 1000. */
 function kc(tokens: number): string {
   return tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1)}k`;
+}
+
+/** Smart review report line: the skip reasons with their counts, e.g.
+ * "2× no stress". */
+function summarizeSkipReasons(skipped: TicketState[]): string {
+  const counts = new Map<string, number>();
+  for (const t of skipped) {
+    const reason = t.review_skip_reason ?? "unknown";
+    counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([reason, n]) => `${n}× ${reason}`).join(", ");
+}
+
+/** Smart review false-negative tally: skipped tickets whose group has a later
+ * goal/structural record with findings, or that predate any run-end finding
+ * record. Group-scope by construction — findings name artifacts, not always
+ * ticket numbers — so this counts "the checkpoint that covered this ticket
+ * flagged something", the signal that decides whether `smart`'s skipping is
+ * trustworthy (the smart preset's own validation metric). */
+function smartSkippedFlaggedLater(state: RunState, skipped: TicketState[]): string[] {
+  if (skipped.length === 0) return [];
+  const flaggedGroups = new Set<string>();
+  let runEndFlagged = false;
+  for (const r of [...(state.goal_reviews ?? []), ...(state.structural_reviews ?? [])]) {
+    if (r.findings.length === 0) continue;
+    if (r.group === "run-end") runEndFlagged = true;
+    flaggedGroups.add(r.group);
+  }
+  if (!runEndFlagged && flaggedGroups.size === 0) return [];
+  return skipped
+    .filter((t) => runEndFlagged || flaggedGroups.has(t.group ?? ""))
+    .map((t) => t.number);
 }
 
 /** Issue #130: the smallest first-step prompt that could plausibly carry a

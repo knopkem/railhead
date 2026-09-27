@@ -364,6 +364,71 @@ describe("buildReport — goal review checkpoints (ADR 0029, #102)", () => {
   });
 });
 
+describe("buildReport — smart review coverage (code_review.trigger: smart)", () => {
+  function smartState(): RunState {
+    const s = makeState(10000, 100000);
+    s.config.code_review = { mode: "medium", trigger: "smart" };
+    s.tickets = [
+      {
+        ...s.tickets[0],
+        review_ok: null,
+        review_attempts: 0,
+        review_skip_reason: "no stress",
+        reviews: [],
+      },
+      {
+        ...s.tickets[0],
+        file: "02-b.md",
+        number: "02",
+        title: "b",
+        group: "engine",
+        review_ok: true,
+        review_attempts: 1,
+        review_skip_reason: undefined,
+      },
+    ];
+    return s;
+  }
+
+  it("names the trigger in the gate-modes line and reports run vs skipped with reasons", () => {
+    const r = buildReport(smartState());
+    expect(r).toContain("code=medium (smart trigger)");
+    expect(r).toContain("- Smart review coverage: 1 review(s) run, 1 skipped (1× no stress)");
+  });
+
+  it("never renders a skipped review as a pass", () => {
+    const r = buildReport(smartState());
+    expect(r).toContain("- Review: not run (smart — no stress)");
+  });
+
+  it("omits the coverage section when the trigger is always", () => {
+    const s = smartState();
+    s.config.code_review = { mode: "medium", trigger: "always" };
+    expect(buildReport(s)).not.toContain("Smart review coverage");
+  });
+
+  it("counts a skipped ticket a later same-group checkpoint flagged as a false negative", () => {
+    const s = smartState();
+    s.tickets[0].group = "engine";
+    s.goal_reviews = [{ group: "engine", round: 0, verdict: "fail", findings: ["[BLOCKER] drift"] }];
+    const r = buildReport(s);
+    expect(r).toContain("Smart review false negatives: 1 skipped ticket(s) later flagged by a group/run-end gate — 01");
+  });
+
+  it("counts a run-end finding record as flagging every skipped ticket", () => {
+    const s = smartState();
+    s.goal_reviews = [{ group: "run-end", round: 0, verdict: "fail", findings: ["[BLOCKER] the app does not start"] }];
+    expect(buildReport(s)).toContain("Smart review false negatives: 1 skipped ticket(s)");
+  });
+
+  it("does not count passing checkpoints as flagging anything", () => {
+    const s = smartState();
+    s.tickets[0].group = "engine";
+    s.goal_reviews = [{ group: "engine", round: 0, verdict: "pass", findings: [] }];
+    expect(buildReport(s)).not.toContain("Smart review false negatives");
+  });
+});
+
 describe("buildReport — prompt cache (first step per phase, #130)", () => {
   it("renders the run-level cache ratio and the per-phase section", () => {
     const r = buildReport(makeState(10000, 100000), undefined, {
