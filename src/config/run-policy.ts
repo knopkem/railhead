@@ -60,31 +60,24 @@ export interface ResolveGateModesInput {
   preset: GatePreset | null;
   /** Per-gate CLI overrides. */
   overrides: GateOverrides;
-  /** Whether this is a `fix` plan — forces visual=full when possible. */
-  fixMode: boolean;
-  /** Whether a vision-capable model is configured (models.visual !== null). */
-  hasVisionModel: boolean;
-  /** Whether the visual gate is currently NOT off (a fix forces visual full
-   * only when the user has visual review enabled at all). */
-  visualEnabled: boolean;
   /** The interactive questionnaire result, when cmdBuild collected one. */
   answer?: GateCadenceAnswer | null;
 }
 
 /**
- * Fix mode (issue #6): the bug fix's whole point is observable runtime
- * behaviour, so visual verification is never optional — force the visual gate
- * to `full` when visual review is on (not off) and a vision-capable model is
- * configured. A user who disabled visual review entirely keeps it disabled.
+ * Whether any per-gate cadence override was actually given. Absent flags parse
+ * to `null` (never `undefined`), so an `!== undefined` check reads every
+ * interactive run as fully overridden — this is the one test for "the user
+ * passed --review/--vision/--goal/--structural".
  */
-export function fixModeForcesVisual(fixMode: boolean, visualEnabled: boolean, hasVisionModel: boolean): boolean {
-  return fixMode && visualEnabled && hasVisionModel;
+export function hasGateOverrides(overrides: GateOverrides): boolean {
+  return GATES.some(([gate]) => overrides[gate] != null);
 }
 
 /**
  * Resolve the final per-gate cadence for a plan: preset base (or the
- * interactive answer) → CLI overrides → fix-mode forcing visual=full when
- * visual review is enabled and a vision model exists → the per-gate default.
+ * interactive answer) → CLI overrides → the per-gate default. Fix mode is not
+ * special here: a `fix` run answers the same cadence questions as `build`.
  */
 export function resolveGateModes(input: ResolveGateModesInput): PresetGateModes {
   let modes: PresetGateModes = input.answer
@@ -96,9 +89,6 @@ export function resolveGateModes(input: ResolveGateModesInput): PresetGateModes 
   }
   if (input.answer?.skipAll) {
     modes = presetGateModes("none");
-  }
-  if (fixModeForcesVisual(input.fixMode, input.visualEnabled, input.hasVisionModel)) {
-    modes.visual = "full";
   }
   // ADR 0029 (#102): the goal checkpoint action rides the RESOLVED goal gate —
   // goal mode `light` is the advisory-checkpoints identity, whatever base

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, expect } from "vitest";
 import {
-  fixModeForcesVisual,
+  hasGateOverrides,
   resolveGateModes,
   resolveYolo,
   persistPolicy,
@@ -23,18 +23,26 @@ async function makeCwd(body: string | null): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// fixModeForcesVisual
+// hasGateOverrides
 // ---------------------------------------------------------------------------
 
-describe("fixModeForcesVisual", () => {
-  it("forces when fix mode, visual enabled, and a vision model exists", () => {
-    expect(fixModeForcesVisual(true, true, true)).toBe(true);
+describe("hasGateOverrides", () => {
+  // The parser fills every absent flag with null, never undefined (parseGateMode
+  // returns null for absent/unrecognized). A `!== undefined` check therefore read
+  // "no preset" interactive runs as fully overridden and silently skipped the
+  // per-gate questionnaire.
+  it("is false when every gate parsed to null (no flag given)", () => {
+    expect(hasGateOverrides(emptyOverrides)).toBe(false);
   });
 
-  it("does not force outside fix mode, with visual off, or without a vision model", () => {
-    expect(fixModeForcesVisual(false, true, true)).toBe(false);
-    expect(fixModeForcesVisual(true, false, true)).toBe(false);
-    expect(fixModeForcesVisual(true, true, false)).toBe(false);
+  it("is false for undefined entries (hand-built partial overrides)", () => {
+    expect(hasGateOverrides({})).toBe(false);
+  });
+
+  it("is true when any single gate carries a mode", () => {
+    for (const gate of ["code", "visual", "goal", "structural"] as const) {
+      expect(hasGateOverrides({ ...emptyOverrides, [gate]: "off" })).toBe(true);
+    }
   });
 });
 
@@ -44,13 +52,13 @@ describe("fixModeForcesVisual", () => {
 
 describe("resolveGateModes", () => {
   it("defaults to the light preset when no preset and no overrides are given", () => {
-    const modes = resolveGateModes({ preset: null, overrides: emptyOverrides, fixMode: false, hasVisionModel: true, visualEnabled: true });
+    const modes = resolveGateModes({ preset: null, overrides: emptyOverrides });
     expect(modes).toEqual(presetGateModes("light"));
   });
 
   it("uses the given preset as the base", () => {
     for (const preset of ["full", "medium", "light", "none"] as const) {
-      const modes = resolveGateModes({ preset, overrides: emptyOverrides, fixMode: false, hasVisionModel: true, visualEnabled: true });
+      const modes = resolveGateModes({ preset, overrides: emptyOverrides });
       expect(modes).toEqual(presetGateModes(preset));
     }
   });
@@ -59,68 +67,26 @@ describe("resolveGateModes", () => {
     const modes = resolveGateModes({
       preset: "light",
       overrides: { code: null, visual: "full", goal: null, structural: "off" },
-      fixMode: false,
-      hasVisionModel: true,
-      visualEnabled: true,
     });
     expect(modes.visual).toBe("full");
     expect(modes.structural).toBe("off");
     expect(modes.code).toBe("medium");
   });
 
-  it("forces visual full in fix mode when visual is enabled and a vision model exists", () => {
-    const modes = resolveGateModes({
-      preset: "light",
-      overrides: { code: null, visual: "off", goal: null, structural: null },
-      fixMode: true,
-      hasVisionModel: true,
-      visualEnabled: true,
-    });
-    expect(modes.visual).toBe("full");
-  });
-
-  it("does not force visual full in fix mode when the user disabled visual review", () => {
-    const modes = resolveGateModes({
-      preset: "light",
-      overrides: emptyOverrides,
-      fixMode: true,
-      hasVisionModel: true,
-      visualEnabled: false,
-    });
-    expect(modes.visual).toBe("light");
-  });
-
-  it("does not force visual full when no vision model is configured", () => {
-    const modes = resolveGateModes({
-      preset: "light",
-      overrides: emptyOverrides,
-      fixMode: true,
-      hasVisionModel: false,
-      visualEnabled: true,
-    });
-    expect(modes.visual).toBe("light");
-  });
-
   it("uses the interactive questionnaire answer instead of the preset base", () => {
     const answer = { modes: { code: "medium" as const, visual: "off" as const, goal: "off" as const, structural: "off" as const }, skipAll: false };
-    const modes = resolveGateModes({ preset: null, overrides: emptyOverrides, fixMode: false, hasVisionModel: true, visualEnabled: true, answer });
+    const modes = resolveGateModes({ preset: null, overrides: emptyOverrides, answer });
     expect(modes).toEqual({ code: "medium", visual: "off", goal: "off", structural: "off" });
   });
 
   it("turns everything off when the questionnaire answered skip-all", () => {
     const answer = { modes: presetGateModes("medium"), skipAll: true };
-    const modes = resolveGateModes({ preset: null, overrides: emptyOverrides, fixMode: false, hasVisionModel: true, visualEnabled: true, answer });
+    const modes = resolveGateModes({ preset: null, overrides: emptyOverrides, answer });
     expect(modes).toEqual(presetGateModes("none"));
   });
 
-  it("still forces visual full in fix mode even after a skip-all questionnaire answer", () => {
-    const answer = { modes: presetGateModes("medium"), skipAll: true };
-    const modes = resolveGateModes({ preset: null, overrides: emptyOverrides, fixMode: true, hasVisionModel: true, visualEnabled: true, answer });
-    expect(modes).toEqual({ ...presetGateModes("none"), visual: "full" });
-  });
-
   it("goal mode light resolves the corrective checkpoint action (v2 issue 01)", () => {
-    const modes = resolveGateModes({ preset: "light", overrides: emptyOverrides, fixMode: false, hasVisionModel: true, visualEnabled: true });
+    const modes = resolveGateModes({ preset: "light", overrides: emptyOverrides });
     expect(modes.goal).toBe("light");
     expect(modes.goalCheckpointAction).toBe("corrective");
   });
@@ -129,15 +95,14 @@ describe("resolveGateModes", () => {
     const modes = resolveGateModes({
       preset: "light",
       overrides: { code: null, visual: null, goal: "medium", structural: null },
-      fixMode: false, hasVisionModel: true, visualEnabled: true,
     });
     expect(modes.goal).toBe("medium");
     expect(modes.goalCheckpointAction).toBeUndefined();
   });
 
   it("medium/full presets never set the checkpoint action", () => {
-    expect(resolveGateModes({ preset: "medium", overrides: emptyOverrides, fixMode: false, hasVisionModel: true, visualEnabled: true }).goalCheckpointAction).toBeUndefined();
-    expect(resolveGateModes({ preset: "full", overrides: emptyOverrides, fixMode: false, hasVisionModel: true, visualEnabled: true }).goalCheckpointAction).toBeUndefined();
+    expect(resolveGateModes({ preset: "medium", overrides: emptyOverrides }).goalCheckpointAction).toBeUndefined();
+    expect(resolveGateModes({ preset: "full", overrides: emptyOverrides }).goalCheckpointAction).toBeUndefined();
   });
 });
 

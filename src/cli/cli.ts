@@ -36,10 +36,10 @@ import { latestRun, ledgerDir, listPhases, readState, readStderrLines, writeStat
 import { parsePlanArgs, parseProductArgs, parseRunArgs, argValue, type PlanArgs, type ProductArgs } from "../config/args.ts";
 import {
   GATES,
+  hasGateOverrides,
   resolveGateModes,
   resolveYolo,
   persistPolicy,
-  fixModeForcesVisual,
   type GateCadenceAnswer,
   type GateName,
 } from "../config/run-policy.ts";
@@ -176,8 +176,9 @@ function usage() {
        [--review ...] [--vision ...] [--goal ...] [--structural ...]
        [--sharpen|--no-sharpen] [--yolo] [--verbose]
        turn a bug report into a fix ticket, then run it
-        fix mode forces visual_review.mode: full (bug reproducer is the test, #6)
-        flags: same as build above
+        flags: same as build above; interactive runs answer the same
+        per-gate cadence questions (code review, then visual/goal/structural),
+        with no gate forced on by fix mode
   feature ["<one feature>"] [--step N] [flags as build]
        [--review ...] [--vision ...] [--goal ...] [--structural ...]
        [--sharpen|--no-sharpen] [--yolo] [--verbose] [-a]
@@ -838,29 +839,24 @@ async function cmdBuild(cwd: string, prefs: PlanArgs, internal: { arcStepNumber?
     : false;
   await ensureProjectOpenCodePermissions(cwd, [], { yolo, contextTokens: config.max_context_tokens, implementModel: config.model.implement ?? undefined, clampReasoning: implSupportsReasoning });
 
-  // Issue #73: resolve the run's per-gate review cadence, and the TDD test
-  // phase (issue #5), BEFORE the planner runs. These questions are static —
-  // nothing in them reads plan output — and answering them first lets the
-  // ADR 0036 vision check refuse a blind seat before the plan's multi-hour
-  // spend instead of after it. Base = the preset's modes (`light` unless
-  // another preset was given — the new fast default), overlaid by per-gate CLI
-  // overrides. Interactive mode (no preset, no gate overrides) prompts for
-  // each gate with the light-preset defaults, and a "none — skip all reviews"
-  // shortcut on the first prompt.
-  const gateOverrideProvided = overrides.code !== undefined || overrides.visual !== undefined || overrides.goal !== undefined || overrides.structural !== undefined;
-  const gateAnswer: GateCadenceAnswer | null = !auto && prefs.preset === null && !gateOverrideProvided
+  // Issue #73: resolve the run's per-gate review cadence BEFORE the planner
+  // runs. These questions are static — nothing in them reads plan output — and
+  // answering them first lets the ADR 0036 vision check refuse a blind seat
+  // before the plan's multi-hour spend instead of after it. Base = the preset's
+  // modes (`light` unless another preset was given — the fast default),
+  // overlaid by per-gate CLI overrides. Interactive mode (no preset, no gate
+  // overrides) prompts for each gate with the light-preset defaults, and a
+  // "none — skip all reviews" shortcut on the first prompt. Fix mode asks the
+  // same questions as build; a bug's visual review is no longer forced on
+  // (issue #6's forcing predates the per-gate prompt).
+  const gateAnswer: GateCadenceAnswer | null = !auto && prefs.preset === null && !hasGateOverrides(overrides)
     ? await askGateCadence()
     : null;
-  const visualEnabled = config.visual_review?.mode !== "off";
   let modes = resolveGateModes({
     preset: prefs.preset,
     overrides,
-    fixMode: mode === "fix",
-    hasVisionModel: models.visual !== null,
-    visualEnabled,
     answer: gateAnswer,
   });
-  const fixForcesVisual = fixModeForcesVisual(mode === "fix", visualEnabled, models.visual !== null);
   // ADR 0051: the mode vocabulary lives in one persisted place. `railhead
   // feature` sets feature_mode (and clears fix_mode — a fix run before it
   // must not leave bug-diagnosis discipline on the implementer); build/fix
@@ -884,7 +880,7 @@ async function cmdBuild(cwd: string, prefs: PlanArgs, internal: { arcStepNumber?
   // without re-passing the flags.
   await persistPolicy(cwd, config, { gateModes: modes });
   console.log(
-    `review cadence: code=${modes.code} visual=${modes.visual} goal=${modes.goal} structural=${modes.structural}${fixForcesVisual ? " (fix mode forces visual=full)" : ""}`,
+    `review cadence: code=${modes.code} visual=${modes.visual} goal=${modes.goal} structural=${modes.structural}`,
   );
 
   // Planning interview (ADR 0010, amended by ADR 0042 — gated by the run

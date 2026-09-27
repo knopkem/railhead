@@ -141,7 +141,7 @@ Railhead warns (never blocks) when `review`/`goal` is weaker than `implement`, o
 
 ## Reviews
 
-Every gate has a cadence mode: `full` | `medium` | `light` | `off`. Presets choose defaults; per-gate flags override.
+Every gate has a cadence mode: `full` | `medium` | `light` | `off`. Presets choose defaults; per-gate flags override. An interactive run (`build`/`fix` with no preset and no per-gate flag) asks each gate's cadence — code review, visual, goal, structural — with the light-preset defaults.
 
 | Preset | Code review | Visual | Goal | Structural | Interview |
 |--------|-------------|--------|------|------------|-----------|
@@ -155,7 +155,7 @@ Notes:
 - **Severities:** `[BLOCKER]` always retries (up to the cap, then hard-fail). `[MAJOR]` retries through the budget in `medium`/`full`; in `light` it gets one corrective attempt, then soft-passes. Minor findings never retry.
 - **Mid-run vs run-end:** goal and structural fire at group checkpoints as well as at run end; visual fires per-ticket (under `full`) and at run end. When goal review fires at run end it takes visual's whole-app seat — the goal + design-doc frame is stronger.
 - **Corrective tickets:** `[BLOCKER]` findings generate corrective tickets that run the full gate inline before the originating review may pass.
-- **Visual review** runs the app, captures screenshots with a vision model, and judges them against the acceptance criteria. `fix` raises it to `full` whenever the gate is enabled with a vision model, since a bug fix is about observable behaviour.
+- **Visual review** runs the app, captures screenshots with a vision model, and judges them against the acceptance criteria. `fix` asks the same cadence questions as `build` — a bug fix is not auto-escalated to per-ticket visual.
 - **Vision is measured, not declared.** A probe has the seat model read a generated PNG; `build`/`run`/`fix`/`resume` refuse to start a vision gate on a blind model.
 - **Halt:** any phase can write `.railhead/STOP` (contents = reason) to stop the run for a human. `resume` refuses until the file is deleted.
 - **Ctrl-C is a request, not a kill.** The first press finishes the ticket in flight's gate and stops at the commit boundary; the second stops immediately. Either way `railhead resume` continues with no gate left owed.

@@ -3,7 +3,10 @@
 > Amended by ADR 0046: the per-ticket visual review is serialized inside
 > `committedTicket`; the cadence modes and dispatch below are otherwise
 > unchanged. Amended by ADR 0047: the TDD test phase is retired (the durable
-> builder is the only implementer).
+> builder is the only implementer). Amended 2026-09-27: fix mode no longer
+> forces `visual_review.mode: "full"`; `fix` answers the same per-gate cadence
+> questions as `build` (the forcing predated the interactive questionnaire,
+> which an always-true override check had silently skipped).
 
 ## Status
 
@@ -32,7 +35,7 @@ Every review gate carries a cadence `mode` with four values:
 - Gate config: `code_review.mode`, `visual_review.mode`, `goal_review.mode`, `structural_review.mode`. Per-gate tuning knobs orthogonal to cadence stay (`max_rounds`, `interaction_hints`, `fallback_cadence`).
 - Four plan-time presets map every gate + TDD + sharpen at once: `--full`, `--medium`, `--light` (default), `--none`. Per-gate overrides (`--review/--vision/--goal/--structural`) and boolean overrides (`--tdd/--no-tdd`, `--sharpen/--no-sharpen`) layer on top. Resolved modes are persisted to railhead.json so resume honors them.
 - The sharpen interview and TDD phase are preset-gated too: only `--full` keeps TDD on; `--medium`/`--full` run sharpen; `--light`/`--none` skip both (the fast default).
-- Fix mode (`railhead fix`) forces `visual_review.mode: "full"` when a vision model is configured and defaults TDD off (the bug reproducer is already the test, #6).
+- Fix mode (`railhead fix`) resolves its gates exactly like `build` — interactive runs answer the per-gate cadence questions (code review, then visual), and a vision model being configured forces nothing. (Amended 2026-09-27: this line originally forced `visual_review.mode: "full"` when a vision model was configured, from #6. The forcing overrode the operator's questionnaire answer, and the questionnaire was itself unreachable — the "no gate overrides" test compared parsed `null` values against `undefined`, so every interactive run read as fully overridden. Both are fixed.)
 - End-of-run goal review is new: `goal_review.mode: full|light` runs a goal review after the run's tickets commit, after the end-of-run visual pass (whose screenshots are evidence the goal reviewer can reference).
 - `code_review.mode: full|light` runs the end-of-run review pass over each committed diff (the former `final` mode became `light`).
 
