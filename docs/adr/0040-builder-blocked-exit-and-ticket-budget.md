@@ -300,3 +300,31 @@ it, and the wall budget (`2 × slowest invocation`, 30m floor) still bounds
 the checkpoint-less thrash the step cap would otherwise have to catch. An
 operator who wants the old bound sets `max_phase_steps` explicitly; `0`
 disables as before.
+
+## Amendment 5 (2026-09-28): a resume re-arms the per-ticket budget
+
+Decision §4's "it never resets on a ladder rung, a resume, or a compaction"
+made `resume` a no-op for the exact stop it was written for. The feature run
+`run-20260927-1714` (combat, ticket 09) stopped on the wall budget
+(70m/69m since the last green verify) and left the ticket `in_progress` with
+the spent clocks and `ladder_rung: 3`. `rebaseFrontier` demoted it to `ready`
+but kept the budget counters and the terminal rung, so the first
+`ticketBudgetStop` at the resumed attempt boundary re-tripped before any
+builder invocation: the same failure message, zero work, and no way forward
+short of hand-editing `state.json`. The persisted rung 3 compounded it — one
+post-resume failure was terminal by design of `startAttempt`.
+
+The budget bounds an **unattended** run; a resume is the operator's decision,
+the same posture ADR 0003 takes for a `failed` ticket. `rebaseFrontier` now
+re-arms both `in_progress` and `failed` tickets: `ladder_rung` and
+`last_failure_class` are cleared (a re-run starts at rung 1) and the checked
+budget counters are reset — `build_ms_since_checkpoint` to 0 and
+`build_steps_total` to 0. `build_ms_total` (cumulative telemetry) and
+`build_ms_max_invocation` (the derived wall-budget calibration) survive, so
+the re-run's budget is still sized from the model's observed pace.
+
+Within a run nothing changes: ladder rungs, compactions, and auto-continue
+still never reset the budget, and a resumed ticket that thrashes another full
+budget stops again. The bound is per era, not per resume — repeatedly
+resuming a thrashing ticket is an explicit operator choice, not an
+unattended loop.

@@ -107,14 +107,42 @@ describe("markCommitted", () => {
 });
 
 describe("rebaseFrontier", () => {
-  it("demotes an in_progress ticket to ready and resets its counters", () => {
+  it("demotes an in_progress ticket to ready and re-arms it — counters, ladder, and budget", () => {
+    // A budget stop leaves the ticket in_progress with the exhausted counters
+    // and the terminal ladder rung persisted. If the resume kept either, the
+    // first budget check at the resumed attempt boundary would re-trip before
+    // any invocation — resume would be a no-op.
     const r = rebaseFrontier(state([
-      ticket({ file: "01-a.md", status: "in_progress", attempts: 3, reviews: [{ phase: "x", attempt: 1, blocking: true, findings: ["b"] }] }),
+      ticket({
+        file: "01-a.md",
+        status: "in_progress",
+        attempts: 3,
+        reviews: [{ phase: "x", attempt: 1, blocking: true, findings: ["b"] }],
+        ladder_rung: 3,
+        last_failure_class: "diagnosed",
+        build_ms_total: 9_000_000,
+        build_ms_max_invocation: 2_000_000,
+        build_ms_since_checkpoint: 4_000_000,
+        build_steps_total: 500,
+      }),
       ticket({ file: "02-b.md", status: "committed", attempts: 2 }),
     ]));
     const t = r.tickets.find((x) => x.file === "01-a.md")!;
-    expect(t).toMatchObject({ status: "ready", attempts: 0, verify_ok: null, review_ok: null, review_attempts: 0 });
+    expect(t).toMatchObject({
+      status: "ready",
+      attempts: 0,
+      verify_ok: null,
+      review_ok: null,
+      review_attempts: 0,
+      ladder_rung: undefined,
+      last_failure_class: undefined,
+      build_ms_since_checkpoint: 0,
+      build_steps_total: 0,
+    });
     expect(t.reviews).toEqual([]);
+    // Cumulative telemetry and the wall-budget calibration survive the re-arm.
+    expect(t.build_ms_total).toBe(9_000_000);
+    expect(t.build_ms_max_invocation).toBe(2_000_000);
     // committed tickets are untouched
     expect(r.tickets.find((x) => x.file === "02-b.md")!.attempts).toBe(2);
   });
@@ -124,7 +152,17 @@ describe("rebaseFrontier", () => {
     // un-landed ticket before the frontier can advance past it — a skip would
     // build downstream tickets on a base that never landed.
     const r = rebaseFrontier(state([
-      ticket({ file: "01-a.md", status: "failed", attempts: 4, verify_ok: true, review_ok: null, ladder_rung: 2, last_failure_class: "stall" }),
+      ticket({
+        file: "01-a.md",
+        status: "failed",
+        attempts: 4,
+        verify_ok: true,
+        review_ok: null,
+        ladder_rung: 2,
+        last_failure_class: "stall",
+        build_ms_since_checkpoint: 4_000_000,
+        build_steps_total: 500,
+      }),
       ticket({ file: "02-b.md", status: "ready" }),
     ]));
     const t = r.tickets.find((x) => x.file === "01-a.md")!;
@@ -136,6 +174,8 @@ describe("rebaseFrontier", () => {
       review_attempts: 0,
       ladder_rung: undefined,
       last_failure_class: undefined,
+      build_ms_since_checkpoint: 0,
+      build_steps_total: 0,
     });
     expect(t.reviews).toEqual([]);
     // The ready ticket after it is untouched and comes second in the frontier.

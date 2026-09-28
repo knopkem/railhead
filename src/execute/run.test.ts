@@ -54,6 +54,7 @@ import { assembleBranch, detectGroupCheckpoints, nextTicketNumber, processTicket
 import { goalCheckpointsToFire } from "../gates/goal-loop.ts";
 import { structuralCheckpointsToFire } from "../gates/structural-loop.ts";
 import { clearStop, requestStop } from "./stop.ts";
+import { rebaseFrontier } from "../core/recovery.ts";
 import type { RunState, TicketState } from "../core/state.ts";
 
 const mockExec = vi.mocked(executeOpendCode);
@@ -6180,6 +6181,46 @@ describe("ADR 0040 — blocked exit and per-ticket budget", () => {
     const outcome = await processTicket(t.state, t.ledgerDir, t.ticketState);
     expect(outcome).toBe("failed");
     expect(t.ticketState.logs.join("\n")).toContain("wall budget exhausted");
+  });
+
+  it("a resume re-arms a budget-stopped ticket: the first resumed attempt runs instead of re-tripping the guard", async () => {
+    // A wall-budget stop leaves the ticket in_progress with the exhausted
+    // counters and the terminal ladder rung persisted. A plain resume used to
+    // re-trip the same guard at the first attempt boundary before any builder
+    // call — the operator had to hand-edit state.json. Recovery must re-arm
+    // the ticket so the resume actually retries it.
+    const t = await blockedRepo({ ticket_wall_sec: 60 });
+    t.ticketState.status = "in_progress";
+    t.ticketState.ladder_rung = 3;
+    t.ticketState.last_failure_class = "diagnosed";
+    t.ticketState.build_ms_since_checkpoint = 600_000;
+    t.ticketState.build_steps_total = 500;
+    t.state.status = "failed";
+    t.state.stop_reason = "ticket 01: ticket wall budget exhausted (10m/1m since the last green verify) — stopping instead of retrying";
+
+    let buildCalls = 0;
+    mockExec.mockImplementation(async (_prompt, options) => {
+      if (options.phaseFile.endsWith("-build")) {
+        buildCalls++;
+        await writeImplementedFile(t.cwd);
+        await emitText(t.ledgerDir, options.phaseFile, "$CHECKPOINT ticket=01");
+        return t.checkpointOk();
+      }
+      if (kindOf(options) === "review") {
+        await emitText(t.ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
+      } else {
+        await emitText(t.ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const recovered = rebaseFrontier(t.state);
+    const resumedTicket = recovered.tickets.find((x) => x.file === t.ticketState.file)!;
+    const outcome = await processTicket(recovered, t.ledgerDir, resumedTicket);
+
+    expect(buildCalls).toBe(1);
+    expect(outcome).toBe("ok");
+    expect(resumedTicket.status).toBe("committed");
   });
 
   it("per-ticket wall budget: a green checkpoint restarts the wall clock — a slow but progressing ticket is not stopped", async () => {

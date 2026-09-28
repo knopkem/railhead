@@ -60,8 +60,36 @@ export function markCommitted(state: RunState, file: string, commit: string): Ru
 }
 
 /**
- * Demote an interrupted `in_progress` Ticket back to `ready` and reset its
- * per-ticket counters, so the next loop pass re-runs it from a clean slate.
+ * One Ticket the resume re-arms: demote to `ready`, clear the Gate counters,
+ * and restart the ADR 0040 budget clocks. A budget stop leaves the ticket
+ * `in_progress` with the exhausted clocks and the terminal ladder rung
+ * persisted; without this reset the first budget check at the resumed attempt
+ * boundary re-trips before any builder invocation, so a resume can only ever
+ * stop again. The re-arm is per-ticket and explicit — within-run retries
+ * (ladder rungs, compactions, auto-continue) still never reset the budget.
+ * `build_ms_total` (telemetry) and `build_ms_max_invocation` (the derived
+ * wall-budget calibration) survive; only the counters the budget check reads
+ * are cleared.
+ */
+function rearmed(t: TicketState): TicketState {
+  return {
+    ...t,
+    status: "ready",
+    attempts: 0,
+    verify_ok: null,
+    review_ok: null,
+    review_attempts: 0,
+    reviews: [],
+    ladder_rung: undefined,
+    last_failure_class: undefined,
+    build_ms_since_checkpoint: 0,
+    build_steps_total: 0,
+  };
+}
+
+/**
+ * Demote interrupted (`in_progress`) and hard-failed Tickets back to `ready`
+ * and re-arm them, so the next loop pass re-runs them from a clean slate.
  *
  * ADR 0003 (stop, don't skip): a `failed` Ticket is demoted the same way. The
  * hard fail stopped the run for a human; the resume is the human's decision,
@@ -74,33 +102,9 @@ export function markCommitted(state: RunState, file: string, commit: string): Ru
 export function rebaseFrontier(state: RunState): RunState {
   return {
     ...state,
-    tickets: state.tickets.map((t) => {
-      if (t.status === "in_progress") {
-        return {
-          ...t,
-          status: "ready" as const,
-          attempts: 0,
-          verify_ok: null,
-          review_ok: null,
-          review_attempts: 0,
-          reviews: [],
-        };
-      }
-      if (t.status === "failed") {
-        return {
-          ...t,
-          status: "ready" as const,
-          attempts: 0,
-          verify_ok: null,
-          review_ok: null,
-          review_attempts: 0,
-          reviews: [],
-          ladder_rung: undefined,
-          last_failure_class: undefined,
-        };
-      }
-      return t;
-    }),
+    tickets: state.tickets.map((t) =>
+      t.status === "in_progress" || t.status === "failed" ? rearmed(t) : t,
+    ),
   };
 }
 

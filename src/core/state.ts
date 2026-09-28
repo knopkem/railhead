@@ -150,18 +150,22 @@ export interface TicketState {
    * checkpoint as explicit must-check items (and the run report) so a run is
    * never reported as fully verified while they stand. */
   unverified?: string[];
-  /** ADR 0040: cumulative builder wall-clock/steps across every invocation
-   * for this ticket (ladder rungs, resumes, blocks). The per-invocation
-   * `max_phase_steps` resets per process; these do not, and are checked
-   * against the plan-scaled per-ticket budget. */
+  /** ADR 0040: cumulative builder wall-clock across every invocation for
+   * this ticket (ladder rungs, resumes, blocks) — telemetry; never reset. */
   build_ms_total?: number;
+  /** ADR 0040: builder steps against the plan-scaled per-ticket budget. The
+   * per-invocation `max_phase_steps` resets per process; this does not, until
+   * a resume re-arms the ticket (`rebaseFrontier` clears it with the other
+   * budget counters — a resumed ticket must be able to run). */
   build_steps_total?: number;
   /** ADR 0040 (amended): builder wall-clock since the last green verify. The
    * wall budget exists to bound thrash, and thrash by definition produces
    * nothing green — a verify-passing round is externally validated progress,
    * so it restarts this clock while `build_steps_total` stays cumulative.
    * Undefined until the first invocation lands; the budget check falls back
-   * to `build_ms_total`, which is identical up to that point. */
+   * to `build_ms_total`, which is identical up to that point. A resume
+   * re-arms the ticket by clearing it (`rebaseFrontier`), so the resumed era
+   * gets its own wall clock. */
   build_ms_since_checkpoint?: number;
   /** ADR 0040 (amended): the slowest single builder invocation's wall ms.
    * The derived wall budget scales from it (see WALL_BUDGET_INVOCATION_MULTIPLE
