@@ -398,6 +398,11 @@ You run unattended — no human reads your narration, and every prose token you 
 const OPEN_ENDED_OUTPUT_DISCIPLINE = `## Output discipline
 This is an open-ended craft ticket: the rendered artifact is the product, so the usual token thrift does NOT apply here. Take the reads and screenshots the work needs. Only a checkpoint marker (or a $BLOCKED line) ends the phase; everything else is work.`;
 
+function attemptDossierBlock(dossier: string): string {
+  return `## Attempt history (what already happened on this ticket)
+${dossier}`;
+}
+
 function outputDisciplineFor(tickets: BuilderTicket[]): string {
   return tickets.some((t) => t.openEnded === true) ? OPEN_ENDED_OUTPUT_DISCIPLINE : OUTPUT_DISCIPLINE;
 }
@@ -446,6 +451,10 @@ export function buildBuilderPrompt(opts: {
    * self-check, whatever its criteria vocabulary says. Null/absent keeps the
    * criteria-based classification. */
   projectInterface?: ProjectInterface | null;
+  /** Deterministic attempt dossier (attempt-dossier.ts) injected on a stuck
+   * correction: the ticket's own failure history, repeated commands/edits,
+   * and uncommitted state. Evidence only — no model call produced it. */
+  attemptDossier?: string | null;
   /** v2 issue 01: re-inject the design doc's FULL text into the task instead
    * of the re-read instruction. The caller sets it on a warm resume whose
    * session may have compacted the vision away — cheap models are not trusted
@@ -504,6 +513,7 @@ export function buildBuilderPrompt(opts: {
       continuityBlock(session),
       `## Work to do
 ${ticketBlocks}`,
+      opts.attemptDossier ? attemptDossierBlock(opts.attemptDossier) : "",
       verifyBlock(verify),
       forwardLine,
       // Full-context sends only: a warm pointer resume already holds the block
@@ -550,6 +560,8 @@ export function buildBuilderFindingsPrompt(opts: {
   /** The project's declared interaction interface (issue #97) — see
    * {@link buildBuilderPrompt}. */
   projectInterface?: ProjectInterface | null;
+  /** Deterministic attempt dossier — see {@link buildBuilderPrompt}. */
+  attemptDossier?: string | null;
 }): PhaseMessages {
   const { session, granularity, tickets, verify, feedback, design, coherence } = opts;
   const findingsBlock = feedback.findings.length
@@ -568,6 +580,7 @@ export function buildBuilderFindingsPrompt(opts: {
 A fresh ${feedback.source} gate ran against the diff you just produced and it did not pass. The session that wrote the code receives the verdict directly — fix every item below IN the current ticket's work, then re-run the build/test commands, then checkpoint again. Do NOT proceed to a later ticket while a must-fix stands, and do not argue in prose — the fix is the argument.`,
       `### Must-fix findings
 ${findingsBlock}`,
+      opts.attemptDossier ? attemptDossierBlock(opts.attemptDossier) : "",
       tickets.map(renderBuilderTicket).join("\n\n"),
       verifyBlock(verify),
       design ? designReinjectBlock(design) : "",

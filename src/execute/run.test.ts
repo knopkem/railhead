@@ -476,6 +476,53 @@ describe("processTicket", () => {
     expect(ticketState.unverified ?? []).toEqual([]);
   });
 
+  it("injects the deterministic attempt dossier on the third invocation of a stuck retry", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig();
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+
+    const buildPrompts: string[] = [];
+    let builds = 0;
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (options.phaseFile.endsWith("-build")) {
+        builds++;
+        buildPrompts.push(_prompt);
+        if (builds < 3) {
+          // Clean exit, no checkpoint and no worktree change: the run resumes
+          // the same session with "drive it to the checkpoint" feedback.
+          await emitText(ledgerDir, options.phaseFile, "stopping for now");
+          return { ...okResult(), sessionId: "sess-stuck", checkpointTicket: null };
+        }
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "$CHECKPOINT ticket=01");
+        return { ...okResult(), sessionId: "sess-stuck", checkpointTicket: "01" };
+      }
+      if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const outcome = await processTicket(state, ledgerDir, ticketState);
+
+    expect(outcome).toBe("ok");
+    expect(builds).toBe(3);
+    // Invocation 2 is an ordinary one-shot correction — no digest yet.
+    expect(buildPrompts[1]).not.toContain("Attempt history");
+    // Invocation 3 is stuck: it gets its own history back, deterministically.
+    expect(buildPrompts[2]).toContain("Attempt history (what already happened on this ticket)");
+    expect(buildPrompts[2]).toContain("invocation 3");
+    expect(buildPrompts[2]).toContain("no checkpoint marker");
+  });
+
   it("contracts: regex extracts greet without calling the model (model fallback skipped)", async () => {
     const cwd = await freshRepo();
     const ticketsDir = ticketsDirOf(cwd);

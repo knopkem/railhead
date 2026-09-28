@@ -45,6 +45,7 @@ export { detectGroupCheckpoints } from "../gates/goal-loop.ts";
 // working — the function's home is corrective.ts.
 export { nextTicketNumber } from "../gates/corrective.ts";
 import { scheduleReviewFollowUps } from "../gates/corrective.ts";
+import { collectAttemptDossier, dossierDue } from "./attempt-dossier.ts";
 import { DEFAULT_INTERACTION_SMOKE_WALL_SEC, DEFAULT_MAX_REPLANS, DEFAULT_MODEL, codeReviewRunsMidRun, contextBudget, effectiveContextTokens, firesAtRunEnd, firesMidRun, goalFiresCheckpointsMidRun, interactionSmokeEnabled, querySeatContextWindows, resolveModels, seatContextBudget, seatContextCeilings, severityTriggersRetry, visualFiresAtRunEnd, type CheckpointGranularity } from "../config/config.ts";
 import { analyzePhase, summarizePhaseFiles } from "../core/telemetry.ts";
 import { codeReviewSchedule } from "./review-schedule.ts";
@@ -2148,6 +2149,14 @@ async function runBuilderStep(
   const feedback: GateFeedback | null = prevFeedback
     ? { source: feedbackSourceOf(prevFeedback), findings: [prevFeedback] }
     : null;
+  // Deterministic attempt dossier (attempt-dossier.ts — no model call): a
+  // stuck correction gets its own history back (gate failures, repeated
+  // commands/edits, files edited, uncommitted state) instead of another blind
+  // retry. Fires only when the retry is stuck: the session was restarted and
+  // lost its history, or the ticket is on invocation 3+.
+  const attemptDossier = feedback && dossierDue(ticket.attempts ?? 1, sessionId === null)
+    ? await collectAttemptDossier(state, ledger, ticket, parsed)
+    : null;
 
   /** Issue #106 (D): compose + execute ONE builder invocation for a given
    * target session and gate feedback. Isolated so a session-lost adoption can
@@ -2187,6 +2196,7 @@ async function runBuilderStep(
           coherence: charter,
           visionCapability,
           projectInterface: state.config.projectInterface ?? null,
+          attemptDossier,
         })
       : buildBuilderPrompt({
           session: targetSession,
@@ -2220,6 +2230,7 @@ async function runBuilderStep(
           contextBudget: contextBudget(state),
           visionCapability,
           projectInterface: state.config.projectInterface ?? null,
+          attemptDossier,
         });
     // Issue #133: a fresh seed (first run, or after a session-lost recovery
     // dropped the handle) branches off the base session with the builder's

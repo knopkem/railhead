@@ -600,6 +600,31 @@ describe("surface cadence for visual tickets (v2 issue 01)", () => {
   });
 });
 
+describe("deterministic attempt dossier injection (no model call)", () => {
+  const digest = "DIGEST: x4 npm test; src/a.ts x14";
+
+  it("renders the digest in a stuck seeded retry (fresh session rebuilt)", () => {
+    const p = builderPrompt({ ...fresh, attemptDossier: digest });
+    expect(p).toContain("Attempt history (what already happened on this ticket)");
+    expect(p).toContain(digest);
+  });
+
+  it("renders the digest in a stuck findings retry", () => {
+    const p = builderFindings({
+      ...fresh,
+      feedback: { source: "verify", findings: ["still red"] },
+      attemptDossier: digest,
+    });
+    expect(p).toContain("Attempt history");
+    expect(p).toContain(digest);
+  });
+
+  it("omits the digest on an ordinary advance", () => {
+    expect(builderPrompt(fresh)).not.toContain("Attempt history");
+    expect(builderFindings({ ...fresh, feedback: { source: "verify", findings: ["red"] } })).not.toContain("Attempt history");
+  });
+});
+
 describe("verification ownership (ADR 0055)", () => {
   it("tells the builder the gates own acceptance and probe: lines are not its script", () => {
     const p = builderPrompt(fresh);
