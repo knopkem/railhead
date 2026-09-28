@@ -29,13 +29,17 @@ export interface FailureEvidence {
   signal: string | null;
   durationMs: number;
   /** Compaction events seen in the phase's stream (telemetry.analyzePhase).
-   * A durable builder session that compacts repeatedly without reaching its
-   * checkpoint is spiraling: each compaction summarizes away the working
-   * notes, the session re-reads, refills, and compacts again. Peak tokens
-   * stay BELOW the peak gate (compaction caps fill), so without this signal
-   * the spiral classifies as blip and gets an identical retry into the same
-   * wall. Undefined on phases that never analyzed their stream. */
+   * Compaction alone is NORMAL fill management on a durable builder session —
+   * especially on local models whose windows fill fast. It only diagnoses
+   * capacity together with `worktreeChanged === false`: a session that
+   * compacts repeatedly while writing nothing is re-reading, not building. */
   compactions?: number;
+  /** Whether the phase changed the worktree (HEAD or `status --porcelain`)
+   * since it started. `false` plus repeated compaction is the genuine spiral;
+   * `true` means the session is making progress and compaction is doing its
+   * job. Undefined on phases that never measured it — unknown must never
+   * classify as capacity from compaction alone. */
+  worktreeChanged?: boolean;
 }
 
 export interface LadderRung {
@@ -68,10 +72,11 @@ const CAPACITY_PATTERNS = [
  * using it here is not brittle. */
 export const CAPACITY_PEAK_FRACTION = 0.9;
 
-/** Compactions within ONE failed phase at which the phase is treated as
- * capacity-limited. One compaction is normal fill management on a durable
- * session (ADR 0022); two or more without completing means the unit of work
- * does not fit the window — retrying identically only re-enters the spiral. */
+/** Compactions within ONE phase at which a phase that ALSO moved nothing in
+ * the worktree is treated as capacity-limited. One compaction is normal fill
+ * management on a durable session (ADR 0022); compaction with file progress
+ * is still normal — only compaction without progress means the unit of work
+ * does not fit and re-reading cannot converge. */
 export const SPIRAL_COMPACTION_THRESHOLD = 2;
 
 /** Backoff per rung when the wrapper does not supply its own schedule (rung 3
@@ -95,7 +100,11 @@ export function classifyFailure(evidence: FailureEvidence, budget: number): Fail
   const message = evidence.errorMessage ?? "";
   if (matches(message, FATAL_CONFIG_PATTERNS)) return "fatal-config";
   if (isCapacity(evidence, budget)) return "capacity";
-  if ((evidence.compactions ?? 0) >= SPIRAL_COMPACTION_THRESHOLD) return "capacity";
+  // A genuine spiral: repeated compaction AND no worktree progress. Repeated
+  // compaction with progress is normal on a durable session (the session
+  // compacts, re-reads, keeps building) — retry or keep driving it. Unknown
+  // `worktreeChanged` never classifies (a conservative blip).
+  if ((evidence.compactions ?? 0) >= SPIRAL_COMPACTION_THRESHOLD && evidence.worktreeChanged === false) return "capacity";
   return "blip";
 }
 
@@ -162,7 +171,7 @@ export function nextRung(
   }
   if (cls === "capacity") {
     const peakGate = evidence.peakTokens >= budget * CAPACITY_PEAK_FRACTION;
-    const spiral = !peakGate && (evidence.compactions ?? 0) >= SPIRAL_COMPACTION_THRESHOLD;
+    const spiral = !peakGate && (evidence.compactions ?? 0) >= SPIRAL_COMPACTION_THRESHOLD && evidence.worktreeChanged === false;
     return {
       rung: 3,
       action: "capacity-fail",
@@ -170,7 +179,7 @@ export function nextRung(
       diagnosis: peakGate
         ? `capacity failure: peak ${evidence.peakTokens} tokens is at/above ${Math.round(CAPACITY_PEAK_FRACTION * 100)}% of the ${budget}-token budget — the request is too large, not the code`
         : spiral
-          ? `capacity failure: the phase compacted ${evidence.compactions} times without finishing — the unit of work does not fit the ${budget}-token window; a fresh session from the last green commit is cheaper than another compaction cycle`
+          ? `capacity failure: the phase compacted ${evidence.compactions} times without changing the worktree — the unit of work does not fit the ${budget}-token window; a fresh session from the last green commit is cheaper than another compaction cycle`
           : `capacity failure: capacity wording matched (${evidence.errorMessage ?? "unknown"}) — the request is too large, not the code`,
       class: "capacity",
     };

@@ -327,6 +327,21 @@ export async function dirtyPaths(cwd: string): Promise<string[]> {
     });
 }
 
+/** A cheap fingerprint of HEAD + the worktree: the HEAD sha plus `status
+ * --porcelain`. Any difference across a phase means the phase moved real
+ * state (files written, deleted, or committed) rather than only its
+ * conversation. The capacity verdict uses it to tell a genuine compaction
+ * spiral (re-reading, no progress) from normal long-run compaction on a
+ * durable session. Empty outside a repo, so a comparison simply reports
+ * "no change". */
+export async function worktreeFingerprint(cwd: string): Promise<string> {
+  const [head, status] = await Promise.all([
+    headCommit(cwd).catch(() => ""),
+    git(cwd, ["status", "--porcelain"]).catch(() => ""),
+  ]);
+  return `${head}\n${status}`;
+}
+
 export async function commit(
   cwd: string,
   message: string,

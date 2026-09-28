@@ -83,3 +83,31 @@ Three gaps made the failure worse than the rule:
   numbering apply.
 - ADR 0040 stands: cumulative ticket budgets remain the stop, and the split is
   a new plan, not a budget reset in disguise.
+
+## Amendment: compaction is normal — capacity needs no worktree progress (Sep 2026)
+
+The compaction count alone was too eager a fit signal. With a durable session
+(ADR 0022), local models, and a 100k window, compacting two or three times
+inside one invocation is ordinary fill management while the session keeps
+building. The worked failure: SpriteForge ticket 24 (`palette module green`)
+wrote and committed its module across 190 steps and three compactions, then
+stopped without the `$CHECKPOINT` marker — the railhead re-scoped the unit out
+from under finished work because compaction, not lack of progress, was read as
+"does not fit".
+
+- `FailureEvidence` now carries `worktreeChanged`: whether the invocation
+  moved HEAD or `status --porcelain` since it started (a cheap fingerprint,
+  `git.worktreeFingerprint`). Undefined means unmeasured.
+- `classifyFailure` routes `compactions >= SPIRAL_COMPACTION_THRESHOLD` to
+  capacity only when `worktreeChanged === false`. With progress — or with the
+  signal unmeasured — compaction is normal and the phase is a `blip` (retry /
+  keep driving the durable session).
+- The no-marker recovery keeps its shape: a marker-less invocation that moved
+  the worktree resumes the session; only a no-progress spiral carries capacity
+  evidence into the ladder and may split.
+- The peak-token gate and capacity wording are unchanged: they remain hard
+  evidence of an oversized request.
+- Consequence: a genuinely unfit unit may now consume its retry rungs before
+  the ticket budget stops it; the ticket budget (ADR 0040) remains the backstop,
+  and the no-progress spiral is still caught on the first ladder rung.
+

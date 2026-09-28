@@ -2117,6 +2117,12 @@ async function runBuilderStep(
    * re-drive once as a SEEDED advance (a fresh session must not receive a
    * findings prompt that references a "last checkpoint" it never had). */
   const visionCapability = await readVisionCapabilityFor(state.cwd, state._models?.implement ?? null);
+  // Progress evidence for the capacity verdict: captured once per builder
+  // invocation, before any drive, so a compaction count can be read against
+  // whether the invocation actually moved the worktree. Compaction with
+  // progress is normal on a durable session; only compaction without progress
+  // is a spiral (failure-ladder.ts).
+  const worktreeBefore = await git.worktreeFingerprint(state.cwd);
   const driveOnce = async (opts: { sessionIdForPrompt: string | null; feedbackForPrompt: GateFeedback | null; fullContextOverride?: boolean }): Promise<{
     result: Awaited<ReturnType<typeof executeOpendCode>>;
   }> => {
@@ -2254,7 +2260,8 @@ async function runBuilderStep(
   if (result.status !== "ok") {
     const err = `build ${phaseFile} ${describeExecFailure(result)}`;
     const { compactions } = await analyzePhase(ledger, phaseFile);
-    return { ok: false, err, evidence: { ...(result.evidence ?? evidenceFromResult(result)), compactions } };
+    const worktreeChanged = (await git.worktreeFingerprint(state.cwd)) !== worktreeBefore;
+    return { ok: false, err, evidence: { ...(result.evidence ?? evidenceFromResult(result)), compactions, worktreeChanged } };
   }
 
   // ADR 0040: a terminal `$BLOCKED` ends the invocation. Record it durably
@@ -2289,14 +2296,15 @@ async function runBuilderStep(
     const err =
       `build ${phaseFile}: exited ok but ${markerTicket ? `checkpointed ticket ${markerTicket}` : "emitted no checkpoint marker"} — expected a $CHECKPOINT ticket=${expectedTicket} (${granularity} granularity). The session stopped for a reason other than a clean checkpoint; continue in this session and drive it to checkpoint ${expectedTicket}.`;
     ticket.logs.push(err);
-    // Spiral detection: a session that already compacted past the threshold
-    // without producing its checkpoint does not fit the window — carrying the
-    // compaction count as ladder evidence routes this to capacity (fresh
-    // session from the last green commit) instead of the in-session "keep
-    // driving" retry, which would re-enter the same compaction spiral.
+    // Spiral detection: compaction is normal on a durable session — it is only
+    // evidence of an unfit unit when the invocation ALSO moved nothing in the
+    // worktree (re-reading, not building). With progress, keep driving the
+    // session (evidence stays null → the in-session resume path); without it,
+    // carry the no-progress evidence so the ladder routes to capacity.
     const { compactions } = await analyzePhase(ledger, phaseFile);
-    const evidence = compactions >= SPIRAL_COMPACTION_THRESHOLD
-      ? { ...evidenceFromResult(result), errorMessage: err, compactions }
+    const worktreeChanged = (await git.worktreeFingerprint(state.cwd)) !== worktreeBefore;
+    const evidence = compactions >= SPIRAL_COMPACTION_THRESHOLD && !worktreeChanged
+      ? { ...evidenceFromResult(result), errorMessage: err, compactions, worktreeChanged }
       : null;
     return { ok: false, err, evidence };
   }
