@@ -84,6 +84,16 @@ If the plan or environment is FUNDAMENTALLY wrong — continuing would stack bad
 
 Do NOT use this as an escape from a hard ticket, a failing gate, or retry pressure. Those have their own machinery: review feedback, the retry/failure ladder, corrective tickets. Use the halt signal ONLY for a real "this needs a human" conclusion (the plan is wrong, the environment is broken) — not for "this ticket is hard."`;
 
+/** The re-review contract, shared by the diff and read-mode reviewer prompts.
+ * Prior findings must be re-verified against the CURRENT diff and REPEATED
+ * when unresolved — an omitted item is a declaration that it is fixed and
+ * shipped. The spriteforge layer-opacity MAJOR shipped exactly that way: the
+ * re-review simply did not mention it. */
+function priorFindingsBlock(priorFindings?: string[]): string {
+  if (!priorFindings?.length) return "";
+  return `\nPRIOR BLOCKING FINDINGS (from earlier reviews of this ticket — each one MUST be re-checked against the CURRENT diff before approving):\n${priorFindings.join("\n")}\n\nFor every item above: if the current diff resolves it, note it briefly under $NITS as resolved. If you CANNOT verify it is resolved, you MUST repeat it in $BLOCKING — omitting it declares it fixed and shipped. Never re-raise a resolved item as new.`;
+}
+
 export async function buildReviewerPrompt(options: {
   ticketFile: string;
   ticketBody: string;
@@ -142,9 +152,7 @@ export async function buildReviewerPrompt(options: {
     ? criteria.map((c) => `- [ ] ${c}`).join("\n")
     : "- (no acceptance criteria listed)";
 
-  const priorBlock = priorFindings?.length
-    ? `\nPRIOR BLOCKING FINDINGS (from earlier reviews of this ticket — confirm each is now resolved before approving; do not re-raise a resolved item as new):\n${priorFindings.join("\n")}`
-    : "";
+  const priorBlock = priorFindingsBlock(priorFindings);
 
   const contractBlock = contracts?.entries.length
     ? `\nEXISTING PUBLIC CONTRACTS this ticket should reuse or extend, not duplicate (the full contracts index — check the diff's signatures against these exactly):\n${renderContracts(contracts)}\n`
@@ -400,9 +408,7 @@ export async function buildReviewerReadModePrompt(options: {
     ? criteria.map((c) => `- [ ] ${c}`).join("\n")
     : "- (no acceptance criteria listed)";
 
-  const priorBlock = priorFindings?.length
-    ? `\nPRIOR BLOCKING FINDINGS (from earlier reviews of this ticket — confirm each is now resolved before approving; do not re-raise a resolved item as new):\n${priorFindings.join("\n")}`
-    : "";
+  const priorBlock = priorFindingsBlock(priorFindings);
 
   const contractBlock = contracts?.entries.length
     ? `\nEXISTING PUBLIC CONTRACTS this ticket should reuse or extend, not duplicate (the full contracts index — check the diff's signatures against these exactly):\n${renderContracts(contracts)}\n`

@@ -44,7 +44,8 @@ export { detectGroupCheckpoints } from "../gates/goal-loop.ts";
 // Re-exported so run.ts's historical surface (and run.test.ts's import) keeps
 // working — the function's home is corrective.ts.
 export { nextTicketNumber } from "../gates/corrective.ts";
-import { DEFAULT_MAX_REPLANS, DEFAULT_MODEL, codeReviewRunsMidRun, contextBudget, effectiveContextTokens, firesAtRunEnd, firesMidRun, goalFiresCheckpointsMidRun, interactionSmokeEnabled, querySeatContextWindows, resolveModels, seatContextBudget, seatContextCeilings, severityTriggersRetry, visualFiresAtRunEnd, type CheckpointGranularity } from "../config/config.ts";
+import { scheduleReviewFollowUps } from "../gates/corrective.ts";
+import { DEFAULT_INTERACTION_SMOKE_WALL_SEC, DEFAULT_MAX_REPLANS, DEFAULT_MODEL, codeReviewRunsMidRun, contextBudget, effectiveContextTokens, firesAtRunEnd, firesMidRun, goalFiresCheckpointsMidRun, interactionSmokeEnabled, querySeatContextWindows, resolveModels, seatContextBudget, seatContextCeilings, severityTriggersRetry, visualFiresAtRunEnd, type CheckpointGranularity } from "../config/config.ts";
 import { analyzePhase, summarizePhaseFiles } from "../core/telemetry.ts";
 import { codeReviewSchedule } from "./review-schedule.ts";
 import { advanceRetry, INITIAL_COUNTERS, type GateCounters, type GateLimits } from "../gates/gate.ts";
@@ -1346,6 +1347,7 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
             maxSteps: state.config.max_phase_steps,
             stallTimeoutSec: state.config.stall_timeout_sec,
             maxStepModelSec: state.config.max_step_model_sec,
+            phaseWallSec: state.config.visual_review?.round_wall_sec ?? DEFAULT_INTERACTION_SMOKE_WALL_SEC,
             maxContextTokens: seatContextBudget(state, "visual"),
           }),
           { backoff: state.config.infra_backoff_sec, budget: seatContextBudget(state, "visual"), restartWorker: ladderRestart(state) },
@@ -1697,7 +1699,18 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
       ticket.logs.push(`  residual: ${f}`);
     }
     if (implementPhaseFiles.size > 0) ticket.context = await summarizePhaseFiles(ledger, implementPhaseFiles);
-    return committedTicket(state, ledger, ticket, parsed, msg, reused, "soft-pass");
+    const outcome = await committedTicket(state, ledger, ticket, parsed, msg, reused, "soft-pass");
+    // A soft-pass ships known MUST-FIX findings. Schedule them as next-priority
+    // work instead of leaving them as log lines the next run may never read
+    // (the spriteforge layer-opacity MAJOR shipped exactly that way).
+    if (outcome === "ok") {
+      const followUps = await scheduleReviewFollowUps(state, ledger, lastBlockingFindings, ticket.title);
+      if (followUps.length > 0) {
+        ticket.logs.push(`scheduled ${followUps.length} review follow-up ticket(s) for the residual MUST-FIX finding(s)`);
+        await writeState(ledger, state);
+      }
+    }
+    return outcome;
   }
 
   // Hard fail: retry budget exhausted, or a [BLOCKER] finding survived the attempt cap.
@@ -1878,7 +1891,7 @@ async function splitCapacityTicket(
     return false;
   }
   const maxReplans = state.config.goal_review?.max_replans ?? DEFAULT_MAX_REPLANS;
-  if ((state.replan_count ?? 0) >= maxReplans) {
+  if ((state.capacity_replans ?? 0) >= maxReplans) {
     console.log(`[${nowClock()}]   ${ticket.number} capacity split refused — max_replans (${maxReplans}) reached; using a fresh session`);
     return false;
   }
@@ -2282,6 +2295,20 @@ async function runBuilderStep(
   // drive it to the checkpoint rather than gating half-done work.
   const markerTicket = result.checkpointTicket ?? readCheckpointTicket(await extractAssistantText(ledger, phaseFile));
   if (markerTicket !== expectedTicket) {
+    // A builder that ran `git commit` itself (observed live, and now
+    // discouraged in the prompt) has declared the ticket complete even though
+    // the marker is missing. Treat the commit as the checkpoint: verify still
+    // gates the commit below, so a premature self-commit fails verify and the
+    // session gets the failure feedback exactly as a marker-less stop would.
+    const headMoved = !markerTicket
+      && (await git.headCommit(state.cwd).catch(() => "")) !== worktreeBefore.split("\n")[0];
+    if (headMoved) {
+      const head = await git.headCommit(state.cwd).catch(() => "");
+      ticket.logs.push(`build ${phaseFile}: no marker, but HEAD moved during the invocation (builder committed ${head.slice(0, 8)}) — counting it as the checkpoint; verify still gates the commit`);
+      console.log(`[${nowClock()}]   ${ticket.number} build ⊘ no marker, HEAD moved — counting the invocation's commit as the checkpoint`);
+      ticket.context = await analyzePhase(ledger, phaseFile);
+      return { ok: true, toolCalls: result.toolCalls };
+    }
     // v2 issue 01 fallback: a turn that ended with NO marker but whose ticket
     // was already verified green counts as the checkpoint. Re-invoking only to
     // see the marker again wastes a whole builder invocation (five observed in

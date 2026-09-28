@@ -265,8 +265,15 @@ export interface RunState {
   pending_checkpoints?: { goal: string[]; structural: string[] };
   /** gh #116: how many goal-review replans (`$REPLAN` frontier regenerations)
    * this run has honored so far. Enforced against `goal_review.max_replans`;
-   * absent until the first replan fires. */
+   * absent until the first replan fires. Capacity splits keep their own
+   * counter (`capacity_replans`) — sharing one budget let a plan-defect or
+   * goal replan starve a later genuine capacity split (spriteforge: ticket 58
+   * refused its split because tickets 04/24 had spent the shared budget). */
   replan_count?: number;
+  /** ADR 0055: how many capacity splits this run has performed, enforced
+   * against the same `goal_review.max_replans` but independently of
+   * `replan_count`. Absent until the first split fires. */
+  capacity_replans?: number;
   /** Smart review (code_review.trigger: "smart"): set when a replan or
    * capacity split regenerates the frontier. The next review decision consumes
    * it and fires a review even on an otherwise clean ticket — a re-scoped plan

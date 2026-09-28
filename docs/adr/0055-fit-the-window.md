@@ -110,4 +110,10 @@ from under finished work because compaction, not lack of progress, was read as
 - Consequence: a genuinely unfit unit may now consume its retry rungs before
   the ticket budget stops it; the ticket budget (ADR 0040) remains the backstop,
   and the no-progress spiral is still caught on the first ladder rung.
+- Capacity splits have their own budget (`state.capacity_replans`), independent
+  of `replan_count` (goal-review/plan-defect replans). One shared counter let a
+  plan-defect replan starve a later genuine split: in the spriteforge run the
+  plan-defect replan spent one slot, ticket 24's split spent the other, and
+  ticket 58's capacity verdict was refused even though no split budget belonged
+  to the earlier replans.
 

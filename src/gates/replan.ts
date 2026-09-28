@@ -334,7 +334,7 @@ export function buildCapacitySplitPrompt(options: {
     ? `\n## Handoff from the interrupted session (its own account — trust it over guessing)\n${handoff.trim()}\n`
     : "";
 
-  return `You are the Planner, re-invoked mid-run because the ticket currently being built does not fit the model's context window. It compacted repeatedly without reaching its checkpoint and was stopped. The plan is not wrong in substance — the unit of work is too big. Your job: regenerate ONLY the uncommitted frontier, including the interrupted ticket, as SMALLER tickets that each fit one context window and reach their own checkpoint.
+  return `You are the Planner, re-invoked mid-run because the ticket currently being built does not fit the model's context window (the capacity evidence below says why: typically repeated compaction with no worktree progress, or a request at the seat's ceiling). The plan is not wrong in substance — the unit of work is too big. Your job: regenerate ONLY the uncommitted frontier, including the interrupted ticket, as SMALLER tickets that each fit one context window and reach their own checkpoint.
 
 ## Original goal/prompt
 
@@ -390,9 +390,13 @@ export async function replanFromCapacity(
   opts: CapacitySplitOptions,
 ): Promise<boolean> {
   const maxReplans = state.config.goal_review?.max_replans ?? DEFAULT_MAX_REPLANS;
-  const replans = state.replan_count ?? 0;
-  if (replans >= maxReplans) {
-    console.log(`[${nowClock()}] replan: capacity split refused — the plan was already re-scoped ${replans} time(s); max_replans (${maxReplans}) reached`);
+  // Capacity splits have their OWN budget: sharing `replan_count` with
+  // goal-review/plan-defect replans starved genuine splits (spriteforge: the
+  // frontier had already been re-scoped twice, so ticket 58's capacity verdict
+  // was refused even though no capacity split had happened yet).
+  const splits = state.capacity_replans ?? 0;
+  if (splits >= maxReplans) {
+    console.log(`[${nowClock()}] replan: capacity split refused — the frontier was already split ${splits} time(s); max_replans (${maxReplans}) reached`);
     return false;
   }
 
@@ -421,12 +425,12 @@ export async function replanFromCapacity(
 
   const ok = await runReplanPhase(state, ledger, prompt, opts.ticket.number);
   if (ok) {
-    state.replan_count = replans + 1;
+    state.capacity_replans = splits + 1;
     // Smart review (code_review.trigger: smart): the split regenerates the
     // uncommitted frontier — arm the next review decision to fire.
     state.smart_review_armed = true;
     await writeState(ledger, state);
-    console.log(`[${nowClock()}] replan: capacity split ${state.replan_count}/${maxReplans} applied — ticket ${opts.ticket.number} re-scoped into smaller tickets`);
+    console.log(`[${nowClock()}] replan: capacity split ${state.capacity_replans}/${maxReplans} applied — ticket ${opts.ticket.number} re-scoped into smaller tickets`);
   }
   return ok;
 }

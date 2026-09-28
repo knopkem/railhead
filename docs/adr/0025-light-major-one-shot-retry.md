@@ -55,3 +55,19 @@ rides along and does not separately consume the one-shot).
 - medium/full and the `severityTriggersRetry` threshold are unchanged; the
   one-shot is orchestration in `run.ts`, deliberately not a config surface —
   `mode` remains the knob.
+
+## Amendment: a soft-pass schedules its residual MAJORs as follow-up work (Sep 2026)
+
+The one-shot's soft-pass shipped the residual finding as a log line only. The
+spriteforge layer-opacity gap proved the cost: 72-01's review flagged that
+`compositeFrame` ignored per-layer opacity/visibility ([MAJOR]); the corrective
+round did not fix it; the re-review omitted the finding entirely and passed;
+the residual lived in `ticket.logs` and shipped. Two changes:
+
+- The reviewer prompt now re-verifies prior findings explicitly: each one must
+  be re-checked against the CURRENT diff, noted as resolved, or repeated in
+  $BLOCKING — omitting one declares it fixed and shipped.
+- A soft-pass with residual MAJORs schedules a `Review follow-up: ...` ticket
+  carrying them, inserted before the remaining frontier so it is the next
+  ready work. A follow-up that itself soft-passes records its residual but
+  never chains another follow-up (bounded by construction).

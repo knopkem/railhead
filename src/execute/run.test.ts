@@ -2280,8 +2280,13 @@ describe("code review cadence (issue #73)", () => {
         await emitText(ledgerDir, options.phaseFile, "DONE");
       } else if (kind === "review") {
         reviewPhases.push(options.phaseFile);
-        reviewCount++;
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\n[MAJOR] something minor is off\n$NITS\nNONE\n$OK\nok");
+        if (options.phaseFile.startsWith("01-")) reviewCount++;
+        if (options.phaseFile.startsWith("02-")) {
+          // The scheduled follow-up ticket gets a clean review and commits.
+          await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
+        } else {
+          await emitText(ledgerDir, options.phaseFile, "$BLOCKING\n[MAJOR] something minor is off\n$NITS\nNONE\n$OK\nok");
+        }
       } else {
         await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
       }
@@ -2291,15 +2296,20 @@ describe("code review cadence (issue #73)", () => {
     const final = await runLoop(state, ledgerDir);
 
     expect(final.status).toBe("finished");
-    // Per-ticket review runs twice: the MAJOR triggers ONE corrective attempt,
-    // then the still-unsatisfied MAJOR soft-passes (the run must not stall).
-    expect(reviewPhases.length).toBe(2);
+    // Per-ticket review runs twice on the original ticket: the MAJOR triggers
+    // ONE corrective attempt, then the still-unsatisfied MAJOR soft-passes (the
+    // run must not stall) — and the residual is scheduled as a follow-up that
+    // then runs and passes.
+    expect(reviewCount).toBe(2);
     expect(reviewPhases[0]).toMatch(/-01-review$/);
     expect(reviewPhases[1]).toMatch(/-02-review$/);
     expect(final.tickets[0].review_ok).toBe(true);
     expect(final.tickets[0].status).toBe("committed");
     // The spent one-shot is visible in the ticket's history as a soft-pass.
     expect(final.tickets[0].reviews[1]).toMatchObject({ blocking: false });
+    const followUp = final.tickets.find((t) => t.title.startsWith("Review follow-up:"));
+    expect(followUp).toBeTruthy();
+    expect(followUp!.status).toBe("committed");
   });
 
   it("light: a [BLOCKER] naming no file in the ticket's diff is downgraded to [MAJOR] and gets one corrective attempt, never the full BLOCKER budget (#94)", async () => {
@@ -2323,11 +2333,15 @@ describe("code review cadence (issue #73)", () => {
         await writeImplementedFile(cwd);
         await emitText(ledgerDir, options.phaseFile, "DONE");
       } else if (kind === "review") {
-        reviewCount++;
-        // A hallucinated blocker: the only changed path is src/index.js, and
-        // this claims nothing there — the verify gate cannot refute it, so it
-        // must not be allowed to burn the retry budget (ADR 0014).
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\n[BLOCKER] the whole approach is wrong and must be redone\n$NITS\nNONE\n$OK\nok");
+        if (options.phaseFile.startsWith("01-")) reviewCount++;
+        if (options.phaseFile.startsWith("02-")) {
+          await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
+        } else {
+          // A hallucinated blocker: the only changed path is src/index.js, and
+          // this claims nothing there — the verify gate cannot refute it, so it
+          // must not be allowed to burn the retry budget (ADR 0014).
+          await emitText(ledgerDir, options.phaseFile, "$BLOCKING\n[BLOCKER] the whole approach is wrong and must be redone\n$NITS\nNONE\n$OK\nok");
+        }
       } else {
         await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
       }
@@ -2497,9 +2511,14 @@ describe("code review cadence (issue #73)", () => {
         await writeImplementedFile(cwd);
         await emitText(ledgerDir, options.phaseFile, "DONE");
       } else if (kind === "review") {
-        reviewCount++;
-        // The MAJOR persists across every review — it is never fixed.
-        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\n[MAJOR] toolbar swallows pointer events\n$NITS\nNONE\n$OK\nok");
+        if (options.phaseFile.startsWith("01-")) reviewCount++;
+        if (options.phaseFile.startsWith("02-")) {
+          await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nfixed");
+        } else {
+          // The MAJOR persists across every review of the original ticket — it
+          // is never fixed.
+          await emitText(ledgerDir, options.phaseFile, "$BLOCKING\n[MAJOR] toolbar swallows pointer events\n$NITS\nNONE\n$OK\nok");
+        }
       } else {
         await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
       }
@@ -2509,12 +2528,15 @@ describe("code review cadence (issue #73)", () => {
     const final = await runLoop(state, ledgerDir);
 
     expect(final.status).toBe("finished");
-    // Round 1 flags the MAJOR → one retry. Round 2 still flags it → soft-pass.
+    // Round 1 flags the MAJOR → one retry. Round 2 still flags it → soft-pass,
+    // and the residual is scheduled as a follow-up that then passes.
     expect(reviewCount).toBe(2);
     expect(final.tickets[0].status).toBe("committed");
     expect(final.tickets[0].review_ok).toBe(true);
     // The residual finding is recorded so the run summary can name it.
     expect(final.tickets[0].logs.some((l) => l.includes("residual:") && l.includes("toolbar swallows pointer events"))).toBe(true);
+    const followUp = final.tickets.find((t) => t.title.startsWith("Review follow-up:"));
+    expect(followUp?.status).toBe("committed");
   });
 
   it("light: a NEW major on the re-review does not extend the MAJOR retry budget", async () => {
@@ -2542,8 +2564,12 @@ describe("code review cadence (issue #73)", () => {
         await writeImplementedFile(cwd);
         await emitText(ledgerDir, options.phaseFile, "DONE");
       } else if (kind === "review") {
-        reviewCount++;
-        await emitText(ledgerDir, options.phaseFile, `$BLOCKING\n[MAJOR] distinct issue number ${reviewCount}\n$NITS\nNONE\n$OK\nok`);
+        if (options.phaseFile.startsWith("01-")) reviewCount++;
+        if (options.phaseFile.startsWith("02-")) {
+          await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nfixed");
+        } else {
+          await emitText(ledgerDir, options.phaseFile, `$BLOCKING\n[MAJOR] distinct issue number ${reviewCount}\n$NITS\nNONE\n$OK\nok`);
+        }
       } else {
         await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
       }
@@ -3332,6 +3358,7 @@ describe("goal review cadence (issue #73)", () => {
 
     const interactPhases: string[] = [];
     const interactPrompts: string[] = [];
+    const interactWalls: (number | null | undefined)[] = [];
     mockExec.mockImplementation(async (prompt, options) => {
       const kind = kindOf(options);
       if (kind === "implement") {
@@ -3342,6 +3369,7 @@ describe("goal review cadence (issue #73)", () => {
       } else if (kind === "interact") {
         interactPhases.push(options.phaseFile);
         interactPrompts.push(prompt);
+        interactWalls.push(options.phaseWallSec);
         await emitText(ledgerDir, options.phaseFile, interactPhases.length === 1
           ? "$SMOKE_FAIL\n[BLOCKER] the canvas does not change after clicking New game\n$END"
           : "$SMOKE_PASS\n$END");
@@ -3357,6 +3385,8 @@ describe("goal review cadence (issue #73)", () => {
     // Never on the group's first ticket; on the boundary ticket only — twice,
     // because the blocking FAIL fed back and the retry passed.
     expect(interactPhases).toEqual(["02-01-interact", "02-02-interact"]);
+    // The smoke carries a wall-clock backstop, like a visual round.
+    expect(interactWalls).toEqual([3600, 3600]);
     // The judge is scoped to the boundary it closes: both group tickets are
     // built, and the group's own claims are the artifact under test.
     expect(interactPrompts[0]).toContain('This gate closes group "core"');
@@ -4316,7 +4346,8 @@ describe("session builder (issue #95)", () => {
     // regenerated tickets ran and committed.
     expect(final.tickets.map((t) => t.title)).toEqual(["Scaffold greet", "Wire main"]);
     expect(final.tickets.every((t) => t.status === "committed")).toBe(true);
-    expect(final.replan_count).toBe(1);
+    expect(final.capacity_replans).toBe(1);
+    expect(final.replan_count ?? 0).toBe(0);
     // The split preserved the session's working memory (one handoff turn) and
     // then seeded fresh — it did not resume the spiraled session.
     expect(handoffSessions).toEqual(["sess-spiral"]);
@@ -4326,6 +4357,66 @@ describe("session builder (issue #95)", () => {
     expect(replanPrompts[0]).toContain("Handoff from the interrupted session");
     expect(replanPrompts[0]).toContain("greet scaffold landed");
     expect(final.builder!.restarts.some((r) => r.cause.includes("capacity split"))).toBe(true);
+  });
+
+  it("a plan-defect replan does NOT consume the capacity-split budget (spriteforge: tickets 04/24 then 58)", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      checkpoint_granularity: "ticket",
+      model: { plan: "plan-model", implement: DEFAULT_MODEL, review: "review-model", visual: null, goal: null, extract: null },
+    });
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+
+    let replans = 0;
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (options.phaseFile.endsWith("-build")) {
+        // Attempt 1: a plan-defect block → frontier replan #1 (24-39 shape).
+        if (options.phaseFile.startsWith("01-")) {
+          await emitText(ledgerDir, options.phaseFile, "$BLOCKED ticket=01 kind=plan-defect reason=the plan is wrong");
+          return { ...okResult(), sessionId: "sess-1", block: { ticket: "01", kind: "plan-defect", reason: "the plan is wrong", malformedKind: false } };
+        }
+        // Attempt 2 (ticket 02): compacts twice moving nothing → capacity.
+        if (options.phaseFile.startsWith("02-")) {
+          await appendEvent(ledgerDir, options.phaseFile, JSON.stringify({ type: "text", part: { type: "text", text: "(compacted)", metadata: { compaction_continue: true } } }));
+          await appendEvent(ledgerDir, options.phaseFile, JSON.stringify({ type: "text", part: { type: "text", text: "(compacted again)", metadata: { compaction_continue: true } } }));
+          return { ...okResult(), sessionId: "sess-spiral", checkpointTicket: null };
+        }
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "$CHECKPOINT ticket=" + options.phaseFile.slice(0, 2));
+        return builderOk(options.phaseFile.slice(0, 2));
+      }
+      if (kind === "replan") {
+        replans++;
+        const tickets = replans === 1
+          ? [{ title: "Alpha", what: "w", criteria: ["c"] }, { title: "Beta", what: "w", criteria: ["c"] }]
+          : [{ title: "Gamma", what: "w", criteria: ["c"] }, { title: "Delta", what: "w", criteria: ["c"] }];
+        await emitText(ledgerDir, options.phaseFile, `$TICKETS\n${JSON.stringify(tickets)}`);
+        return okResult();
+      }
+      if (kind === "handoff") return okResult();
+      if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    expect(replans).toBe(2);
+    // Both budgets were used, independently: the plan-defect replan AND the
+    // capacity split that a shared counter would have starved.
+    expect(final.replan_count).toBe(1);
+    expect(final.capacity_replans).toBe(1);
+    expect(final.tickets.map((t) => t.title)).toEqual(["Gamma", "Delta"]);
   });
 
   it("ADR 0040 amendment 3: a capacity verdict's fresh-session recovery gets its own invocation window under the default step budget", async () => {
@@ -4764,6 +4855,44 @@ describe("session builder (issue #95)", () => {
     expect(buildCalls).toBeLessThan(3);
     expect(ticketState.logs.join("\n")).toContain("counting it as the checkpoint");
     expect(ticketState.status).toBe("committed");
+  });
+
+  it("a builder that commits its own work and skips the marker is accepted as the checkpoint", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, baseConfig());
+    state.tickets = [ticketState];
+
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        // No export → the contract pass stays silent, so HEAD stays the
+        // builder's own commit for the assertion below.
+        await mkdir(join(cwd, "src"), { recursive: true });
+        await writeFile(join(cwd, "src", "index.js"), "const greet = 1;\n", "utf8");
+        await git.commit(cwd, "builder's own commit");
+        await emitText(ledgerDir, options.phaseFile, "done, committed it myself");
+        return { ...okResult(), sessionId: "sess-self", checkpointTicket: null };
+      }
+      if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const outcome = await processTicket(state, ledgerDir, ticketState);
+
+    expect(outcome).toBe("ok");
+    expect(ticketState.status).toBe("committed");
+    expect(ticketState.logs.join("\n")).toContain("HEAD moved during the invocation");
+    // The self-commit IS the ticket commit — reused, not re-created.
+    expect(await git.lastCommitMessage(cwd)).toBe("builder's own commit");
+    expect(ticketState.commit).toBe(await git.headCommit(cwd));
   });
 
   it("ticket telemetry merges compactions from a no-checkpoint build attempt (run-20260907-2146)", async () => {

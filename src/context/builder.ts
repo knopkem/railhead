@@ -174,6 +174,8 @@ ${marker}
 
 Then produce nothing further for that ticket — the railhead resumes this session after running its gates${granularity === "product" ? " and surfaces the next ticket once this one is committed" : ""}. Never emit the marker for work that is not green: the railhead gates what you checkpoint.
 
+The railhead owns commits. Do NOT run \`git commit\` (or otherwise stage/commit) yourself: leave the changes in the worktree and stop at the checkpoint marker. The railhead commits after its gates pass. A commit you make is not a checkpoint — the marker is — and it leaves the railhead's verification and resume bookkeeping pointing at a different state than the one you finished.
+
 ## Giving up honestly (the blocked exit)
 If this ticket cannot be completed or its criteria cannot be verified with the tools this session has, do NOT keep retrying the same approach. A live or interactive criterion gets at most 3 attempts, each changing the mechanism or hypothesis; after that, stop. End your reply with exactly one line:
 

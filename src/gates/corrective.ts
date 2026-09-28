@@ -185,6 +185,57 @@ export function nextTicketNumber(state: RunState): number {
 }
 
 /**
+ * Code-review follow-up tickets (one ticket carrying every residual MUST-FIX
+ * finding). A per-ticket review that soft-passes leaves MAJOR findings the
+ * gate could not resolve — the spriteforge layer-opacity gap: the re-review
+ * omitted the finding and the ticket shipped with the defect. Instead of
+ * hiding the residual in logs, schedule it as next-priority work.
+ */
+export const REVIEW_FOLLOWUP_TITLE = "Review follow-up: ";
+
+export function generateReviewFollowUpTickets(findings: string[]): PlanTicket[] {
+  const majors = promoteUnlabelledSeverity(findings).filter((f) => classifySeverity(f) === "major");
+  if (majors.length === 0) return [];
+  const body = majors.map((f) => `- ${f}`).join("\n");
+  return [{
+    title: `${REVIEW_FOLLOWUP_TITLE}${truncateFindingBody(stripSeverityLabel(majors[0]), 60, "")}`,
+    what: `A per-ticket code review passed this ticket with unresolved MUST-FIX (MAJOR) findings. Fix each one now:\n\n${body}\n\nReproduce each finding first, then fix the root cause. The project's verify suite is the floor; keep it green.`,
+    criteria: [
+      "each listed finding no longer reproduces",
+      "the project's verify commands still pass",
+    ],
+  }];
+}
+
+/**
+ * Write review follow-up tickets and insert them BEFORE the remaining planned
+ * frontier (the first ready ticket), so the next run-loop iteration picks them
+ * up. Unlike {@link processCorrectiveFindings} they do NOT run inline — the
+ * originating ticket has already committed; the follow-up is the next ready
+ * work. Persists state; returns the written ticket states (empty when the
+ * findings carry no MAJOR, or when the origin is itself a follow-up: a
+ * follow-up that soft-passes records its residual but never chains another
+ * follow-up).
+ */
+export async function scheduleReviewFollowUps(
+  state: RunState,
+  ledger: string,
+  findings: string[],
+  originTitle: string,
+): Promise<TicketState[]> {
+  if (originTitle.startsWith(REVIEW_FOLLOWUP_TITLE)) return [];
+  const plan = generateReviewFollowUpTickets(findings);
+  if (plan.length === 0) return [];
+  const written = await writeCorrectiveTickets(state, plan);
+  const insertAt = state.tickets.findIndex((t) => t.status === "ready" || t.status === "in_progress");
+  const at = insertAt === -1 ? state.tickets.length : insertAt;
+  state.tickets.splice(at, 0, ...written);
+  await writeState(ledger, state);
+  console.log(`[${nowClock()}] review: residual MAJOR finding(s) scheduled as ${written.length} follow-up ticket(s)`);
+  return written;
+}
+
+/**
  * The corrective-ticket seam every review gate funnels through. Given a FAIL
  * verdict's findings, it filters the [BLOCKER]s, generates corrective tickets
  * (or uses the reviewer's $CORRECTIVE suggestions), writes the ticket files

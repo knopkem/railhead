@@ -881,15 +881,32 @@ function ticketsFromJson(candidate: string): PlanTicket[] {
   return tickets;
 }
 
-/** Whether every `earlier` ticket's title-slug (the same slugify `orderTickets`
- * and the duplicate-slug scan use) appears among `later`'s titles: the later
- * array re-states the whole earlier set, which is the signature of a
- * mid-session REVISION (the model re-emitted its plan in different words)
- * rather than a plan continued across messages. */
-function everyEarlierTitleRepeated(earlier: PlanTicket[], later: PlanTicket[]): boolean {
+/** Case- and punctuation-insensitive title key for revision matching. The
+ * exact `titleSlug` comparison missed a reworded re-emit (SpriteForge
+ * `replan-core-engine`: 16 titles restated with tiny wording differences —
+ * "all 8 tools" vs "all tools" — merged additively into a 32-ticket frontier,
+ * consuming numbers 24-55 before a later capacity split renumbered at 56). */
+function revisionKey(title: string): string {
+  return title.toLowerCase().replace(/[^a-z]+/g, " ").trim();
+}
+
+/** Fraction of the earlier region's titles that must reappear in the later
+ * region for it to read as a revision rather than a continuation. Every
+ * restated title is the old signature and still matches; a genuine
+ * continuation (a plan too large for one message) appends NEW titles, so only
+ * a small overlap is expected. */
+const REVISION_MATCH_RATIO = 0.75;
+
+/** Whether the later `$TICKETS` region re-states the earlier set — the
+ * signature of a mid-session REVISION (the model re-emitted its plan in
+ * different words) rather than a plan continued across messages. Matching is
+ * normalized (see {@link revisionKey}) and tolerant of a few reworded titles,
+ * because a full re-emit is exactly where wording drifts. */
+function looksLikeRevision(earlier: PlanTicket[], later: PlanTicket[]): boolean {
   if (earlier.length === 0 || later.length === 0) return false;
-  const laterSlugs = new Set(later.map((t) => titleSlug(t.title)));
-  return earlier.every((t) => laterSlugs.has(titleSlug(t.title)));
+  const laterKeys = new Set(later.map((t) => revisionKey(t.title)));
+  const matched = earlier.filter((t) => laterKeys.has(revisionKey(t.title))).length;
+  return matched >= Math.ceil(earlier.length * REVISION_MATCH_RATIO);
 }
 
 /** Issue #104: the parse result plus the reconciliation it performed.
@@ -942,7 +959,7 @@ export function parsePlanRegions(text: string): PlanParseOutcome {
   for (let i = 1; i < regions.length; i++) {
     const later = ticketsFromJson(regions[i]);
     const laterCount = countTicketObjects(regions[i]);
-    if (everyEarlierTitleRepeated(kept, later)) {
+    if (looksLikeRevision(kept, later)) {
       collapsed += kept.length;
       kept = later;
       expected = laterCount;

@@ -754,6 +754,15 @@ export const DEFAULT_MAX_STEP_MODEL_SEC = 3600;
  */
 export const DEFAULT_VISUAL_ROUND_WALL_SEC = 3600;
 
+/** Wall-clock ceiling on one interaction-smoke phase (issue #96 discipline for
+ * the boundary smoke). The smoke drives a real browser/server pair with real
+ * input; a wedged or crawling target can burn twenty minutes without ever
+ * tripping the silence stall timer (the spriteforge run: seven smokes,
+ * 6–23 min each, ~1.3h total). One hour is the visual round's safety-net shape:
+ * it does not discriminate, it bounds. The visual round wall, when configured,
+ * is honored first — both are "inspect the running app" rounds. */
+export const DEFAULT_INTERACTION_SMOKE_WALL_SEC = 3600;
+
 /** gh #116: fallback for `goal_review.max_replans`. Two is enough to recover
  * from a plan that was wrong in two distinct ways; beyond that a repeated
  * `$REPLAN` is more likely a reviewer stuck in a loop than a fresh plan-level

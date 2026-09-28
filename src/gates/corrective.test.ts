@@ -8,8 +8,10 @@ import { numberTickets, toTicketState, writeTickets, type Ticket } from "../core
 import { DEFAULT_CONFIG } from "../config/config.ts";
 import {
   generateCorrectiveTickets,
+  generateReviewFollowUpTickets,
   nextTicketNumber,
   processCorrectiveFindings,
+  scheduleReviewFollowUps,
   type CorrectiveKind,
 } from "./corrective.ts";
 import type { PlanTicket } from "../core/ticket.ts";
@@ -173,6 +175,51 @@ describe("nextTicketNumber", () => {
     const tickets = [planned("01-a.md"), planned("02-b.md"), planned("05-c.md")];
     const { state } = await makeRailhead(tickets, { committed: ["01-a.md"], ready: ["02-b.md", "05-c.md"] });
     expect(nextTicketNumber(state)).toBe(6);
+  });
+});
+
+describe("generateReviewFollowUpTickets — residual MAJORs become next-priority work", () => {
+  it("packs every MAJOR finding into one follow-up ticket, dropping minors", () => {
+    const out = generateReviewFollowUpTickets([
+      "[MAJOR] compositeFrame ignores layer opacity (src/render/viewport.ts:67)",
+      "[MINOR] naming nit",
+      "[MAJOR] slider clamps at 100 not 1 (src/ui/primitives/Slider.ts)",
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].title).toContain("Review follow-up:");
+    expect(out[0].what).toContain("compositeFrame ignores layer opacity");
+    expect(out[0].what).toContain("slider clamps at 100");
+    expect(out[0].what).not.toContain("naming nit");
+  });
+
+  it("returns [] when no finding is a MAJOR", () => {
+    expect(generateReviewFollowUpTickets(["[MINOR] nit"])).toEqual([]);
+    expect(generateReviewFollowUpTickets([])).toEqual([]);
+  });
+});
+
+describe("scheduleReviewFollowUps — writes before the remaining frontier", () => {
+  it("inserts the follow-up ahead of the next ready planned ticket", async () => {
+    const { state, ledger } = await makeRailhead(chainFixture(), {
+      committed: ["01-scaffold.md"],
+      ready: ["02-core.md", "03-player.md", "04-gameplay.md"],
+    });
+    const written = await scheduleReviewFollowUps(state, ledger, ["[MAJOR] the gap"], "Build the thing");
+    expect(written).toHaveLength(1);
+    expect(written[0].number).toBe("05");
+    // The follow-up is now the first ready ticket, ahead of every planned one.
+    const firstReady = state.tickets.find((t) => t.status === "ready")!;
+    expect(firstReady.file).toBe(written[0].file);
+    expect(state.tickets.find((t) => t.file === "02-core.md")!.status).toBe("ready");
+  });
+
+  it("writes nothing for a minors-only residual", async () => {
+    const { state, ledger } = await makeRailhead(chainFixture(), {
+      committed: ["01-scaffold.md"],
+      ready: ["02-core.md"],
+    });
+    expect(await scheduleReviewFollowUps(state, ledger, ["[MINOR] nit"], "Build the thing")).toEqual([]);
+    expect(state.tickets).toHaveLength(4);
   });
 });
 

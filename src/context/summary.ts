@@ -29,7 +29,7 @@ export function contextPressureLine(
   const named = compacted.map((t) => `${t.number} (${t.context!.compactions} compaction${t.context!.compactions === 1 ? "" : "s"})`).join(", ");
   const spiral = compacted.some((t) => t.context!.compactions >= SPIRAL_COMPACTION_THRESHOLD);
   return spiral
-    ? `Context pressure: ${named} — a ticket that compacts twice does not fit the model's context window; split it finer or raise max_context_tokens for this seat.`
+    ? `Context pressure: ${named} — repeated compaction. Compaction with worktree progress is normal durable-session fill; only a session that also moved nothing is split automatically, so treat this as sizing feedback, not a verdict.`
     : `Context pressure: ${named} — tolerable, but the window filled once; watch for growth on later tickets.`;
 }
 

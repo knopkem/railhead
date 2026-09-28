@@ -35,7 +35,8 @@ export interface ReviewStressInput {
   /** ADR 0040: criteria the builder could not verify with its own tools. */
   unverified: boolean;
   /** A replan/capacity split regenerated the frontier since the last review
-   * decision (armed where `state.replan_count` increments). */
+   * decision (armed where `state.replan_count`/`state.capacity_replans`
+   * increment). */
   replanArmed: boolean;
 }
 

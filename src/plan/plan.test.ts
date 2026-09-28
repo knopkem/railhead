@@ -786,6 +786,36 @@ describe("issue #104 — reconcile a doubled $TICKETS array", () => {
     expect(tickets.map((t) => t.title)).toEqual(["A", "B", "C", "B", "D"]);
   });
 
+  it("a reworded full re-emit is a revision, not a doubled plan (spriteforge replan-core-engine)", () => {
+    // The real shape: the planner restated all 16 titles in slightly different
+    // words ("all 8 tools" → "all tools"), the exact-slug test failed, and the
+    // two regions merged into a 32-ticket frontier (numbers 24-55).
+    const draft = [
+      { title: "Palette module green: 16-color default, ≥2 presets, per-edit ops", what: "draft" },
+      { title: "Tool rail: vertical palette of all 8 tools with active-state highlighting", what: "draft" },
+      { title: "Viewport + nearest-neighbor upscale render", what: "draft" },
+      { title: "Completion + final verification", what: "draft" },
+    ];
+    const reworded = [
+      { title: "Palette module green: 16-color default, 2 presets, per-edit ops", what: "final" },
+      { title: "Tool rail: vertical palette of all tools with active-state highlighting", what: "final" },
+      { title: "Viewport + nearest-neighbor upscale render", what: "final" },
+      { title: "COMPLETION.md + final gate verification of the whole product", what: "final" },
+    ];
+    const { tickets, collapsed } = parsePlanRegions(`$TICKETS\n${arr(draft)}\n$TICKETS\n${arr(reworded)}`);
+    expect(collapsed).toBe(4);
+    expect(tickets).toHaveLength(4);
+    expect(tickets.every((t) => t.what === "final")).toBe(true);
+  });
+
+  it("an overlap below the revision threshold stays additive", () => {
+    const earlier = [{ title: "Alpha", what: "w" }, { title: "Beta", what: "w" }, { title: "Gamma", what: "w" }];
+    const later = [{ title: "Alpha", what: "w2" }, { title: "Beta", what: "w2" }];
+    const { tickets, collapsed } = parsePlanRegions(`$TICKETS\n${arr(earlier)}\n$TICKETS\n${arr(later)}`);
+    expect(collapsed).toBe(0);
+    expect(tickets).toHaveLength(5);
+  });
+
   it("three drafts reconcile to the final one", () => {
     const d1 = [{ title: "A", what: "1" }, { title: "B", what: "1" }];
     const d2 = [{ title: "A", what: "2" }, { title: "B", what: "2" }, { title: "C", what: "2" }];
