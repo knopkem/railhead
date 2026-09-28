@@ -6,6 +6,7 @@ import { buildContractExtractFilePrompt } from "../context/prompt.ts";
 import { joinPhaseMessages } from "../context/preamble.ts";
 import { RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
 import { describeExecFailure, executeFreshPhase, startPersistentWorker, stopPersistentWorker } from "./executor.ts";
+import { guardReadOnlyPhase } from "./read-only-guard.ts";
 import { extractAssistantText } from "../core/ledger.ts";
 import { seatContextBudget } from "../config/config.ts";
 import { withFailureLadderOnThrow } from "./failure-ladder.ts";
@@ -257,19 +258,21 @@ async function extractUnhandledFiles(
     if (!hasPublicSurface(file, content)) continue;
     const phaseFile = `${ticket.number}-contracts-${file.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 40)}`;
     const prompt = buildContractExtractFilePrompt(file, content);
-    const result = await executeFreshPhase(joinPhaseMessages(prompt), {
-      cwd: state.cwd,
-      ledgerDir: ledger,
-      phaseFile,
-      model,
-      agent: RAILHEAD_AGENT_NAMES.review,
-      live: !state.quiet, verbose: state.verbose,
-      livePrefix: `${ticket.number} contracts ${file}`,
-      maxSteps: EXTRACT_MAX_STEPS,
-      stallTimeoutSec: state.config.stall_timeout_sec,
-      maxStepModelSec: state.config.max_step_model_sec,
-      maxContextTokens: seatContextBudget(state, "extract"),
-    });
+    const result = await guardReadOnlyPhase(state.cwd, ledger, phaseFile, "contract extract", () =>
+      executeFreshPhase(joinPhaseMessages(prompt), {
+        cwd: state.cwd,
+        ledgerDir: ledger,
+        phaseFile,
+        model,
+        agent: RAILHEAD_AGENT_NAMES.review,
+        live: !state.quiet, verbose: state.verbose,
+        livePrefix: `${ticket.number} contracts ${file}`,
+        maxSteps: EXTRACT_MAX_STEPS,
+        stallTimeoutSec: state.config.stall_timeout_sec,
+        maxStepModelSec: state.config.max_step_model_sec,
+        maxContextTokens: seatContextBudget(state, "extract"),
+      }),
+    );
     if (result.status === "transient") throw new Error(`contract extract ${file}: ${describeExecFailure(result)}`);
     if (result.status === "ok") {
       const text = await extractAssistantText(ledger, phaseFile);

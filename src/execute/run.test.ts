@@ -95,10 +95,12 @@ function okResult(steps = 1, toolCalls = 1) {
 }
 
 /** Identify which kind of phase a mocked executeOpendCode call represents, purely from the options run.ts passes — mirrors how a human reading the ledger would tell them apart. */
-function kindOf(options: { phaseFile: string; agent?: string | null }): "base" | "review" | "contracts" | "implement" | "visual" | "test" | "goal" | "structural" | "replan" | "reconcile" | "interact" | "handoff" {
+function kindOf(options: { phaseFile: string; agent?: string | null }): "base" | "review" | "contracts" | "implement" | "extract" | "visual" | "test" | "goal" | "structural" | "replan" | "reconcile" | "interact" | "handoff" {
   // The contract-extract fallback now runs on the tool-denied review seat, so
   // its phase file must be classified before the agent-name branch below.
   if (options.phaseFile.includes("-contracts")) return "contracts";
+  // Pure text-in/text-out phases run on the tool-less extract seat.
+  if (options.phaseFile.endsWith("-summarize") || options.phaseFile.endsWith("-consolidate")) return "extract";
   // Issue #133: the base-session call is not a ticket phase — classify it so
   // scripted mocks keyed on phase kind never treat it as implement/review.
   if (options.agent === "railhead-base" || options.phaseFile === "base-session") return "base";
@@ -521,6 +523,42 @@ describe("processTicket", () => {
     expect(buildPrompts[2]).toContain("Attempt history (what already happened on this ticket)");
     expect(buildPrompts[2]).toContain("invocation 3");
     expect(buildPrompts[2]).toContain("no checkpoint marker");
+  });
+
+  it("verify-failure summarization runs on the tool-less extract seat", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      // A verify that prints > SUMMARIZE_THRESHOLD_CHARS and fails, so the
+      // summarize phase actually fires.
+      verify: ["node -e \"console.log('x'.repeat(9000)); process.exit(1)\""],
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: DEFAULT_MODEL, visual: null, goal: null, extract: "extract-model" },
+    });
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+
+    const extractAgents: (string | null | undefined)[] = [];
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "$CHECKPOINT ticket=01");
+        return { ...okResult(), sessionId: "sess-1", checkpointTicket: "01" };
+      }
+      if (kind === "extract") {
+        extractAgents.push(options.agent);
+        await emitText(ledgerDir, options.phaseFile, "<summary>boom</summary>");
+      }
+      return okResult();
+    });
+
+    await processTicket(state, ledgerDir, ticketState);
+
+    expect(extractAgents.length).toBeGreaterThan(0);
+    expect(extractAgents.every((a) => a === "railhead-extract")).toBe(true);
   });
 
   it("contracts: regex extracts greet without calling the model (model fallback skipped)", async () => {
@@ -4478,6 +4516,7 @@ describe("session builder (issue #95)", () => {
     const buildSessions: (string | null | undefined)[] = [];
     const handoffSessions: (string | null | undefined)[] = [];
     const replanPrompts: string[] = [];
+    const replanAgents: (string | null | undefined)[] = [];
     let builds = 0;
     mockExec.mockImplementation(async (prompt, options) => {
       const kind = kindOf(options);
@@ -4501,6 +4540,7 @@ describe("session builder (issue #95)", () => {
       }
       if (kind === "replan") {
         replanPrompts.push(prompt);
+        replanAgents.push(options.agent);
         await emitText(ledgerDir, options.phaseFile, '$TICKETS\n[{"title":"Scaffold greet","what":"land the greet module","criteria":["exists"],"open_ended":false},{"title":"Wire main","what":"call greet from main","criteria":["calls greet"],"open_ended":false}]');
         return okResult();
       }
@@ -4526,6 +4566,8 @@ describe("session builder (issue #95)", () => {
     expect(handoffSessions).toEqual(["sess-spiral"]);
     expect(buildSessions[1]).toBeNull();
     expect(replanPrompts).toHaveLength(1);
+    // The replanner inspects, never writes: the read-only seat.
+    expect(replanAgents).toEqual(["railhead-readonly"]);
     expect(replanPrompts[0]).toContain("capacity failure");
     expect(replanPrompts[0]).toContain("Handoff from the interrupted session");
     expect(replanPrompts[0]).toContain("greet scaffold landed");

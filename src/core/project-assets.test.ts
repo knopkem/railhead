@@ -3,6 +3,8 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, expect } from "vitest";
 import {
+  RAILHEAD_AGENTS,
+  RAILHEAD_AGENT_NAMES,
   RAILHEAD_IGNORES,
   ensureProjectGitignore,
   frameworkIgnoreForVerify,
@@ -644,5 +646,34 @@ describe("findForeignTrackedPaths", () => {
     const cwd = await makeCwd();
     await writeFile(join(cwd, "main.rs"), "", "utf8");
     expect(await findForeignTrackedPaths(cwd)).toEqual([]);
+  });
+});
+
+describe("write-denied seats (railhead agent permissions)", () => {
+  it("the read-only planning seat searches but cannot write or run shell", () => {
+    const perm = RAILHEAD_AGENTS[RAILHEAD_AGENT_NAMES.readonly]!.permission!;
+    expect(perm["*"]).toBe("deny");
+    expect(perm.read).toEqual({ "*": "allow", "mcp:*": "deny" });
+    expect(perm.grep).toBe("allow");
+    expect(perm.glob).toBe("allow");
+    expect(perm.list).toBe("allow");
+    // A catch-all deny means bash, write, edit, and patch are all denied.
+    expect(perm.bash).toBeUndefined();
+    expect(perm.write).toBeUndefined();
+    expect(perm.edit).toBeUndefined();
+  });
+
+  it("the extraction seat is tool-less", () => {
+    const perm = RAILHEAD_AGENTS[RAILHEAD_AGENT_NAMES.extract]!.permission!;
+    expect(perm).toEqual({ "*": "deny" });
+  });
+
+  it("the probe seat allows only reads and browser capture tools", () => {
+    const perm = RAILHEAD_AGENTS[RAILHEAD_AGENT_NAMES.probe]!.permission!;
+    expect(perm["*"]).toBe("deny");
+    expect(perm.read).toEqual({ "*": "allow", "mcp:*": "deny" });
+    expect(perm["chrome-devtools_*"]).toBe("allow");
+    expect(perm.write).toBeUndefined();
+    expect(perm.bash).toBeUndefined();
   });
 });

@@ -135,6 +135,55 @@ export const RAILHEAD_BASE_AGENT: RailheadAgent = {
   prompt: RAILHEAD_AGENT_PROMPT,
 };
 
+/** The read-only planning seat (mid-run replans). A replan re-derives tickets
+ * from context the railhead already assembled (contracts, digest, worktree,
+ * handoff) and may inspect the repo — but it must never write. Mid-run it runs
+ * against a dirty worktree, and a write tool there is the contract-extractor
+ * accident class: a "list the contracts" phase implemented the remaining
+ * tickets and its writes were swept into the next commit. Read, search, and
+ * list only; no bash (a shell can write), no write/edit/patch. */
+export const RAILHEAD_READONLY_AGENT: RailheadAgent = {
+  description:
+    "Read-only planning/replanning seat for the Railhead. Reads and searches the repo — never edits, runs commands, or writes.",
+  mode: "primary",
+  permission: {
+    "*": "deny",
+    read: { "*": "allow", "mcp:*": "deny" },
+    grep: "allow",
+    glob: "allow",
+    list: "allow",
+  },
+  prompt: RAILHEAD_AGENT_PROMPT,
+};
+
+/** The tool-less extraction seat (output summarization, learnings
+ * consolidation): pure text-in/text-out single-shot calls. Every tool is
+ * denied — the material the model needs is already in the prompt. */
+export const RAILHEAD_EXTRACT_AGENT: RailheadAgent = {
+  description:
+    "Text-only extraction seat for the Railhead. Every tool is denied — the prompt carries all the material.",
+  mode: "primary",
+  permission: {
+    "*": "deny",
+  },
+  prompt: RAILHEAD_AGENT_PROMPT,
+};
+
+/** The vision-probe seat: opens a browser page, captures a screenshot, and
+ * reads the PNG back. It needs exactly those tools — reads and the browser MCP
+ * the probe prompt names — and nothing that can modify the project. */
+export const RAILHEAD_PROBE_AGENT: RailheadAgent = {
+  description:
+    "Vision-probe seat for the Railhead. Browser capture + image read; every other tool is denied.",
+  mode: "primary",
+  permission: {
+    "*": "deny",
+    read: { "*": "allow", "mcp:*": "deny" },
+    "chrome-devtools_*": "allow",
+  },
+  prompt: RAILHEAD_AGENT_PROMPT,
+};
+
 /** The `--agent <name>` values, in one place: call sites and the injected
  * config both key off these, so a seat name can never drift between the
  * runner and the agent definition. */
@@ -144,6 +193,9 @@ export const RAILHEAD_AGENT_NAMES = {
   reviewReadmode: "railhead-review-readmode",
   observe: "railhead-observe",
   base: "railhead-base",
+  readonly: "railhead-readonly",
+  extract: "railhead-extract",
+  probe: "railhead-probe",
 } as const;
 
 /**
@@ -158,6 +210,9 @@ export const RAILHEAD_AGENTS: Record<string, RailheadAgent> = {
   [RAILHEAD_AGENT_NAMES.reviewReadmode]: RAILHEAD_REVIEW_READMODE_AGENT,
   [RAILHEAD_AGENT_NAMES.observe]: RAILHEAD_OBSERVE_AGENT,
   [RAILHEAD_AGENT_NAMES.base]: RAILHEAD_BASE_AGENT,
+  [RAILHEAD_AGENT_NAMES.readonly]: RAILHEAD_READONLY_AGENT,
+  [RAILHEAD_AGENT_NAMES.extract]: RAILHEAD_EXTRACT_AGENT,
+  [RAILHEAD_AGENT_NAMES.probe]: RAILHEAD_PROBE_AGENT,
 };
 
 export function railheadAgentConfig(): { agent: Record<string, RailheadAgent> } {

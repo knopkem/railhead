@@ -7,6 +7,8 @@ import { parsePlanJson, ticketSizeRule } from "../plan/plan.ts";
 import { numberTickets, toTicketState, renderTicket, type PlanTicket } from "../core/ticket.ts";
 import { resetPhase, writeState, extractPlanText } from "../core/ledger.ts";
 import { describeExecFailure, executeOpendCode } from "../execute/executor.ts";
+import { guardReadOnlyPhase } from "../execute/read-only-guard.ts";
+import { RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
 import { DEFAULT_MAX_REPLANS, seatContextBudget } from "../config/config.ts";
 import { loadContracts, summarizeContracts } from "../core/contracts.ts";
 import { readDigest } from "../context/digest.ts";
@@ -172,21 +174,27 @@ async function runReplanPhase(
 
   const phaseFile = `replan-${phaseLabel.replace(/[^a-z0-9-]/gi, "-")}`;
   await resetPhase(ledger, phaseFile);
-  const result = await executeOpendCode(prompt, {
-    cwd: state.cwd,
-    ledgerDir: ledger,
-    phaseFile,
-    model: planModel,
-    agent: null,
-    live: !state.quiet,
-    verbose: state.verbose,
-    heartbeat: true,
-    livePrefix: "replan",
-    maxSteps: state.config.max_phase_steps,
-    stallTimeoutSec: state.config.stall_timeout_sec,
-    maxStepModelSec: state.config.max_step_model_sec,
-    maxContextTokens: seatContextBudget(state, "plan"),
-  });
+  // The replanner re-derives tickets from context the railhead already
+  // assembled; it inspects, never writes. A mid-run replan runs against a
+  // dirty worktree, and the contract-extractor incident showed what a
+  // write-capable "text task" agent does with the mission in context.
+  const result = await guardReadOnlyPhase(state.cwd, ledger, phaseFile, "replan", () =>
+    executeOpendCode(prompt, {
+      cwd: state.cwd,
+      ledgerDir: ledger,
+      phaseFile,
+      model: planModel,
+      agent: RAILHEAD_AGENT_NAMES.readonly,
+      live: !state.quiet,
+      verbose: state.verbose,
+      heartbeat: true,
+      livePrefix: "replan",
+      maxSteps: state.config.max_phase_steps,
+      stallTimeoutSec: state.config.stall_timeout_sec,
+      maxStepModelSec: state.config.max_step_model_sec,
+      maxContextTokens: seatContextBudget(state, "plan"),
+    }),
+  );
 
   if (result.status === "transient") {
     throw new Error(`replan: ${describeExecFailure(result)}`);

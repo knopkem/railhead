@@ -12,7 +12,7 @@ The engine: run orchestration, opencode subprocess lifecycle, verification, retr
 - `provider-health.ts` — the operator-declared provider probe (#134): `configureProvider`/`setProviderHealth` install it at run/plan start, every phase probes before spawning, an unhealthy verdict fast-fails as transient into the ladder instead of the stall guard. The disabled-timeout warning is scoped to the providers the resolved seats actually reach (`usedModelRefs`). A fail→ok transition logs the cold-cache line (sessions persist; only the prefix cache is cold). Undeclared = no probe, today's behavior.
 - `stop.ts` — Ctrl-C semantics (ADR 0037): soft stop finishes the in-flight ticket's gate, `hardStopRequested` kills now. Signal handling lives here only.
 - `verify.ts` / `smoke.ts` — run the project's commands with timeouts; `output-compress.ts` compresses their output.
-- `guard.ts`, `diff-filter.ts`, `token-meter.ts`, `contract-extract.ts`, `reconcile.ts`, `builder-loop.ts`, `builder-units.ts`, `vision-probe.ts` — permission guard, diff shaping, context metering, contract index update, spec reconcile, builder recovery/routing, measured vision probe.
+- `guard.ts`, `diff-filter.ts`, `token-meter.ts`, `contract-extract.ts`, `reconcile.ts`, `builder-loop.ts`, `builder-units.ts`, `vision-probe.ts`, `read-only-guard.ts` — permission guard, diff shaping, context metering, contract index update, spec reconcile, builder recovery/routing, measured vision probe, and the write-denied-phase guard (records a `worktree.changed` event when a seat without write tools mutates the tree anyway).
 
 ## Invariants
 

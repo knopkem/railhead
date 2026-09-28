@@ -313,9 +313,11 @@ export function isClean(cwd: string): Promise<boolean> {
  * Porcelain v1 lines are `XY <path>`; a rename line is `XY <old> -> <new>`
  * and reports the destination (the path that exists now). Quoted paths (git
  * quotes non-ASCII/escaped names) are unquoted so callers can compare them to
- * ordinary repo-relative paths. */
+ * ordinary repo-relative paths. `-uall` lists untracked files individually
+ * instead of collapsing a wholly-untracked directory to `dir/`, so out-of-scope
+ * change reports name the files a phase actually wrote. */
 export async function dirtyPaths(cwd: string): Promise<string[]> {
-  const out = await git(cwd, ["status", "--porcelain"]);
+  const out = await git(cwd, ["status", "--porcelain", "-uall"]);
   return out
     .split("\n")
     .filter((l) => l.length > 3)

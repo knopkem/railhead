@@ -1,6 +1,8 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describeExecFailure, executeOpendCode } from "../execute/executor.ts";
+import { guardReadOnlyPhase } from "../execute/read-only-guard.ts";
+import { RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
 import { SPIRAL_COMPACTION_THRESHOLD } from "../execute/failure-ladder.ts";
 import { extractAssistantText } from "../core/ledger.ts";
 import { seatContextBudget } from "../config/config.ts";
@@ -94,18 +96,23 @@ export async function summarizeIfNeeded(
   const extractModel = state._models?.extract ?? null;
   if (extractModel === null) return blob;
   const prompt = buildOutputSummaryPrompt(blob, kind);
-  const result = await executeOpendCode(prompt, {
-    cwd: state.cwd,
-    ledgerDir: ledger,
-    phaseFile,
-    model: extractModel,
-    live: false, verbose: state.verbose,
-    heartbeat: false,
-    maxSteps: state.config.max_phase_steps,
-    stallTimeoutSec: state.config.stall_timeout_sec,
-    maxStepModelSec: state.config.max_step_model_sec,
-    maxContextTokens: seatContextBudget(state, "extract"),
-  });
+  // Pure text-in/text-out: the extract seat has no tools, and the guard
+  // records any worktree change if one still happens.
+  const result = await guardReadOnlyPhase(state.cwd, ledger, phaseFile, "summarize", () =>
+    executeOpendCode(prompt, {
+      cwd: state.cwd,
+      ledgerDir: ledger,
+      phaseFile,
+      model: extractModel,
+      agent: RAILHEAD_AGENT_NAMES.extract,
+      live: false, verbose: state.verbose,
+      heartbeat: false,
+      maxSteps: state.config.max_phase_steps,
+      stallTimeoutSec: state.config.stall_timeout_sec,
+      maxStepModelSec: state.config.max_step_model_sec,
+      maxContextTokens: seatContextBudget(state, "extract"),
+    }),
+  );
   if (result.status === "transient") throw new Error(`summarize: ${describeExecFailure(result)}`);
   if (result.status !== "ok") return blob;
   const transcript = await extractAssistantText(ledger, phaseFile);
@@ -156,18 +163,21 @@ export async function writeRunSummary(state: RunState, ledger: string): Promise<
   );
   const prompt = buildRunSummaryPrompt(ticketSummaries);
   const summaryPhase = "run-summary";
-  const result = await executeOpendCode(prompt, {
-    cwd: state.cwd,
-    ledgerDir: ledger,
-    phaseFile: summaryPhase,
-    model: extractModel,
-    live: !state.quiet, verbose: state.verbose,
-    heartbeat: false,
-    maxSteps: state.config.max_phase_steps,
-    stallTimeoutSec: state.config.stall_timeout_sec,
-    maxStepModelSec: state.config.max_step_model_sec,
-    maxContextTokens: seatContextBudget(state, "extract"),
-  });
+  const result = await guardReadOnlyPhase(state.cwd, ledger, summaryPhase, "run summary", () =>
+    executeOpendCode(prompt, {
+      cwd: state.cwd,
+      ledgerDir: ledger,
+      phaseFile: summaryPhase,
+      model: extractModel,
+      agent: RAILHEAD_AGENT_NAMES.extract,
+      live: !state.quiet, verbose: state.verbose,
+      heartbeat: false,
+      maxSteps: state.config.max_phase_steps,
+      stallTimeoutSec: state.config.stall_timeout_sec,
+      maxStepModelSec: state.config.max_step_model_sec,
+      maxContextTokens: seatContextBudget(state, "extract"),
+    }),
+  );
   if (result.status === "transient") throw new Error(`run summary: ${describeExecFailure(result)}`);
   if (result.status !== "ok") return;
   const transcript = await extractAssistantText(ledger, summaryPhase);

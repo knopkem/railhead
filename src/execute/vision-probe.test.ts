@@ -38,13 +38,15 @@ type Behavior = "see" | "blind" | "noread" | "inconclusive";
 let probeBehavior: Behavior = "see";
 let probeQueue: Behavior[] = [];
 let probeCalls = 0;
+let probeAgents: (string | null | undefined)[] = [];
 
 vi.mock("./executor.ts", async (importOriginal) => {
   const mod = await importOriginal<typeof import("./executor.ts")>();
   return {
     ...mod,
-    executeOpendCode: async (_prompt: string, options: { cwd: string; ledgerDir: string; phaseFile: string }) => {
+    executeOpendCode: async (_prompt: string, options: { cwd: string; ledgerDir: string; phaseFile: string; agent?: string | null }) => {
       probeCalls++;
+      probeAgents.push(options.agent);
       const behavior = probeQueue.shift() ?? probeBehavior;
       const imagePath = join(options.cwd, ".railhead", "vision-probe", "probe.png");
       const png = await readFile(imagePath);
@@ -122,6 +124,7 @@ beforeEach(() => {
   probeBehavior = "see";
   probeQueue = [];
   probeCalls = 0;
+  probeAgents = [];
 });
 
 describe("randomProbeSpec", () => {
@@ -441,12 +444,14 @@ describe("ensureVisionForGates", () => {
     expect(records[0]!.reads_images).toBe(true);
   });
 
-  it("returns no refusals when the seat model reads the probe first try", async () => {
+  it("returns no refusals when the seat model reads the probe first try, on the write-denied probe seat", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "vision-probe-"));
     const { records, refusals } = await ensureVisionForGates({ cwd, requests: [{ gate: "visual", model: "test/model" }] });
     expect(probeCalls).toBe(1);
     expect(refusals).toEqual([]);
     expect(records[0]!.reads_images).toBe(true);
+    // Browser capture + read only; the probe can never edit the project.
+    expect(probeAgents).toEqual(["railhead-probe"]);
   });
 
   it("records a probe that never received an image as inconclusive, not as a blind model", async () => {

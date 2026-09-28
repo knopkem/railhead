@@ -2,6 +2,8 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { describeExecFailure, executeOpendCode } from "../execute/executor.ts";
+import { guardReadOnlyPhase } from "../execute/read-only-guard.ts";
+import { RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
 import { extractAssistantText } from "../core/ledger.ts";
 import { seatContextBudget } from "../config/config.ts";
 import type { RunState } from "../core/state.ts";
@@ -420,18 +422,21 @@ async function mergeLearnings(
   if (extractModel !== null && overBudget) {
     const consolPhaseFile = `${phaseLabel}-consolidate`;
     const consolPrompt = buildConsolidationPrompt(existing!, newLearnings);
-    const consolResult = await executeOpendCode(consolPrompt, {
-      cwd: state.cwd,
-      ledgerDir: ledger,
-      phaseFile: consolPhaseFile,
-      model: extractModel,
-      live: false,
-      verbose: state.verbose,
-      maxSteps: 5,
-      stallTimeoutSec: state.config.stall_timeout_sec,
-      maxStepModelSec: state.config.max_step_model_sec,
-      maxContextTokens: seatContextBudget(state, "extract"),
-    });
+    const consolResult = await guardReadOnlyPhase(state.cwd, ledger, consolPhaseFile, "learnings consolidate", () =>
+      executeOpendCode(consolPrompt, {
+        cwd: state.cwd,
+        ledgerDir: ledger,
+        phaseFile: consolPhaseFile,
+        model: extractModel,
+        agent: RAILHEAD_AGENT_NAMES.extract,
+        live: false,
+        verbose: state.verbose,
+        maxSteps: 5,
+        stallTimeoutSec: state.config.stall_timeout_sec,
+        maxStepModelSec: state.config.max_step_model_sec,
+        maxContextTokens: seatContextBudget(state, "extract"),
+      }),
+    );
     if (consolResult.status === "transient") throw new Error(`learnings consolidate: ${describeExecFailure(consolResult)}`);
     if (consolResult.status === "ok") {
       const merged = (await extractAssistantText(ledger, consolPhaseFile)).trim();

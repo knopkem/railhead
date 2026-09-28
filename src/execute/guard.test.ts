@@ -42,7 +42,10 @@ describe("guardedEnv", () => {
     expect(Object.keys(cfg.agent).sort()).toEqual([
       "railhead-base",
       "railhead-build",
+      "railhead-extract",
       "railhead-observe",
+      "railhead-probe",
+      "railhead-readonly",
       "railhead-review",
       "railhead-review-readmode",
     ]);
@@ -65,6 +68,14 @@ describe("guardedEnv", () => {
     // ledger denies (agent rules are matched last).
     expect(cfg.agent["railhead-build"].permission).toBeUndefined();
     expect(cfg.agent["railhead-observe"].permission).toBeUndefined();
+    // Write-denied seats: the mid-run planner may read/search but never
+    // write or shell; extraction is tool-less; the probe gets only reads and
+    // browser capture.
+    expect(cfg.agent["railhead-readonly"].permission!["*"]).toBe("deny");
+    expect(cfg.agent["railhead-readonly"].permission!.read).toEqual({ "*": "allow", "mcp:*": "deny" });
+    expect(cfg.agent["railhead-readonly"].permission!.bash).toBeUndefined();
+    expect(cfg.agent["railhead-extract"].permission).toEqual({ "*": "deny" });
+    expect(cfg.agent["railhead-probe"].permission!["chrome-devtools_*"]).toBe("allow");
   });
 
   it("gives every railhead agent the byte-identical shared system prompt", () => {

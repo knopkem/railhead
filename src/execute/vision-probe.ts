@@ -26,6 +26,8 @@ import { DEFAULT_MODEL, type GateMode } from "../config/config.ts";
 import { executeOpendCode } from "./executor.ts";
 import { eventPath, extractAssistantText, initLedger, ledgerDir, resetPhase } from "../core/ledger.ts";
 import { parseToolCalls, toolResultContainsImage } from "../gates/evidence.ts";
+import { RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
+import { guardReadOnlyPhase } from "./read-only-guard.ts";
 
 export const PROBE_VERSION = 2;
 export const ANSWER_MARKER = "VISION_PROBE_ANSWER";
@@ -234,20 +236,24 @@ async function runProbeAttempt(options: VisionProbeOptions, model: string | null
   const phaseFile = "vision-probe";
   await resetPhase(dir, phaseFile);
 
-  const result = await executeOpendCode(probePrompt(imagePath), {
-    cwd,
-    ledgerDir: dir,
-    phaseFile,
-    model,
-    agent: null,
-    live: true,
-    verbose: false,
-    heartbeat: true,
-    livePrefix: "vision-probe",
-    maxSteps: options.maxSteps ?? 12,
-    stallTimeoutSec: options.stallTimeoutSec ?? 120,
-    maxContextTokens: options.maxContextTokens ?? 32000,
-  });
+  // The probe needs exactly browser capture + read; everything else — including
+  // write — is denied, and the guard records a worktree change if one happens.
+  const result = await guardReadOnlyPhase(cwd, dir, phaseFile, "vision probe", () =>
+    executeOpendCode(probePrompt(imagePath), {
+      cwd,
+      ledgerDir: dir,
+      phaseFile,
+      model,
+      agent: RAILHEAD_AGENT_NAMES.probe,
+      live: true,
+      verbose: false,
+      heartbeat: true,
+      livePrefix: "vision-probe",
+      maxSteps: options.maxSteps ?? 12,
+      stallTimeoutSec: options.stallTimeoutSec ?? 120,
+      maxContextTokens: options.maxContextTokens ?? 32000,
+    }),
+  );
 
   let jsonlText = "";
   try {
