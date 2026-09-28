@@ -10,6 +10,7 @@ import {
   commitOrReuseHead,
   ensureInitialCommit,
   initGit,
+  listTrackedFiles,
   rangeDiff,
   workingDiff,
   workingTreeSummary,
@@ -29,6 +30,23 @@ async function freshRepo(): Promise<string> {
 
 afterEach(async () => {
   while (dirs.length) dirs.pop();
+});
+
+describe("listTrackedFiles", () => {
+  it("lists committed paths and excludes untracked ones", async () => {
+    const cwd = await freshRepo();
+    await mkdir(join(cwd, "src"));
+    await writeFile(join(cwd, "src", "main.rs"), "fn main() {}\n");
+    await writeFile(join(cwd, "untracked.txt"), "not committed\n");
+    await commitPaths(cwd, ["src"], "add source");
+    expect(await listTrackedFiles(cwd)).toEqual(["src/main.rs"]);
+  });
+
+  it("returns [] outside a git repo rather than throwing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "git-none-"));
+    dirs.push(dir);
+    expect(await listTrackedFiles(dir)).toEqual([]);
+  });
 });
 
 describe("workingDiff", () => {
@@ -277,6 +295,21 @@ describe("commitPaths", () => {
     await writeFile(join(cwd, "base.txt"), "b\n");
     await commit(cwd, "baseline");
     expect(await commitPaths(cwd, ["base.txt"], "no change")).toBeNull();
+  });
+
+  it("force-stages an ignored railhead-owned artifact so it is versioned", async () => {
+    const cwd = await freshRepo();
+    await writeFile(join(cwd, ".gitignore"), "railhead.contracts.json\n");
+    await commit(cwd, "ignore the index");
+    await writeFile(join(cwd, "railhead.contracts.json"), '{"schema_version":1,"entries":[]}\n');
+    // The index is in the scaffolded .gitignore; only the force path stages it.
+    const sha = await commitPaths(cwd, ["railhead.contracts.json"], "index: update", true);
+    expect(sha).not.toBeNull();
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const exec = promisify(execFile);
+    const { stdout: tracked } = await exec("git", ["ls-files", "railhead.contracts.json"], { cwd });
+    expect(tracked.trim()).toBe("railhead.contracts.json");
   });
 });
 

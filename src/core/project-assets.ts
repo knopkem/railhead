@@ -1,5 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { hasCommits, listTrackedFiles } from "./git.ts";
 
 /**
  * One railhead agent as opencode's `agent` config schema (description, mode,
@@ -343,6 +344,49 @@ export const RAILHEAD_IGNORES = [
   "railhead.contracts.json",
   ".playwright-mcp/",
 ];
+
+/**
+ * The files the Railhead itself puts in a project — config and plan/run
+ * artifacts, including the root `prompt` file `cmdBuild` persists. A tracked
+ * repo whose files are ALL in the owned set has no work of its own yet, so
+ * `build`'s greenfield posture is still correct.
+ */
+const RAILHEAD_OWNED_FILES = new Set([
+  "railhead.json",
+  "opencode.json",
+  "opencode.jsonc",
+  "AGENTS.md",
+  "CONTEXT.md",
+  ".gitignore",
+  "PLAN.md",
+  "prompt",
+  "railhead.contracts.json",
+  "docs/design.md",
+  "docs/architecture.md",
+  "docs/coherence.md",
+  "docs/product.md",
+]);
+
+/** Railhead-owned directories (plan docs, ledger, config). `docs/` itself is
+ * NOT owned — a foreign repo's docs are real work. */
+const RAILHEAD_OWNED_DIRS = [".railhead/", ".scratch/", ".playwright-mcp/", ".opencode/", "docs/adr/"];
+
+function isRailheadOwnedPath(path: string): boolean {
+  return RAILHEAD_OWNED_FILES.has(path) || RAILHEAD_OWNED_DIRS.some((dir) => path.startsWith(dir));
+}
+
+/**
+ * The tracked paths that predate the Railhead — evidence a greenfield `build`
+ * would re-scaffold an existing project. Empty when the repo has no commits
+ * (a fresh `git init`, even with untracked files, is greenfield), or when
+ * every tracked path is a Railhead artifact. Untracked and gitignored files
+ * are ignored: only committed work counts as a codebase.
+ */
+export async function findForeignTrackedPaths(cwd: string): Promise<string[]> {
+  if (!(await hasCommits(cwd))) return [];
+  const tracked = await listTrackedFiles(cwd);
+  return tracked.filter((p) => !isRailheadOwnedPath(p));
+}
 
 /** Fold a row's lines across every toolchain `detectToolchains` recognises in
  * the verify commands, deduped and in table order. Shared by the two

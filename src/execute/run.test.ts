@@ -96,11 +96,13 @@ function okResult(steps = 1, toolCalls = 1) {
 
 /** Identify which kind of phase a mocked executeOpendCode call represents, purely from the options run.ts passes — mirrors how a human reading the ledger would tell them apart. */
 function kindOf(options: { phaseFile: string; agent?: string | null }): "base" | "review" | "contracts" | "implement" | "visual" | "test" | "goal" | "structural" | "replan" | "reconcile" | "interact" | "handoff" {
+  // The contract-extract fallback now runs on the tool-denied review seat, so
+  // its phase file must be classified before the agent-name branch below.
+  if (options.phaseFile.includes("-contracts")) return "contracts";
   // Issue #133: the base-session call is not a ticket phase — classify it so
   // scripted mocks keyed on phase kind never treat it as implement/review.
   if (options.agent === "railhead-base" || options.phaseFile === "base-session") return "base";
   if (options.agent === "railhead-review" || options.agent === "railhead-review-readmode") return "review";
-  if (options.phaseFile.includes("-contracts")) return "contracts";
   if (options.phaseFile.endsWith("-visual") || options.phaseFile.startsWith("visual-")) return "visual";
   if (options.phaseFile.endsWith("-test")) return "test";
   if (options.phaseFile.endsWith("-interact")) return "interact";
@@ -343,7 +345,9 @@ describe("processTicket", () => {
     expect(ticketState.verify_ok).toBe(true);
     expect(ticketState.review_ok).toBe(true);
     expect(ticketState.commit).toMatch(/^[0-9a-f]{40}$/);
-    expect(await git.lastCommitMessage(cwd)).toBe("01 — Add greet");
+    // The regex-extracted contract adds the index follow-up commit on top of
+    // the ticket commit.
+    expect(await git.commitSubjectsSince(cwd, null, 2)).toEqual(["index: update contracts after 01", "01 — Add greet"]);
   });
 
   it("contracts: regex extracts greet without calling the model (model fallback skipped)", async () => {
@@ -378,7 +382,7 @@ describe("processTicket", () => {
     expect(ticketState.logs.some((l) => /regex extracted/.test(l))).toBe(true);
   });
 
-  it("contracts: model fallback runs when regex finds nothing (source file with no exports)", async () => {
+  it("contracts: model fallback is skipped for a source file with no export marker", async () => {
     const cwd = await freshRepo();
     const ticketsDir = ticketsDirOf(cwd);
     const ledgerDir = join(cwd, ".railhead", "run-test");
@@ -396,8 +400,44 @@ describe("processTicket", () => {
         await emitText(ledgerDir, options.phaseFile, "DONE src/index.ts");
       } else if (kind === "review") {
         await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
-      } else {
-        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      } else if (kind === "contracts") {
+        throw new Error("model contracts phase should NOT be called — the file declares no public surface");
+      }
+      return okResult();
+    });
+
+    const outcome = await processTicket(state, ledgerDir, ticketState);
+
+    expect(outcome).toBe("ok");
+    const contractsCalls = mockExec.mock.calls.filter(([, o]) => kindOf(o!) === "contracts");
+    expect(contractsCalls).toHaveLength(0);
+  });
+
+  it("contracts: model fallback runs fresh, tool-denied, and step-bounded on the extract seat", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig();
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+    // A base session exists, so a regression to forkPhase would be visible:
+    // the extraction call must NOT inherit the mission-laden prefix.
+    state.base_session = { session_id: "ses-base", preamble_hash: "h", created_at: "" };
+
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await mkdir(join(cwd, "src"), { recursive: true });
+        // An export token regex cannot turn into an entry: the wildcard
+        // re-export yields nothing, so the file is genuinely unhandled.
+        await writeFile(join(cwd, "src", "index.ts"), 'export * from "./mod.js";\nconst greet = () => 42;\n', "utf8");
+        await emitText(ledgerDir, options.phaseFile, "DONE src/index.ts");
+      } else if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
+      } else if (kind === "contracts") {
+        await emitText(ledgerDir, options.phaseFile, '$CONTRACTS\n{"symbol":"greet","kind":"function","file":"src/index.ts","signature":"greet()"}\n$END');
       }
       return okResult();
     });
@@ -407,6 +447,48 @@ describe("processTicket", () => {
     expect(outcome).toBe("ok");
     const contractsCalls = mockExec.mock.calls.filter(([, o]) => kindOf(o!) === "contracts");
     expect(contractsCalls).toHaveLength(1);
+    const options = contractsCalls[0][1]!;
+    expect(options.agent).toBe("railhead-review");
+    expect(options.session ?? null).toBeNull();
+    expect(options.fork ?? false).toBe(false);
+    expect(options.maxSteps).toBe(4);
+    expect(options.model).toBe(state._models?.extract ?? state._models?.implement);
+  });
+
+  it("contracts: commits ONLY the index and leaves out-of-scope worktree writes uncommitted + surfaced", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig();
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await mkdir(join(cwd, "src"), { recursive: true });
+        await writeFile(join(cwd, "src", "index.ts"), 'export * from "./mod.js";\nconst greet = () => 42;\n', "utf8");
+        await emitText(ledgerDir, options.phaseFile, "DONE src/index.ts");
+      } else if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
+      } else if (kind === "contracts") {
+        // A write no extraction phase should ever make — the commit must not claim it.
+        await writeFile(join(cwd, "src", "rogue.ts"), "const rogue = 1;\n", "utf8");
+        await emitText(ledgerDir, options.phaseFile, '$CONTRACTS\n{"symbol":"greet","kind":"function","file":"src/index.ts","signature":"greet()"}\n$END');
+      }
+      return okResult();
+    });
+
+    const outcome = await processTicket(state, ledgerDir, ticketState);
+
+    expect(outcome).toBe("ok");
+    expect(await git.lastCommitMessage(cwd)).toBe("index: update contracts after 01");
+    const changed = (await git.filesChanged(cwd, "HEAD~1", "HEAD")).split("\n").filter(Boolean);
+    expect(changed).toEqual(["railhead.contracts.json"]);
+    expect(await git.dirtyPaths(cwd)).toContain("src/rogue.ts");
+    expect(ticketState.logs.some((l) => /out-of-scope worktree change/.test(l))).toBe(true);
   });
 
   it("review: strips non-source files from the diff before sending it to the reviewer", async () => {
@@ -4836,7 +4918,8 @@ describe("session builder (issue #95)", () => {
     expect(committed02.logs.some((l) => l.includes("whole group was gated as one unit"))).toBe(true);
     expect(final.builder!.checkpoint_count).toBe(1);
     expect(final.builder!.committed_through).toBe("02");
-    expect(await git.lastCommitMessage(cwd)).toBe("01 — UI shell");
+    // The group commit is the parent of the contracts-index follow-up.
+    expect(await git.commitSubjectsSince(cwd, null, 2)).toEqual(["index: update contracts after 01", "01 — UI shell"]);
   });
 
   it("issue #106 (B): the group-boundary goal review joins the pending first-member per-ticket visual first (#62 parity)", async () => {

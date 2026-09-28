@@ -128,6 +128,7 @@ describe("buildReplanPrompt (#51)", () => {
     digest: "Module structure: repository pattern established",
     committedTickets: [{ number: "01", title: "Set up project scaffold", file: "01-scaffold.md" }],
     uncommittedTickets: [{ number: "03", title: "Build API endpoints", file: "03-api.md" }],
+    contextBudget: 100_000,
   };
 
   it("includes the original prompt, findings, contracts, and digest", () => {
@@ -168,6 +169,15 @@ describe("buildReplanPrompt (#51)", () => {
   it("does not emit verify/design/architecture blocks again", () => {
     const prompt = buildReplanPrompt(base);
     expect(prompt).toMatch(/Do NOT emit \$VERIFY/);
+  });
+
+  it("carries the ticket size rule against the implement seat's budget", () => {
+    const prompt = buildReplanPrompt(base);
+    expect(prompt).toContain("60k tokens of working context");
+    expect(prompt).toContain("~100k window");
+    const smaller = buildReplanPrompt({ ...base, contextBudget: 64_000 });
+    expect(smaller).toContain("~64k window");
+    expect(smaller).not.toContain("~100k window");
   });
 });
 

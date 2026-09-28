@@ -84,6 +84,8 @@ railhead diagnose screenshots [--model M]  check that a model can take a screens
 
 `build`/`fix` flags: `[--model M] [-a|--auto] [-c] [--full|--medium|--light|--none] [--verbose] [--yolo]`, plus per-gate overrides (`--review`, `--vision`, `--goal`, `--structural`, `--sharpen`). `run` accepts `[--plan M] [--exec M] [--review M] [--visual M] [--extract M] [--goal-model M] [-m N] [--pause-on-failure] [--quiet|--verbose] [--fresh]` and the same gate overrides. `-a` alone means `--light`.
 
+`build` is the greenfield posture (its plan opens by scaffolding the project). In a repo that already has tracked code it asks whether to switch to `feature` posture instead — under `-a` it refuses with the command to run — and `--greenfield` forces build through for a genuine rebuild.
+
 ## Configuration
 
 ```jsonc

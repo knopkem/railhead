@@ -2,7 +2,7 @@ import { mkdtemp, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, expect } from "vitest";
-import { regexExtractContracts, filesWithNoEntries, splitFilePath } from "./contract-extract.ts";
+import { regexExtractContracts, filesWithNoEntries, hasPublicSurface, splitFilePath } from "./contract-extract.ts";
 import type { ContractEntry } from "../core/contracts.ts";
 
 async function freshCwd(): Promise<string> {
@@ -532,6 +532,38 @@ describe("regexExtractContracts — edge cases", () => {
     const entries = await readSourceFile(cwd, file);
     expect(entries).toHaveLength(1);
     expect(entries[0].symbol).toBe("indented");
+  });
+});
+
+describe("hasPublicSurface", () => {
+  it("keys TypeScript on export — including forms the regex still misses", () => {
+    // `export default defineConfig(...)` has an export marker but produces no
+    // regex entry, so the model fallback is legitimate for it.
+    expect(hasPublicSurface("vite.config.ts", 'import { defineConfig } from "vite";\nexport default defineConfig({});\n')).toBe(true);
+    expect(hasPublicSurface("src/internal.ts", "const helper = 42;\nfunction util() {}\n")).toBe(false);
+    expect(hasPublicSurface("src/component.tsx", "const App = () => null;\n")).toBe(false);
+  });
+
+  it("keys Rust on pub", () => {
+    expect(hasPublicSurface("src/lib.rs", "fn internal() {}\n")).toBe(false);
+    expect(hasPublicSurface("src/lib.rs", "pub fn greet() {}\n")).toBe(true);
+  });
+
+  it("keys Python on top-level def/class", () => {
+    expect(hasPublicSurface("src/app.py", "X = 1\n")).toBe(false);
+    expect(hasPublicSurface("src/app.py", "def greet():\n    pass\n")).toBe(true);
+    expect(hasPublicSurface("src/models.py", "class Player:\n    pass\n")).toBe(true);
+  });
+
+  it("keys Go on func/type", () => {
+    expect(hasPublicSurface("main.go", "var x = 1\n")).toBe(false);
+    expect(hasPublicSurface("main.go", "func Greet() {}\n")).toBe(true);
+    expect(hasPublicSurface("types.go", "type Player struct {}\n")).toBe(true);
+  });
+
+  it("never claims a public surface for unknown languages", () => {
+    expect(hasPublicSurface("README.md", "export function fake() {}\n")).toBe(false);
+    expect(hasPublicSurface("config.json", '{"export": true}\n')).toBe(false);
   });
 });
 

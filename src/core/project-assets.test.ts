@@ -1,5 +1,5 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, expect } from "vitest";
 import {
@@ -12,7 +12,9 @@ import {
   detectToolchains,
   frameworkSmokeRun,
   detectGameCanvas,
+  findForeignTrackedPaths,
 } from "./project-assets.ts";
+import { ensureInitialCommit, initGit, stageAll } from "./git.ts";
 
 async function makeCwd(): Promise<string> {
   return mkdtemp(join(tmpdir(), "pa-"));
@@ -585,5 +587,62 @@ describe("detectGameCanvas", () => {
     const cwd = await makeCwd();
     await writePkg(cwd, { dependencies: { "threebody-force": "^1.0.0" } });
     expect(await detectGameCanvas(cwd)).toBe(false);
+  });
+});
+
+describe("findForeignTrackedPaths", () => {
+  async function makeRepo(files: Record<string, string>): Promise<string> {
+    const cwd = await makeCwd();
+    await initGit(cwd);
+    for (const [rel, content] of Object.entries(files)) {
+      await mkdir(dirname(join(cwd, rel)), { recursive: true });
+      await writeFile(join(cwd, rel), content, "utf8");
+    }
+    await stageAll(cwd);
+    await ensureInitialCommit(cwd);
+    return cwd;
+  }
+
+  it("returns [] for a repo with no commits — untracked files are not yet a codebase", async () => {
+    const cwd = await makeCwd();
+    await initGit(cwd);
+    await writeFile(join(cwd, "main.rs"), "fn main() {}\n", "utf8");
+    expect(await findForeignTrackedPaths(cwd)).toEqual([]);
+  });
+
+  it("returns [] when only railhead-owned artifacts are tracked (config, docs, ledger)", async () => {
+    const cwd = await makeRepo({
+      "railhead.json": "{}",
+      "opencode.json": "{}",
+      "AGENTS.md": "# notes\n",
+      "CONTEXT.md": "glossary\n",
+      ".gitignore": ".railhead/\n",
+      "PLAN.md": "# plan\n",
+      "prompt": "build a thing\n",
+      "docs/design.md": "# design\n",
+      "docs/adr/0001-decision.md": "adr\n",
+    });
+    expect(await findForeignTrackedPaths(cwd)).toEqual([]);
+  });
+
+  it("returns the tracked evidence for a foreign repo, filtering railhead docs out", async () => {
+    const cwd = await makeRepo({
+      "package.json": "{}",
+      "src/index.ts": "export {};\n",
+      "docs/design.md": "# railhead design\n",
+      ".railhead/run-1/state.json": "{}\n",
+    });
+    expect(await findForeignTrackedPaths(cwd)).toEqual(["package.json", "src/index.ts"]);
+  });
+
+  it("a README alone is evidence — the repo predates this run", async () => {
+    const cwd = await makeRepo({ "README.md": "hello\n" });
+    expect(await findForeignTrackedPaths(cwd)).toEqual(["README.md"]);
+  });
+
+  it("returns [] outside a git repo rather than throwing", async () => {
+    const cwd = await makeCwd();
+    await writeFile(join(cwd, "main.rs"), "", "utf8");
+    expect(await findForeignTrackedPaths(cwd)).toEqual([]);
   });
 });

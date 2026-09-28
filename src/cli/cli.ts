@@ -66,7 +66,7 @@ import {
   type SharpenDepthOption,
   type SharpenQuestion,
 } from "../plan/sharpen.ts";
-import { ensureProjectGitignore, ensureProjectOpenCodePermissions, frameworkIgnoreForVerify, frameworkExternalDirsForVerify } from "../core/project-assets.ts";
+import { ensureProjectGitignore, ensureProjectOpenCodePermissions, findForeignTrackedPaths, frameworkIgnoreForVerify, frameworkExternalDirsForVerify } from "../core/project-assets.ts";
 import { isRenderedSurface } from "../config/interface.ts";
 import { renderTranscript } from "./transcript.ts";
 import { loadTickets, titleSlug, toTicketState } from "../core/ticket.ts";
@@ -154,6 +154,7 @@ function usage() {
   build "<what to build>" [--model M] [-a] [-c] [--full|--medium|--light|--none]
        [--review M|full|light|off] [--vision full|light|off] [--goal full|light|off]
        [--structural full|light|off] [--sharpen|--no-sharpen] [--yolo] [--verbose]
+       [--greenfield]
        turn a description into dependency-ordered tickets, then run them (issue #73)
         each gate (code/visual/goal/structural review) has a cadence mode:
           full   = mid-run triggers + end-of-run pass
@@ -172,6 +173,9 @@ function usage() {
        interview off under --light/--none)
        a clarifying interview runs when a preset runs sharpen (--medium/--full) unless
        --no-sharpen; under -a the model auto-answers (terms/ADRs still resolve).
+       build is the greenfield posture (scaffold-first): in a repo that already
+       has tracked code it asks whether to switch to feature posture (under -a
+       it refuses with the exact command); --greenfield forces build through.
   fix  "<bug report>" [--model M] [-a] [-c] [--full|--medium|--light|--none]
        [--review ...] [--vision ...] [--goal ...] [--structural ...]
        [--sharpen|--no-sharpen] [--yolo] [--verbose]
@@ -766,8 +770,52 @@ async function ensureVisionGates<M extends { visual: GateMode; goal: GateMode }>
   throw new Error(refusals.map((r) => `vision gate refused: ${r.reason}`).join("\n"));
 }
 
+/** Evidence line for the foreign-repo guard: the first few tracked paths that
+ * predate the Railhead, capped so a large repo doesn't print a file list.
+ * Pure so the guard's wording is unit-tested. */
+export function foreignProjectEvidence(paths: string[]): string {
+  const shown = paths.slice(0, 5).join(", ");
+  return paths.length > 5 ? `${shown}, … (${paths.length} tracked files)` : shown;
+}
+
+/** The guard's question (interactive) and refusal (unattended), pure so the
+ * migration pointers — feature posture as the direct switch, product for the
+ * durable arc, --greenfield as the escape — are pinned by tests. */
+export function foreignBuildQuestion(evidence: string): string {
+  return `This repo already has tracked code (${evidence}); build plans a greenfield scaffold-first plan. Plan it with feature posture instead (integrate into the existing project, no scaffold)?`;
+}
+
+export function foreignBuildRefusal(evidence: string): string {
+  return `build plans a greenfield, scaffold-first project, but this repo already has tracked code: ${evidence}. ` +
+    `Plan into the existing project with \`railhead feature "<what to build>"\`, ` +
+    `design the product arc first with \`railhead product "<vision>"\`, ` +
+    `or pass --greenfield to force build's greenfield posture.`;
+}
+
 async function cmdBuild(cwd: string, prefs: PlanArgs, internal: { arcStepNumber?: number; slug?: string } = {}): Promise<RunOutcome | null> {
-  const { prompt, auto, cont, yolo: yoloFlag, verbose, modelOverride, mode, overrides, sharpen } = prefs;
+  const { prompt, auto, cont, yolo: yoloFlag, verbose, modelOverride, overrides, sharpen, greenfield } = prefs;
+  let mode = prefs.mode;
+
+  // `build` is the greenfield posture: its ticket prompt mandates a
+  // scaffold-first first ticket (src/plan/plan.ts). In a repo that already has
+  // tracked code that plan would re-scaffold what exists, so guard before any
+  // spend. Interactive operators are offered the switch to feature posture;
+  // an unattended run refuses (silently planning a duplicate scaffold is worse
+  // than stopping); --greenfield forces the posture through.
+  if (mode === "build" && !greenfield) {
+    const foreignPaths = await findForeignTrackedPaths(cwd);
+    if (foreignPaths.length > 0) {
+      const evidence = foreignProjectEvidence(foreignPaths);
+      if (auto) throw new Error(foreignBuildRefusal(evidence));
+      if (await askYesNo(foreignBuildQuestion(evidence), true)) {
+        console.log("feature posture: the plan will integrate into the existing project instead of scaffolding a new one.");
+        mode = "feature";
+      } else {
+        console.log("continuing as a greenfield build — pass --greenfield next time to skip this prompt.");
+      }
+    }
+  }
+
   // Planner/interview mode vocabulary is `build` | `fix`; the CLI's build/fix
   // commands map onto it (sharpen/planner prompts differ in fix mode).
   // Issue #73: run cadence. A preset flag wins; otherwise `-a` and

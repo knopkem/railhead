@@ -65,6 +65,13 @@ export async function hasCommits(cwd: string): Promise<boolean> {
     .catch(() => false);
 }
 
+/** Every path tracked in the index, worktree-relative. Empty outside a repo. */
+export function listTrackedFiles(cwd: string): Promise<string[]> {
+  return git(cwd, ["ls-files"])
+    .then((out) => out.split("\n").map((p) => p.trim()).filter(Boolean))
+    .catch(() => []);
+}
+
 /**
  * Make sure HEAD resolves before a Run starts. A freshly `railhead init`-ed
  * repo has no commits, so the first ticket's start_commit (and the later
@@ -282,10 +289,16 @@ export function stageAll(cwd: string): Promise<void> {
  * were clean (nothing committed). Unlike `commit`/`commitOrReuseHead`, this
  * never sweeps unrelated worktree changes in: the arc update commits on the
  * product branch without touching in-progress ticket work.
+ *
+ * `force` stages ignored paths too. The railhead-owned artifacts (the
+ * contracts index) are listed in the scaffolded `.gitignore` so a builder's
+ * `add -A` never sweeps them into a ticket commit — but the railhead's own
+ * tooling commit is exactly where they must land (ADR 0008: the index is
+ * versioned with the branch).
  */
-export async function commitPaths(cwd: string, paths: string[], message: string): Promise<string | null> {
+export async function commitPaths(cwd: string, paths: string[], message: string, force = false): Promise<string | null> {
   if (paths.length === 0) return null;
-  await git(cwd, ["add", "--", ...paths]);
+  await git(cwd, ["add", ...(force ? ["-f"] : []), "--", ...paths]);
   const staged = await git(cwd, ["diff", "--cached", "--name-only"]).catch(() => "");
   if (!staged.trim()) return null;
   await git(cwd, ["commit", "-m", message]);
@@ -294,6 +307,24 @@ export async function commitPaths(cwd: string, paths: string[], message: string)
 
 export function isClean(cwd: string): Promise<boolean> {
   return git(cwd, ["status", "--porcelain"]).then((s) => s.length === 0);
+}
+
+/** Worktree paths with uncommitted changes — modified, staged, or untracked.
+ * Porcelain v1 lines are `XY <path>`; a rename line is `XY <old> -> <new>`
+ * and reports the destination (the path that exists now). Quoted paths (git
+ * quotes non-ASCII/escaped names) are unquoted so callers can compare them to
+ * ordinary repo-relative paths. */
+export async function dirtyPaths(cwd: string): Promise<string[]> {
+  const out = await git(cwd, ["status", "--porcelain"]);
+  return out
+    .split("\n")
+    .filter((l) => l.length > 3)
+    .map((l) => {
+      const rest = l.slice(3);
+      const arrow = rest.lastIndexOf(" -> ");
+      const path = arrow >= 0 ? rest.slice(arrow + 4) : rest;
+      return path.replace(/^"|"$/g, "");
+    });
 }
 
 export async function commit(

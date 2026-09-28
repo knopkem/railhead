@@ -648,6 +648,7 @@ async function runPlanInner(options: {
       digest,
       committedTickets: [],
       uncommittedTickets: plan.tickets.map((t) => ({ number: t.number, title: t.title, file: t.file })),
+      contextBudget: contextBudget ?? DEFAULT_CONTEXT_TOKENS,
     });
     ticketsText = await stage(`plan-replan-${round + 1}`, replanPrompt, "replan");
     plan = await finalize(ticketsText);

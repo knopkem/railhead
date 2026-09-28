@@ -1,14 +1,15 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ContractEntry } from "../core/contracts.ts";
-import { extractContractsBlock, loadContracts, mergeContracts, saveContracts, verifyContractEntries } from "../core/contracts.ts";
+import { CONTRACTS_FILE, extractContractsBlock, loadContracts, mergeContracts, saveContracts, verifyContractEntries } from "../core/contracts.ts";
 import { buildContractExtractFilePrompt } from "../context/prompt.ts";
 import { joinPhaseMessages } from "../context/preamble.ts";
+import { RAILHEAD_AGENT_NAMES } from "../core/project-assets.ts";
 import { describeExecFailure, executeFreshPhase, startPersistentWorker, stopPersistentWorker } from "./executor.ts";
-import { forkPhase } from "./base-session.ts";
 import { extractAssistantText } from "../core/ledger.ts";
 import { seatContextBudget } from "../config/config.ts";
 import { withFailureLadderOnThrow } from "./failure-ladder.ts";
+import { nowClock } from "../cli/overview.ts";
 import * as git from "../core/git.ts";
 import type { RunState, TicketState } from "../core/state.ts";
 
@@ -206,11 +207,42 @@ export function filesWithNoEntries(files: string[], entries: ContractEntry[]): s
   return files.filter((f) => isSourceFile(f) && !handled.has(f));
 }
 
+/** Whether a source file could plausibly declare a public contract at all.
+ * The regexes key on explicit visibility/export markers per language; a file
+ * that contains none of them has no public surface to index, so the model
+ * fallback is pure waste on it — and an unconstrained model call on a file
+ * with nothing to extract is how a "list the contracts" phase turned into an
+ * implementation agent (the 01-contracts-vite_config incident). Unknown
+ * languages never reach the fallback (not source files). */
+export function hasPublicSurface(file: string, content: string): boolean {
+  switch (detectLanguage(file)) {
+    case "typescript": return /\bexport\b/.test(content);
+    case "rust": return /\bpub\b/.test(content);
+    case "python": return /\b(?:def|class)\s+\w/.test(content);
+    case "go": return /^\s*(?:func|type)\b/m.test(content);
+    default: return false;
+  }
+}
+
+/** Bound on the per-file extraction fallback. The task is one reading + one
+ * `$CONTRACTS` block; a few steps tolerate a denied-tool detour without
+ * leaving room for an agent loop. */
+const EXTRACT_MAX_STEPS = 4;
+
 /** Per-file model fallback for contract extraction (#28). Reads each
  * unhandled file's content and makes a separate model call per file,
  * bounding each call to O(file) instead of O(ticket diff). A 30k-token
- * shader file can't overflow a 64k context when it's the only thing in
- * the prompt. */
+ * shader file can't overflow a 64k context when it's the only thing in the
+ * prompt.
+ *
+ * Two bounds keep the fallback honest (the 01-contracts-vite_config incident:
+ * a mission-laden fork with write tools implemented the remaining tickets
+ * instead of listing contracts):
+ *  - `hasPublicSurface` skips files with no export marker — nothing to list.
+ *  - The call runs on the tool-denied review seat with a small step cap and
+ *    WITHOUT the run's base-session fork. The task prompt already carries the
+ *    file text; forking the base conversation would inject the mission and the
+ *    design docs into a task that only needs the source. */
 async function extractUnhandledFiles(
   state: RunState,
   ledger: string,
@@ -218,26 +250,25 @@ async function extractUnhandledFiles(
   unhandled: string[],
 ): Promise<ContractEntry[]> {
   const entries: ContractEntry[] = [];
+  const model = state._models?.extract ?? state._models?.implement ?? null;
   for (const file of unhandled) {
     const content = await readFile(join(state.cwd, file), "utf8").catch(() => "");
     if (!content) continue;
+    if (!hasPublicSurface(file, content)) continue;
     const phaseFile = `${ticket.number}-contracts-${file.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 40)}`;
     const prompt = buildContractExtractFilePrompt(file, content);
-    const fork = forkPhase(state, prompt.task);
     const result = await executeFreshPhase(joinPhaseMessages(prompt), {
       cwd: state.cwd,
       ledgerDir: ledger,
       phaseFile,
-      model: state._models?.implement ?? null,
-      session: fork.session,
-      fork: fork.fork,
-      task: fork.task,
+      model,
+      agent: RAILHEAD_AGENT_NAMES.review,
       live: !state.quiet, verbose: state.verbose,
       livePrefix: `${ticket.number} contracts ${file}`,
-      maxSteps: state.config.max_phase_steps,
+      maxSteps: EXTRACT_MAX_STEPS,
       stallTimeoutSec: state.config.stall_timeout_sec,
       maxStepModelSec: state.config.max_step_model_sec,
-      maxContextTokens: seatContextBudget(state, "implement"),
+      maxContextTokens: seatContextBudget(state, "extract"),
     });
     if (result.status === "transient") throw new Error(`contract extract ${file}: ${describeExecFailure(result)}`);
     if (result.status === "ok") {
@@ -309,7 +340,20 @@ export async function updateContracts(
   const merged = mergeContracts(index, verified, tag);
   await saveContracts(state.cwd, merged);
 
-  if (!(await git.isClean(state.cwd))) {
-    await git.commit(state.cwd, `index: update contracts after ${tag}`);
+  // Commit ONLY the index. A tooling commit must never claim project code:
+  // the 01-contracts-vite_config incident saw a runaway extraction phase's
+  // writes swept into `index: update contracts after 01`, after which the next
+  // builder read them as a pre-seeded reference implementation and the plan
+  // was replanned around that false premise. Anything else dirty is surfaced,
+  // never committed here.
+  const dirty = await git.dirtyPaths(state.cwd).catch(() => [] as string[]);
+  const outOfScope = dirty.filter((p) => p !== CONTRACTS_FILE);
+  if (outOfScope.length) {
+    const shown = outOfScope.slice(0, 5).join(", ");
+    const more = outOfScope.length > 5 ? ` (+${outOfScope.length - 5} more)` : "";
+    const notice = `contracts: ${outOfScope.length} out-of-scope worktree change(s) left uncommitted: ${shown}${more}`;
+    ticket.logs.push(notice);
+    console.log(`[${nowClock()}]   ${ticket.number} ${notice}`);
   }
+  await git.commitPaths(state.cwd, [CONTRACTS_FILE], `index: update contracts after ${tag}`, true);
 }

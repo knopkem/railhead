@@ -71,10 +71,13 @@ export interface ReplanPromptOptions {
   digest: string | null;
   committedTickets: { number: string; title: string; file: string }[];
   uncommittedTickets: { number: string; title: string; file: string }[];
+  /** The implement seat's request ceiling — carried so the regenerated
+   * tickets stay inside one context window, exactly like the original plan. */
+  contextBudget: number;
 }
 
 export function buildReplanPrompt(options: ReplanPromptOptions): string {
-  const { originalPrompt, findings, contractsSummary, digest, committedTickets, uncommittedTickets } = options;
+  const { originalPrompt, findings, contractsSummary, digest, committedTickets, uncommittedTickets, contextBudget } = options;
 
   const findingsBlock = findings.length
     ? findings.map((f) => `- ${f}`).join("\n")
@@ -129,6 +132,7 @@ ${replaceSection}
    - Are numbered by the railhead — do NOT try to control their \`NN\` numbers; emit them in the order they must run.
    - Account for the checkpoint findings — the structural flaw must be addressed by the revised plan, not ignored.
    - Must NOT duplicate work already committed.
+   - ${ticketSizeRule(contextBudget)}
 4. Emit the same ticket shape as the original planner: each ticket has "title", "what" (the end-to-end behaviour, naming the files/modules it touches in prose), "criteria" (concrete checkable bullets), and optionally "group" / "open_ended". Tickets run STRICTLY in the order emitted: order the array so every prerequisite comes before the ticket that needs it.
 
 Do NOT emit $VERIFY, $SMOKE, $DESIGN, or $ARCHITECTURE blocks — those are already established from the original plan and committed work. Emit ONLY the $TICKETS block.
@@ -282,6 +286,7 @@ export async function replanFromCheckpoint(
     digest,
     committedTickets,
     uncommittedTickets,
+    contextBudget: seatContextBudget(state, "implement"),
   });
 
   return runReplanPhase(state, ledger, prompt, group);

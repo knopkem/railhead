@@ -2,7 +2,7 @@ import { mkdtemp, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, expect, vi } from "vitest";
-import { parseLogArgs, describeModel, ensureInitialized, modelParameterClass, modelTierWarnings, initRailheadConfig, minDetectedContext, contextOverrideWarnings, visionCapabilityWarnings, implementerVisionLines, type InitSeatProbe } from "./cli.ts";
+import { parseLogArgs, describeModel, ensureInitialized, modelParameterClass, modelTierWarnings, initRailheadConfig, minDetectedContext, contextOverrideWarnings, visionCapabilityWarnings, implementerVisionLines, foreignProjectEvidence, foreignBuildQuestion, foreignBuildRefusal, type InitSeatProbe } from "./cli.ts";
 import { DEFAULT_MODEL } from "../config/config.ts";
 import type { CapabilityInfo } from "../core/models.ts";
 import type { VisionCapabilityRecord } from "../execute/vision-probe.ts";
@@ -63,6 +63,26 @@ describe("ensureInitialized", () => {
     }
     expect(await readFile(target, "utf8")).toBe(original);
     expect(logSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("foreign-repo build guard", () => {
+  it("caps the evidence line so a large repo doesn't print its whole file list", () => {
+    expect(foreignProjectEvidence(["a.ts", "b.ts"])).toBe("a.ts, b.ts");
+    const many = ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.ts", "g.ts"];
+    expect(foreignProjectEvidence(many)).toBe("a.ts, b.ts, c.ts, d.ts, e.ts, … (7 tracked files)");
+  });
+
+  it("the interactive question offers the feature-posture switch", () => {
+    expect(foreignBuildQuestion("src/main.rs")).toContain("feature posture");
+    expect(foreignBuildQuestion("src/main.rs")).toContain("src/main.rs");
+  });
+
+  it("the unattended refusal names all three migrations: feature, product, --greenfield", () => {
+    const msg = foreignBuildRefusal("src/main.rs");
+    expect(msg).toContain("railhead feature");
+    expect(msg).toContain("railhead product");
+    expect(msg).toContain("--greenfield");
   });
 });
 

@@ -100,6 +100,13 @@ describe("parsePlanArgs", () => {
     expect(parsePlanArgs(["--step", "03"], "feature").step).toBe(3);
   });
 
+  it("parses --greenfield (build's foreign-repo escape) and keeps it out of the prompt", () => {
+    const a = parsePlanArgs(["--greenfield", "build", "a", "thing"], "build");
+    expect(a.greenfield).toBe(true);
+    expect(a.prompt).toBe("build a thing");
+    expect(parsePlanArgs(["build a thing"], "build").greenfield).toBe(false);
+  });
+
   it("build/fix parse --step but leave it to feature mode to honor", () => {
     expect(parsePlanArgs(["--step", "2", "x"], "build").step).toBe(2);
     expect(parsePlanArgs(["x"], "build").step).toBeNull();

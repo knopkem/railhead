@@ -66,6 +66,9 @@ export interface PlanArgs {
   overrides: GateOverrides;
   sharpen: boolean | null;
   mode: "build" | "fix" | "feature";
+  /** Force `build`'s greenfield posture in a repo that already has tracked
+   * code. Without it, build asks (or refuses under -a) and points at feature. */
+  greenfield: boolean;
   /** Feature mode (ADR 0051): force a specific roadmap step (1-based).
    * Absent for build/fix; null = pick the first todo step. */
   step: number | null;
@@ -76,6 +79,7 @@ const PLAN_BOOL_FLAGS = new Set([
   "-c", "--continue",
   "--yolo",
   "--verbose",
+  "--greenfield",
   "--full", "--medium", "--light", "--none",
   "--sharpen", "--no-sharpen",
 ]);
@@ -131,6 +135,7 @@ export function parsePlanArgs(argv: string[], mode: "build" | "fix" | "feature")
     overrides,
     sharpen,
     mode,
+    greenfield: argv.includes("--greenfield"),
     step: stepRaw !== null && /^\d+$/.test(stepRaw) ? Number(stepRaw) : null,
   };
 }
