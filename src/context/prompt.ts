@@ -1,6 +1,6 @@
 import { readProjectDoc } from "../core/git.ts";
 import { renderContracts, type ContractsIndex } from "../core/contracts.ts";
-import { LEARNED_MARKER, RETRACTED_MARKER } from "./learnings.ts";
+import { LEARNED_MARKER, RETRACTED_MARKER, renderLearnings } from "./learnings.ts";
 import { visionCapabilityBlock, type VisionCapabilityFact } from "../execute/vision-probe.ts";
 import { buildDigestInjection } from "./digest.ts";
 import { CHARTER_DOC } from "./coherence.ts";
@@ -159,7 +159,7 @@ export async function buildReviewerPrompt(options: {
     : "";
 
   const learningsBlock = learnings
-    ? `\n## Project learnings (tooling facts from prior phases)\nThese are tooling/environment facts discovered by prior agents on this project. They are unverified model-claims, not tested facts. Most are safe to trust (a command that needs a flag, a port that isn't default). But a claim about YOUR OWN capabilities (e.g. "this model cannot read images") is a self-assessment that may be wrong — if such a claim would change your approach, TEST it once before deferring to it. If a learning turns out to be false, retract it with the ${RETRACTED_MARKER} marker below.\n${learnings.split("\n").map((l) => `- ${l}`).join("\n")}\n`
+    ? `\n## Project learnings (tooling facts from prior phases)\nThese are tooling/environment facts discovered by prior agents on this project. They are unverified model-claims, not tested facts. Most are safe to trust (a command that needs a flag, a port that isn't default). But a claim about YOUR OWN capabilities (e.g. "this model cannot read images") is a self-assessment that may be wrong — if such a claim would change your approach, TEST it once before deferring to it. If a learning turns out to be false, retract it with the ${RETRACTED_MARKER} marker below.\n${renderLearnings(learnings)}\n`
     : "";
 
   const digestBlock = buildDigestInjection(digest);
@@ -415,7 +415,7 @@ export async function buildReviewerReadModePrompt(options: {
     : "";
 
   const learningsBlock = learnings
-    ? `\n## Project learnings (tooling facts from prior phases)\nThese are tooling/environment facts discovered by prior agents on this project. They are unverified model-claims, not tested facts. Most are safe to trust (a command that needs a flag, a port that isn't default). But a claim about YOUR OWN capabilities (e.g. "this model cannot read images") is a self-assessment that may be wrong — if such a claim would change your approach, TEST it once before deferring to it. If a learning turns out to be false, retract it with the ${RETRACTED_MARKER} marker below.\n${learnings.split("\n").map((l) => `- ${l}`).join("\n")}\n`
+    ? `\n## Project learnings (tooling facts from prior phases)\nThese are tooling/environment facts discovered by prior agents on this project. They are unverified model-claims, not tested facts. Most are safe to trust (a command that needs a flag, a port that isn't default). But a claim about YOUR OWN capabilities (e.g. "this model cannot read images") is a self-assessment that may be wrong — if such a claim would change your approach, TEST it once before deferring to it. If a learning turns out to be false, retract it with the ${RETRACTED_MARKER} marker below.\n${renderLearnings(learnings)}\n`
     : "";
 
   const digestBlock = buildDigestInjection(digest);

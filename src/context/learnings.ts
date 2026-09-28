@@ -21,7 +21,88 @@ export function learningsPath(cwd: string): string {
   return join(cwd, ".railhead", "learnings.md");
 }
 
-/** Read the learnings file. Returns null if absent or empty. */
+/** The operator pin prefix: a line starting with `! ` is pinned. Pinned facts
+ * are never evicted by the budget gate and never dropped by model
+ * consolidation — the operator's deliberate keep-list against forgetting
+ * something vital. A later `RETRACTED:` still wins (a proven-false fact must
+ * not survive its disproof, and un-retracting is one hand edit). See ADR 0057. */
+export const PIN_MARKER = "!";
+
+/** The suffix comment carrying the phase that produced a fact, e.g.
+ * `fact <!-- learned: 05-01-implement -->`. The phase label locates the
+ * transcript in the ledger, so a stale fact can be traced to its source. It is
+ * stripped before any prompt injection — it is audit metadata, not context. */
+const PROVENANCE_RE = /\s*<!--\s*learned:\s*[^>]*?-->\s*$/i;
+
+/** The injectable fact text of one raw learnings line: pin prefix and
+ * provenance suffix removed. Pure. */
+export function learningText(line: string): string {
+  const trimmed = line.trimStart();
+  const unprefixed = trimmed.startsWith(`${PIN_MARKER} `) ? trimmed.slice(2) : trimmed;
+  return unprefixed.replace(PROVENANCE_RE, "").trim();
+}
+
+/** Whether a raw line is operator-pinned. Pure. */
+export function isPinnedLearning(line: string): boolean {
+  return line.trimStart().startsWith(`${PIN_MARKER} `);
+}
+
+/** Attach the producing phase to a fact. `pushLearnings`/`mineFailureLearning`
+ * tag every fact they persist; hand-written lines may omit it. Pure. */
+export function withProvenance(fact: string, source: string): string {
+  return `${fact.trimEnd()} <!-- learned: ${source} -->`;
+}
+
+/** Fact identity for dedup/supersession: alphanumerics only, lowercased, so
+ * backticks, punctuation, and provenance comments don't defeat a match. Shared
+ * with `suppressRetracted`'s retraction matching. */
+function normalizeFact(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/** Render learnings for prompt injection: provenance stripped, pins moved to
+ * the top and marked `[pinned]` so every seat reads them as operator-vetted.
+ * Returns "" when nothing renders. Pure. */
+export function renderLearnings(content: string | null | undefined): string {
+  if (!content) return "";
+  const pinned: string[] = [];
+  const rest: string[] = [];
+  for (const raw of content.split("\n")) {
+    const fact = learningText(raw);
+    if (!fact) continue;
+    (isPinnedLearning(raw) ? pinned : rest).push(fact);
+  }
+  return [
+    ...pinned.map((fact) => `- [pinned] ${fact}`),
+    ...rest.map((fact) => `- ${fact}`),
+  ].join("\n");
+}
+
+/** Merge incoming facts into existing content, newest occurrence wins: a new
+ * fact that duplicates (normalized) an unpinned line replaces it — the fact
+ * moves to the end and picks up the new provenance — while a duplicate of a
+ * pinned line is dropped so the pin and its position survive. This is the
+ * deterministic half of supersession; a *contradiction* (not a duplicate) is
+ * the worker's job to report via `RETRACTED:` + `LEARNED:`. Pure. */
+export function supersedeLearnings(existing: string | null, incoming: string): string {
+  let lines = (existing ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  for (const raw of incoming.split("\n")) {
+    const fact = raw.trim();
+    if (!fact) continue;
+    const key = normalizeFact(learningText(fact));
+    if (key.length > 0 && lines.some((l) => isPinnedLearning(l) && normalizeFact(learningText(l)) === key)) continue;
+    lines = lines.filter((l) => key.length === 0 || normalizeFact(learningText(l)) !== key);
+    lines.push(fact);
+  }
+  return lines.join("\n");
+}
+
+/** Read the learnings file verbatim (trimmed). Returns null if absent or
+ * empty. Pins and provenance comments are preserved on disk; use
+ * `renderLearnings` for the injectable form. */
 export async function readLearnings(cwd: string): Promise<string | null> {
   const path = learningsPath(cwd);
   if (!existsSync(path)) return null;
@@ -29,37 +110,41 @@ export async function readLearnings(cwd: string): Promise<string | null> {
   return content.trim() || null;
 }
 
-/** Append new learnings to the file. Creates the file if absent. Enforces the
- * char budget itself (issue #68): when the merged result would exceed
- * `LEARNINGS_CHAR_LIMIT`, the OLDEST lines are evicted deterministically (no
- * model call) so the newest facts survive. This is the safety net for every
- * caller — previously the only budget gate sat behind `model.extract !==
+/** Append new learnings to the file. Creates the file if absent. Duplicates
+ * supersede: an incoming fact that matches an existing unpinned line replaces
+ * it; a match for a pinned line is dropped. Enforces the char budget itself
+ * (issue #68): when the merged result would exceed `LEARNINGS_CHAR_LIMIT`, the
+ * OLDEST unpinned lines are evicted deterministically (no model call) so the
+ * newest facts — and every pinned fact — survive. This is the safety net for
+ * every caller — previously the only budget gate sat behind `model.extract !==
  * null`, so configs without an extract model grew learnings.md unbounded. */
 export async function appendLearnings(cwd: string, newLearnings: string): Promise<void> {
   const path = learningsPath(cwd);
   const existing = await readLearnings(cwd);
-  const merged = existing
-    ? existing + "\n" + newLearnings.trim()
-    : newLearnings.trim();
+  const merged = supersedeLearnings(existing, newLearnings);
   const bounded = evictOldestToFit(merged, LEARNINGS_CHAR_LIMIT);
   await mkdir(join(cwd, ".railhead"), { recursive: true });
   await writeFile(path, bounded + "\n", "utf8");
 }
 
-/** Deterministic FIFO eviction: drop the oldest (top) lines of `content`
- * until the result fits `limit`, keeping the newest facts (learnings are
- * appended chronologically). If a single over-long line remains, the tail of
- * that line is kept. Pure — used by `appendLearnings` and tested directly so
- * the no-model truncation path is a first-class behavior (issue #68). */
+/** Deterministic FIFO eviction: drop the oldest (top) UNPINNED lines of
+ * `content` until the result fits `limit`, keeping the newest facts (learnings
+ * are appended chronologically) and never dropping a pinned line — if only
+ * pins remain over budget, they all stay (the operator asked for that cost).
+ * If a single over-long unpinned line remains, the tail of that line is kept.
+ * Pure — used by `appendLearnings` and tested directly so the no-model
+ * truncation path is a first-class behavior (issue #68). */
 export function evictOldestToFit(content: string, limit: number): string {
   const trimmed = content.trim();
   if (trimmed.length <= limit) return trimmed;
   let lines = trimmed.split("\n");
   while (lines.length > 1 && lines.join("\n").length > limit) {
-    lines = lines.slice(1);
+    const oldestUnpinned = lines.findIndex((line) => !isPinnedLearning(line));
+    if (oldestUnpinned < 0) break;
+    lines = lines.filter((_, index) => index !== oldestUnpinned);
   }
   let out = lines.join("\n");
-  if (out.length > limit) {
+  if (out.length > limit && lines.length === 1 && !isPinnedLearning(lines[0])) {
     out = out.slice(out.length - limit);
     const nl = out.indexOf("\n");
     if (nl >= 0) out = out.slice(nl + 1);
@@ -164,13 +249,16 @@ export function readRetractedMarkers(transcript: string): string | null {
  *
  * Pure: does not touch disk, does not mutate the input. Returns the surviving
  * lines joined by newlines, or `null` when every line is retracted (the
- * caller writes `null` as "no learnings," not an empty file). */
+ * caller writes `null` as "no learnings," not an empty file).
+ *
+ * A retraction removes a pinned line too (ADR 0057): pinning guards against
+ * silent budget eviction and consolidation, not against a worker that directly
+ * falsified the fact. A proven-false fact must not survive on a pin. */
 export function suppressRetracted(content: string, retracted: string | null): string | null {
   if (!retracted) return content;
-  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
   const retractionLines = retracted
     .split("\n")
-    .map((l) => normalize(l))
+    .map((l) => normalizeFact(l))
     .filter((l) => l.length > 0);
   if (retractionLines.length === 0) return content;
   const surviving = content
@@ -178,7 +266,7 @@ export function suppressRetracted(content: string, retracted: string | null): st
     .map((l) => l.trimEnd())
     .filter((line) => {
       if (line.trim().length === 0) return false;
-      const normalized = normalize(line);
+      const normalized = normalizeFact(line);
       return !retractionLines.some((r) => normalized.includes(r));
     });
   return surviving.length > 0 ? surviving.join("\n") : null;
@@ -404,12 +492,14 @@ export async function mineFailureLearning(
 }
 
 /** Append new learnings (or consolidate when over budget). The single
- * persistence path after ADR 0013 (push only). Consolidation runs on the
- * `model.extract` seat (ADR 0015 — the narrow seat where 9B-Q4 is OK for
- * single-shot structured output), falling back to a deterministic FIFO
- * eviction inside `appendLearnings` when no extract model is configured —
- * previously the extract-null path bypassed the budget check entirely and
- * learnings.md grew unbounded (issue #68). */
+ * persistence path after ADR 0013 (push only). Each pushed fact gets a
+ * provenance comment naming the phase that produced it; consolidation runs on
+ * the `model.extract` seat (ADR 0015 — the narrow seat where 9B-Q4 is OK for
+ * single-shot structured output) and never sees a pinned line, so it cannot
+ * drop one, falling back to a deterministic FIFO eviction inside
+ * `appendLearnings` when no extract model is configured — previously the
+ * extract-null path bypassed the budget check entirely and learnings.md grew
+ * unbounded (issue #68). */
 async function mergeLearnings(
   state: RunState,
   ledger: string,
@@ -418,10 +508,24 @@ async function mergeLearnings(
 ): Promise<void> {
   const extractModel = state._models?.extract ?? null;
   const existing = await readLearnings(state.cwd);
-  const overBudget = existing !== null && wouldExceedBudget(existing, newLearnings.length);
+  const tagged = newLearnings
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .map((fact) => withProvenance(fact, phaseLabel))
+    .join("\n");
+  if (!tagged) return;
+  const overBudget = existing !== null && wouldExceedBudget(existing, tagged.length);
   if (extractModel !== null && overBudget) {
+    // Pinned facts are the operator's keep-list: exclude them from the prompt
+    // and re-add them verbatim around the model's output, so a merge can never
+    // drop or paraphrase one. The consolidation output is deduped against the
+    // pins before the budget gate, which never evicts a pin.
+    const existingLines = existing!.split("\n");
+    const pinned = existingLines.filter(isPinnedLearning).join("\n");
+    const unpinned = existingLines.filter((l) => !isPinnedLearning(l)).join("\n");
     const consolPhaseFile = `${phaseLabel}-consolidate`;
-    const consolPrompt = buildConsolidationPrompt(existing!, newLearnings);
+    const consolPrompt = buildConsolidationPrompt(unpinned, tagged);
     const consolResult = await guardReadOnlyPhase(state.cwd, ledger, consolPhaseFile, "learnings consolidate", () =>
       executeOpendCode(consolPrompt, {
         cwd: state.cwd,
@@ -441,13 +545,14 @@ async function mergeLearnings(
     if (consolResult.status === "ok") {
       const merged = (await extractAssistantText(ledger, consolPhaseFile)).trim();
       if (merged && merged !== "NONE") {
-        await writeLearnings(state.cwd, merged.slice(0, LEARNINGS_CHAR_LIMIT));
+        const combined = evictOldestToFit(supersedeLearnings(pinned, merged), LEARNINGS_CHAR_LIMIT);
+        await writeLearnings(state.cwd, combined);
         return;
       }
     }
     // Consolidation failed to produce a merged file — fall through to the
     // deterministic bounded append rather than dropping the new learning.
   }
-  await appendLearnings(state.cwd, newLearnings);
+  await appendLearnings(state.cwd, tagged);
 }
 

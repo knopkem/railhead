@@ -16,9 +16,15 @@ import {
   extractFailureLearning,
   pushLearnings,
   mineFailureLearning,
+  renderLearnings,
+  supersedeLearnings,
+  learningText,
+  isPinnedLearning,
+  withProvenance,
   LEARNINGS_CHAR_LIMIT,
   LEARNED_MARKER,
   RETRACTED_MARKER,
+  PIN_MARKER,
 } from "./learnings.ts";
 
 vi.mock("../execute/executor.ts", async (importOriginal) => {
@@ -131,6 +137,36 @@ describe("appendLearnings", () => {
   it("issue #68: evictOldestToFit leaves already-fitting content untouched", () => {
     expect(evictOldestToFit("a\nb", 10)).toBe("a\nb");
   });
+
+  it("ADR 0057: supersedes a duplicate instead of accumulating it", async () => {
+    await appendLearnings(cwd, "the dev server port is 3000");
+    await appendLearnings(cwd, "the dev server port is `3000`!");
+    const content = await readFile(learningsPath(cwd), "utf8");
+    expect(content.trim().split("\n")).toHaveLength(1);
+    expect(content).toContain("`3000`");
+  });
+
+  it("ADR 0057: a pinned line survives budget eviction while old unpinned lines go", async () => {
+    await appendLearnings(cwd, "! the API key env var is REQUIRED");
+    await appendLearnings(cwd, "x".repeat(LEARNINGS_CHAR_LIMIT));
+    await appendLearnings(cwd, "newest fact");
+    const content = await readFile(learningsPath(cwd), "utf8");
+    expect(content).toContain("the API key env var is REQUIRED");
+    expect(content).toContain("newest fact");
+    expect(content).not.toContain("x".repeat(LEARNINGS_CHAR_LIMIT));
+  });
+
+  it("ADR 0057: evictOldestToFit evicts the oldest unpinned line, wherever the pin sits", () => {
+    const fitted = evictOldestToFit(["old".repeat(50), `${PIN_MARKER} keep me`, "new fact"].join("\n"), 80);
+    expect(fitted).toContain("keep me");
+    expect(fitted).toContain("new fact");
+    expect(fitted).not.toContain("oldold");
+  });
+
+  it("ADR 0057: evictOldestToFit never tail-slices a pinned line that alone exceeds the limit", () => {
+    const pin = `${PIN_MARKER} ${"p".repeat(100)}`;
+    expect(evictOldestToFit(pin, 10)).toBe(pin);
+  });
 });
 
 describe("writeLearnings", () => {
@@ -174,6 +210,68 @@ describe("wouldExceedBudget", () => {
 
   it("returns false at exactly the limit", () => {
     expect(wouldExceedBudget("a".repeat(LEARNINGS_CHAR_LIMIT - 1), 1)).toBe(false);
+  });
+});
+
+describe("pin and provenance line grammar (ADR 0057)", () => {
+  it("learningText strips the pin prefix and a trailing provenance comment", () => {
+    expect(learningText("! keep this <!-- learned: 03-01-implement -->")).toBe("keep this");
+    expect(learningText("plain fact <!-- learned: 03-01-implement -->")).toBe("plain fact");
+    expect(learningText("no metadata here")).toBe("no metadata here");
+  });
+
+  it("learningText leaves a mid-line comment alone (only the suffix is metadata)", () => {
+    expect(learningText("fact <!-- learned: x --> still prose")).toBe("fact <!-- learned: x --> still prose");
+  });
+
+  it("isPinnedLearning accepts only `! ` at line start", () => {
+    expect(isPinnedLearning(`${PIN_MARKER} pinned`)).toBe(true);
+    expect(isPinnedLearning(`  ${PIN_MARKER} pinned`)).toBe(true);
+    expect(isPinnedLearning("!pinned")).toBe(false);
+    expect(isPinnedLearning("not ! pinned")).toBe(false);
+  });
+
+  it("withProvenance appends the producing phase as a trailing comment", () => {
+    expect(withProvenance("a fact", "05-01-implement")).toBe("a fact <!-- learned: 05-01-implement -->");
+  });
+
+  it("renderLearnings strips metadata, puts pins first, and marks them", () => {
+    const content = "normal fact <!-- learned: 02-01-implement -->\n! vital fact <!-- learned: 01-01-implement -->";
+    expect(renderLearnings(content)).toBe("- [pinned] vital fact\n- normal fact");
+  });
+
+  it("renderLearnings returns an empty string for null/empty content, and skips blank lines", () => {
+    expect(renderLearnings(null)).toBe("");
+    expect(renderLearnings("")).toBe("");
+    expect(renderLearnings("\nfact\n\n")).toBe("- fact");
+  });
+});
+
+describe("supersedeLearnings (ADR 0057)", () => {
+  it("replaces an existing unpinned duplicate with the newest occurrence", () => {
+    const merged = supersedeLearnings("cargo run panics without a TTY", "cargo run panics without a `TTY`!");
+    expect(merged.split("\n")).toHaveLength(1);
+    expect(merged).toContain("`TTY`");
+  });
+
+  it("keeps the pinned line and drops the duplicate fact", () => {
+    expect(supersedeLearnings(`${PIN_MARKER} cargo panics without a TTY`, "cargo panics without a TTY")).toBe(
+      `${PIN_MARKER} cargo panics without a TTY`,
+    );
+  });
+
+  it("appends a genuinely new fact after the existing ones", () => {
+    expect(supersedeLearnings("one", "two")).toBe("one\ntwo");
+  });
+
+  it("lets a re-push from a later phase replace the provenance of the old copy", () => {
+    const first = supersedeLearnings(null, "a fact <!-- learned: 01-01-implement -->");
+    const second = supersedeLearnings(first, "a fact <!-- learned: 07-01-implement -->");
+    expect(second).toBe("a fact <!-- learned: 07-01-implement -->");
+  });
+
+  it("ignores blank incoming lines and preserves existing order otherwise", () => {
+    expect(supersedeLearnings("a\nb", "\n\nc\n")).toBe("a\nb\nc");
   });
 });
 
@@ -417,6 +515,10 @@ describe("suppressRetracted", () => {
     expect(suppressRetracted("only fact\nsecond fact", "only fact\nsecond fact")).toBeNull();
   });
 
+  it("ADR 0057: retracts a pinned line too — a proven-false fact does not survive its disproof", () => {
+    expect(suppressRetracted(`${PIN_MARKER} false pinned fact\nkeep me`, "false pinned fact")).toBe("keep me");
+  });
+
   it("preserves the order of surviving lines", () => {
     const content = "a\nb\nc\nd\ne";
     expect(suppressRetracted(content, "b\nd")).toBe("a\nc\ne");
@@ -609,6 +711,12 @@ describe("phase learning lifecycle", () => {
     expect(content).toContain("screencapture -x works");
   });
 
+  it("pushLearnings tags each fact with the producing phase (ADR 0057)", async () => {
+    await emitTranscript("06-01-implement", `${LEARNED_MARKER} cargo build needs --bin app`);
+    await pushLearnings(state, ledger, "06-01-implement");
+    expect(await readLearnings(cwd)).toContain("cargo build needs --bin app <!-- learned: 06-01-implement -->");
+  });
+
   it("mineFailureLearning skips when the worker already emitted its own LEARNED: line", async () => {
     await emitTranscript("03-01-implement", `${LEARNED_MARKER} worker knew the tooling fact`);
     await mineFailureLearning(state, ledger, "03-01-implement", { verifyOutput: "error: boom" });
@@ -632,5 +740,20 @@ describe("phase learning lifecycle", () => {
     await pushLearnings(state, ledger, "05-01-implement");
     expect(vi.mocked(executeOpendCode)).toHaveBeenCalledTimes(1);
     expect(await readLearnings(cwd)).toContain("consolidated");
+  });
+
+  it("consolidation never sees a pinned fact and re-adds it verbatim (ADR 0057)", async () => {
+    state._models = { extract: "extract-model" } as unknown as NonNullable<RunState["_models"]>;
+    await writeLearnings(cwd, `! NEVER DROP THIS FACT\n${"line\n".repeat(600)}`);
+    vi.mocked(executeOpendCode).mockImplementation(async (prompt, opts) => {
+      await emitTranscript(opts.phaseFile, "consolidated: all facts merged");
+      return { status: "ok" as const, code: 0, signal: null, errorMessage: null, durationMs: 1, steps: 1, peakTokens: 0, inFlightTokens: 0, estimateDriftTokens: 0, totalOutputTokens: 0, generationMs: 0, toolCalls: 0 };
+    });
+    await emitTranscript("06-02-implement", `${LEARNED_MARKER} new fact after the budget filled`);
+    await pushLearnings(state, ledger, "06-02-implement");
+    const content = await readLearnings(cwd);
+    expect(content).toContain("NEVER DROP THIS FACT");
+    expect(content).toContain("consolidated");
+    expect(vi.mocked(executeOpendCode).mock.calls[0][0]).not.toContain("NEVER DROP THIS FACT");
   });
 });

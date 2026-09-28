@@ -1,6 +1,6 @@
 import { parseVerdict } from "./reviewer.ts";
 import type { PlanTicket } from "../core/ticket.ts";
-import { LEARNED_MARKER, RETRACTED_MARKER } from "../context/learnings.ts";
+import { LEARNED_MARKER, RETRACTED_MARKER, renderLearnings } from "../context/learnings.ts";
 import { buildDigestInjection, DIGEST_MARKER } from "../context/digest.ts";
 import { BROWSER_HYGIENE, HALT_CONTRACT, SCRATCH_FILE_DISCIPLINE } from "../context/prompt.ts";
 import { CHARTER_MARKER } from "../context/coherence.ts";
@@ -438,7 +438,7 @@ ${registeredProbes.map((p) => `- [${p.status.toUpperCase()}] ${p.behavior}\n  co
     : "";
 
   const learningsBlock = learnings
-    ? `\n## Project learnings (tooling facts from prior phases)\nThese are tooling/environment facts discovered by prior agents on this project. They are unverified model-claims, not tested facts. Most are safe to trust (a command that needs a flag, a port that isn't default). But a claim about YOUR OWN capabilities (e.g. "this model cannot read images") is a self-assessment that may be wrong — if such a claim would change your approach, TEST it once before deferring to it. If a learning turns out to be false, retract it with the ${RETRACTED_MARKER} marker below.\n${learnings.split("\n").map((l) => `- ${l}`).join("\n")}`
+    ? `\n## Project learnings (tooling facts from prior phases)\nThese are tooling/environment facts discovered by prior agents on this project. They are unverified model-claims, not tested facts. Most are safe to trust (a command that needs a flag, a port that isn't default). But a claim about YOUR OWN capabilities (e.g. "this model cannot read images") is a self-assessment that may be wrong — if such a claim would change your approach, TEST it once before deferring to it. If a learning turns out to be false, retract it with the ${RETRACTED_MARKER} marker below.\n${renderLearnings(learnings)}`
     : "";
 
   const digestBlock = buildDigestInjection(digest);

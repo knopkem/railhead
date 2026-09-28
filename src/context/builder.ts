@@ -1,7 +1,7 @@
 import { CHECKPOINT_START } from "../core/checkpoint.ts";
 import type { CheckpointGranularity } from "../config/config.ts";
 import { CHARTER_DOC } from "./coherence.ts";
-import { LEARNED_MARKER, RETRACTED_MARKER } from "./learnings.ts";
+import { LEARNED_MARKER, RETRACTED_MARKER, renderLearnings } from "./learnings.ts";
 import { surfaceSelfCheckApplies } from "./surface.ts";
 import type { ProjectInterface } from "../config/interface.ts";
 import { visionCapabilityBlock, type VisionCapabilityFact } from "../execute/vision-probe.ts";
@@ -313,7 +313,7 @@ ${opts.contracts}`);
   if (opts.learnings) {
     parts.push(`## Project learnings (tooling facts from prior phases)
 These are tooling/environment facts discovered by prior agents. They are unverified model-claims — trust the safe ones, test any self-assessment about your own capabilities before deferring to it. If a fact here is wrong and you prove it, retract it with a ${RETRACTED_MARKER} line in your closing reply (see Checkpointing).
-${opts.learnings.split("\n").map((l) => `- ${l}`).join("\n")}`);
+${renderLearnings(opts.learnings)}`);
   }
   if (opts.digest) {
     // Issue #106 (E): the digest is a third-party model-claim, not tested

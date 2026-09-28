@@ -1,6 +1,7 @@
 import { parseVerdict } from "./reviewer.ts";
 import { buildDigestInjection, DIGEST_MARKER } from "../context/digest.ts";
 import { renderPreamble, type PhaseMessages } from "../context/preamble.ts";
+import { renderLearnings } from "../context/learnings.ts";
 
 export interface StructuralVerdict {
   verdict: "pass" | "fail" | "inconclusive";
@@ -56,7 +57,7 @@ export function buildStructuralReviewPrompt(options: {
     ? verifyCommands.join("\n")
     : "(no verify commands configured)";
   const learningsBlock = learnings?.trim()
-    ? `\n\nKNOWN TOOLING FACTS (from prior phases — unverified model claims, test before trusting):\n${learnings.trim()}\n`
+    ? `\n\nKNOWN TOOLING FACTS (from prior phases — unverified model claims, test before trusting):\n${renderLearnings(learnings)}\n`
     : "";
   const digestBlock = buildDigestInjection(digest);
 

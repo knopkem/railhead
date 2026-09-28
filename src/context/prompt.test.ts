@@ -165,6 +165,18 @@ describe("buildReviewerPrompt", () => {
     expect(p).toContain("npm run dev serves on 5173");
   });
 
+  it("renders an operator-pinned learning first, marked and without provenance (ADR 0057)", async () => {
+    const p = await reviewerText({
+      ticketFile: "01-a.md",
+      ticketBody: "work",
+      criteria: ["c1"],
+      diff: "d",
+      learnings: "normal fact\n! always run npm ci first <!-- learned: 01-01-implement -->",
+    });
+    expect(p).toContain("- [pinned] always run npm ci first");
+    expect(p).not.toContain("<!-- learned:");
+  });
+
   it("omits the learnings block when learnings are null or absent", async () => {
     const p = await reviewerText({
       ticketFile: "01-a.md",

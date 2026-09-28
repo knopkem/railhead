@@ -2,6 +2,7 @@ import { scanJsonObjects } from "../core/json.ts";
 import { indexOfOutsideFences } from "../core/fences.ts";
 import { parseProductPlan, type ProductPlan } from "../core/product.ts";
 import { DEFAULT_CONTEXT_TOKENS, normalizeShellCommands } from "../config/config.ts";
+import { renderLearnings } from "../context/learnings.ts";
 import { titleSlug, type PlanTicket, type Ticket } from "../core/ticket.ts";
 import type { ProjectInterface } from "../config/interface.ts";
 import { PROJECT_INTERFACES } from "../config/interface.ts";
@@ -1093,7 +1094,7 @@ export function buildFeatureStepPrompt(input: FeatureStepPromptInput): string {
     : "";
   const stateBlock = input.projectDigest?.trim() || input.learnings?.trim()
     ? `\nThe project's CURRENT STATE (use it to name real integration points — do not invent seams):
-${input.projectDigest?.trim() ? `\nArchitectural state:\n${input.projectDigest.trim()}\n` : ""}${input.learnings?.trim() ? `\nEnvironment/tooling learnings:\n${input.learnings.trim()}\n` : ""}`
+${input.projectDigest?.trim() ? `\nArchitectural state:\n${input.projectDigest.trim()}\n` : ""}${input.learnings?.trim() ? `\nEnvironment/tooling learnings:\n${renderLearnings(input.learnings)}\n` : ""}`
     : "";
   const priorBlock = input.priorAttempt?.trim()
     ? `\nThe PREVIOUS attempt at this step (the human tested it and reopened the step) — the prompt must say what to keep and what to change:
