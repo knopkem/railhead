@@ -350,6 +350,132 @@ describe("processTicket", () => {
     expect(await git.commitSubjectsSince(cwd, null, 2)).toEqual(["index: update contracts after 01", "01 — Add greet"]);
   });
 
+  it("records verification debt when a surface checkpoint has no visual self-check evidence", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      projectInterface: "browser-ui",
+      interaction_smoke: false,
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: DEFAULT_MODEL, visual: null, goal: null, extract: null },
+    });
+    const t: Ticket = {
+      file: "01-hud.md", number: "01", slug: "hud", title: "HUD",
+      what: "draw the HUD",
+      criteria: ["the HUD shows the score after a point is scored"]};
+    await writeTickets(ticketsDir, [t]);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [toTicketState(t)];
+    const ticketState = state.tickets[0];
+
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "$CHECKPOINT ticket=01");
+        return { ...okResult(), sessionId: "sess-hud", checkpointTicket: "01" };
+      }
+      if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const outcome = await processTicket(state, ledgerDir, ticketState);
+
+    expect(outcome).toBe("ok");
+    expect(ticketState.status).toBe("committed");
+    // No capture or image read in the build transcript → must-check debt for
+    // the next goal/visual checkpoint, never a silent "I looked".
+    expect((ticketState.unverified ?? []).some((u) => /visual self-check/i.test(u))).toBe(true);
+  });
+
+  it("a surface checkpoint WITH an image read records no visual verification debt", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      projectInterface: "browser-ui",
+      interaction_smoke: false,
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: DEFAULT_MODEL, visual: null, goal: null, extract: null },
+    });
+    const t: Ticket = {
+      file: "01-hud.md", number: "01", slug: "hud", title: "HUD",
+      what: "draw the HUD",
+      criteria: ["the HUD shows the score after a point is scored"]};
+    await writeTickets(ticketsDir, [t]);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [toTicketState(t)];
+    const ticketState = state.tickets[0];
+
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitToolUse(ledgerDir, options.phaseFile, "read", { filePath: ".railhead/screenshot-01.png" });
+        await emitText(ledgerDir, options.phaseFile, "$CHECKPOINT ticket=01");
+        return { ...okResult(), sessionId: "sess-hud", checkpointTicket: "01" };
+      }
+      if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const outcome = await processTicket(state, ledgerDir, ticketState);
+
+    expect(outcome).toBe("ok");
+    expect(ticketState.status).toBe("committed");
+    expect(ticketState.unverified ?? []).toEqual([]);
+    expect(ticketState.logs.some((l) => /visual self-check evidence present/.test(l))).toBe(true);
+  });
+
+  it("never demands visual evidence from a terminal/none project's surface-vocabulary ticket", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      projectInterface: "terminal",
+      interaction_smoke: false,
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: DEFAULT_MODEL, visual: null, goal: null, extract: null },
+    });
+    const t: Ticket = {
+      file: "01-menu.md", number: "01", slug: "menu", title: "CLI menu",
+      what: "render the menu and handle input",
+      criteria: ["the menu shows the selected item", "input is echoed back"]};
+    await writeTickets(ticketsDir, [t]);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [toTicketState(t)];
+    const ticketState = state.tickets[0];
+
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "$CHECKPOINT ticket=01");
+        return { ...okResult(), sessionId: "sess-cli", checkpointTicket: "01" };
+      }
+      if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const outcome = await processTicket(state, ledgerDir, ticketState);
+
+    expect(outcome).toBe("ok");
+    expect(ticketState.unverified ?? []).toEqual([]);
+  });
+
   it("contracts: regex extracts greet without calling the model (model fallback skipped)", async () => {
     const cwd = await freshRepo();
     const ticketsDir = ticketsDirOf(cwd);

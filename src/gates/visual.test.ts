@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { joinPhaseMessages, type PhaseMessages } from "../context/preamble.ts";
 const promptText = (m: PhaseMessages): string => joinPhaseMessages(m);
 const visualPrompt = (o: Parameters<typeof buildVisualReviewPrompt>[0]): string => promptText(buildVisualReviewPrompt(o));
-import { parseVisualVerdict, buildVisualReviewPrompt, runCommandHint, shouldRunVisualReview, touchesVisualSurface, DEGRADED_TARGET_RECOVERY_NOTE } from "./visual.ts";
+import { parseVisualVerdict, buildVisualReviewPrompt, runCommandHint, shouldRunVisualReview, touchesVisualSurface, surfaceSelfCheckApplies, DEGRADED_TARGET_RECOVERY_NOTE } from "./visual.ts";
 import type { Ticket } from "../core/ticket.ts";
 
 describe("parseVisualVerdict", () => {
@@ -501,6 +501,22 @@ describe("touchesVisualSurface (issue #99 — one shared surface gate)", () => {
 
   it("returns false for a pure structural/config ticket", () => {
     expect(touchesVisualSurface(ticket(["npm run typecheck passes", "src/constants.ts exports CELL_SIZE"]))).toBe(false);
+  });
+
+  it("surfaceSelfCheckApplies: a terminal/none project never gets a vision check, whatever its criteria say", () => {
+    const cli = ticket(["the menu shows the selected item", "input is echoed back"]);
+    expect(touchesVisualSurface(cli)).toBe(true);
+    expect(surfaceSelfCheckApplies([cli], "terminal")).toBe(false);
+    expect(surfaceSelfCheckApplies([cli], "none")).toBe(false);
+  });
+
+  it("surfaceSelfCheckApplies: rendered interfaces keep the criteria-based gate", () => {
+    const surface = ticket(["render the board"]);
+    const structural = ticket(["npm run typecheck passes"]);
+    for (const iface of ["browser-ui", "canvas", "native", null, undefined] as const) {
+      expect(surfaceSelfCheckApplies([surface], iface)).toBe(true);
+      expect(surfaceSelfCheckApplies([structural], iface)).toBe(false);
+    }
   });
 });
 

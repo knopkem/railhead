@@ -1,4 +1,5 @@
 import type { Ticket } from "../core/ticket.ts";
+import type { ProjectInterface } from "../config/interface.ts";
 
 /**
  * The recall-biased surface gate (ADR 0028 / issue #99), isolated in a LIGHT
@@ -41,6 +42,26 @@ export const VISUAL_CRITERIA_RE =
 export function touchesVisualSurface(ticket: { criteria: string[] }): boolean {
   if (ticket.criteria.length === 0) return true;
   return ticket.criteria.some((c) => VISUAL_CRITERIA_RE.test(c));
+}
+
+/**
+ * Whether the rendered-surface self-check (capture → read → judge) applies to
+ * an invocation. Two independent conditions:
+ *  - the project's declared interface has a rendered surface at all. An
+ *    explicitly non-rendered deliverable (`terminal`/`none`) NEVER gets a
+ *    vision requirement, whatever its criteria vocabulary says — a CLI's
+ *    "menu"/"input"/"button" words are user-facing but not pixels. An
+ *    undeclared interface (null) keeps the historical criteria-based
+ *    classification.
+ *  - at least one ticket in the invocation is a surface ticket (recall-biased,
+ *    `touchesVisualSurface`).
+ */
+export function surfaceSelfCheckApplies(
+  tickets: { criteria: string[] }[],
+  iface: ProjectInterface | null | undefined,
+): boolean {
+  if (iface === "terminal" || iface === "none") return false;
+  return tickets.some((t) => touchesVisualSurface(t));
 }
 
 /** Structural sub-type helper for the handful of seats that hold only a

@@ -9,8 +9,8 @@ import { renderPreamble, type PhaseMessages } from "../context/preamble.ts";
 // overview import chain must not drag in reviewer.ts); visual.ts re-exports it
 // as the seat the docs name — the ONE predicate per-ticket visual review
 // (shouldRunVisualReview) and charter injection share.
-import { touchesVisualSurface, VISUAL_CRITERIA_RE } from "../context/surface.ts";
-export { touchesVisualSurface, VISUAL_CRITERIA_RE };
+import { touchesVisualSurface, surfaceSelfCheckApplies, VISUAL_CRITERIA_RE } from "../context/surface.ts";
+export { touchesVisualSurface, surfaceSelfCheckApplies, VISUAL_CRITERIA_RE };
 
 export interface VisualVerdict {
   verdict: "pass" | "fail" | "inconclusive";

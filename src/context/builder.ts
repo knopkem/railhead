@@ -2,7 +2,8 @@ import { CHECKPOINT_START } from "../core/checkpoint.ts";
 import type { CheckpointGranularity } from "../config/config.ts";
 import { CHARTER_DOC } from "./coherence.ts";
 import { LEARNED_MARKER, RETRACTED_MARKER } from "./learnings.ts";
-import { touchesVisualSurface } from "./surface.ts";
+import { surfaceSelfCheckApplies } from "./surface.ts";
+import type { ProjectInterface } from "../config/interface.ts";
 import { visionCapabilityBlock, type VisionCapabilityFact } from "../execute/vision-probe.ts";
 import { renderPreamble, renderTask, type PhaseMessages } from "./preamble.ts";
 
@@ -72,11 +73,11 @@ export interface GateFeedback {
  * railhead otherwise suppresses: one agent holding the whole visual goal and
  * refining freely. */
 const OPEN_ENDED_CADENCE = `You stop when you judge the artifact genuinely meets the goal. This is an OPEN-ENDED CRAFT ticket: there are NO structural acceptance criteria to check off — the rendered artifact IS the deliverable, and you are its judge. Work in a loop:
-1. Build and run the app, and capture a screenshot under .railhead/ (e.g. .railhead/screenshot-01.png).
-2. READ the screenshot back (you are vision-capable — the railhead verified it). Never judge from code alone.
-3. Judge it against this ticket's goal and the design intent. Name, concretely, what is weakest.
+1. Run the product and capture the FULL rendered artifact — the whole view/page/window it presents, not only one feature — under .railhead/ (e.g. .railhead/screenshot-01.png). If the product cannot yet render a complete view at this stage, capture what exists.
+2. READ the capture back (you are vision-capable — the railhead verified it). Never judge from code alone.
+3. Judge it as a whole against this ticket's goal and the design intent: the composition, layout, hierarchy, cohesion, and detail — not feature by feature. Name, concretely, what is weakest.
 4. Improve the weakest thing. Re-run, re-capture, re-read.
-Do NOT stop at the first version that builds and runs. Keep iterating until the artifact is genuinely good, then checkpoint. The artifact is the product: token thrift is NOT a concern on this ticket — re-read files and take as many screenshots as the work needs.`;
+Do NOT stop at the first version that builds and runs. Keep iterating until the artifact is genuinely good, then checkpoint. The artifact is the product: token thrift is NOT a concern on this ticket — re-read files and take as many captures as the work needs.`;
 
 /** v2 issue 01: the surface-ticket self-check. Any ticket whose criteria touch
  * the rendered surface gets the same screenshot loop discipline the open-ended
@@ -85,15 +86,15 @@ Do NOT stop at the first version that builds and runs. Keep iterating until the 
  * an endless craft brief. Gated on the railhead's measured vision capability:
  * a blind seat is told to verify through DOM/state evidence instead of
  * pretending to look. */
-const SURFACE_CADENCE = `Before checkpointing, verify this ticket with your own eyes — its criteria touch the rendered surface:
-1. Build and run the app, capture a screenshot of the affected surface under .railhead/ (e.g. .railhead/screenshot-01.png).
-2. READ the screenshot back (the railhead measured this seat's model as vision-capable; a read returning no pixels is a tool failure to report, never an accepted limitation).
-3. Judge what you see against this ticket's criteria and the Design intent injected below. Name the weakest thing.
-4. Fix the weakest thing and repeat until the criteria genuinely hold on the running artifact.
-A ticket whose criteria pass on paper but whose render is visibly wrong is NOT green — do not checkpoint it. Token thrift yields to this check on surface tickets: take the screenshots the work needs.`;
+const SURFACE_CADENCE = `Before checkpointing, verify this ticket with your own eyes — its criteria touch a rendered surface:
+1. Run the product the way a user operates it, and capture the FULL rendered artifact — the whole view/page/window it presents, not only the part this ticket changed — under .railhead/ (e.g. .railhead/screenshot-01.png). If the product cannot yet render a complete view at this stage, capture what exists.
+2. READ the capture back (the railhead measured this seat's model as vision-capable; a read returning no pixels is a tool failure to report, never an accepted limitation).
+3. Judge what you see against this ticket's criteria AND the whole composition: the design intent's layout model, no region overflow or overlap, the value hierarchy still holds, and this ticket did not visibly degrade the rest. Name the weakest thing.
+4. Fix the weakest thing and repeat until the criteria genuinely hold on the running artifact and the composition is intact.
+A programmatic probe (a scripted state read, a pixel sample, an automated assertion) proves behavior, not quality — reading the frame is the quality check. A ticket whose criteria pass on paper but whose render is visibly wrong is NOT green — do not checkpoint it. Token thrift yields to this check on surface tickets: take the captures the work needs.`;
 
 const SURFACE_CADENCE_BLIND = `Before checkpointing, verify this ticket against the running artifact — its criteria touch the rendered surface, and the railhead measured this seat's model as unable to read image pixels:
-1. Build and run the app, drive the surface through the real input path, and assert the visible state through the DOM/a11y tree, programmatic state reads, or console output — not by claiming to have looked.
+1. Run the product the way a user operates it, drive the surface through the real input path, and assert the visible state through the accessibility tree, programmatic state reads, or console output — not by claiming to have looked.
 2. Label any purely visual property you cannot check as unverified in your closing note rather than asserting it.
 Do not checkpoint a surface ticket whose observable behaviour you could not confirm through those channels.`;
 
@@ -101,8 +102,8 @@ Do not checkpoint a surface ticket whose observable behaviour you could not conf
  * The seat is told to TRY the read and report what happens — never that it was
  * measured blind, which is the false claim a flaky probe used to produce. */
 const SURFACE_CADENCE_UNKNOWN = `Before checkpointing, verify this ticket against the running artifact — its criteria touch the rendered surface, and the railhead has no current image-reading measurement for this seat's model:
-1. Build and run the app, capture a screenshot of the affected surface under .railhead/ (e.g. .railhead/screenshot-01.png), and READ it back. If the read returns pixels, judge what you see against this ticket's criteria and the Design intent injected below, fix the weakest thing, and repeat until the criteria genuinely hold on the running artifact.
-2. If the read returns no pixels, that is a tool failure: report it, verify through the DOM/a11y tree, programmatic state reads, or console output instead, and label any purely visual property as unverified. Never claim a visual check the read did not deliver.
+1. Run the product the way a user operates it, capture the FULL rendered artifact (the whole view/page/window it presents, not only the part this ticket changed) under .railhead/ (e.g. .railhead/screenshot-01.png), and READ it back. If the read returns pixels, judge what you see against this ticket's criteria, the design intent, and the whole composition (layout model, no overflow/overlap, value hierarchy), fix the weakest thing, and repeat until the criteria genuinely hold on the running artifact.
+2. If the read returns no pixels, that is a tool failure: report it, verify through the accessibility tree, programmatic state reads, or console output instead, and label any purely visual property as unverified. Never claim a visual check the read did not deliver.
 A ticket whose criteria pass on paper but whose render is visibly wrong is NOT green — do not checkpoint it.`;
 
 /** The directive options that turn a ticket batch's cadence into the surface
@@ -440,6 +441,11 @@ export function buildBuilderPrompt(opts: {
    * work with pixels. Also gates the surface cadence (v2 issue 01): a blind
    * seat gets the DOM/state self-check instead of a screenshot loop. */
   visionCapability?: VisionCapabilityFact | null;
+  /** The project's declared interaction interface (issue #97). An explicitly
+   * non-rendered deliverable (`terminal`/`none`) never gets the screenshot
+   * self-check, whatever its criteria vocabulary says. Null/absent keeps the
+   * criteria-based classification. */
+  projectInterface?: ProjectInterface | null;
   /** v2 issue 01: re-inject the design doc's FULL text into the task instead
    * of the re-read instruction. The caller sets it on a warm resume whose
    * session may have compacted the vision away — cheap models are not trusted
@@ -454,7 +460,7 @@ export function buildBuilderPrompt(opts: {
   // v2 issue 01: every invocation whose tickets touch the rendered surface
   // gets the surface self-check, not just the one open-ended craft ticket.
   const cadenceOptions: CadenceOptions = {
-    surface: tickets.some((t) => touchesVisualSurface(t)),
+    surface: surfaceSelfCheckApplies(tickets, opts.projectInterface),
     visionCapable: opts.visionCapability ? opts.visionCapability.readsImages : null,
   };
   // gh #105: under product granularity the caller surfaces the CURRENT ticket
@@ -541,13 +547,16 @@ export function buildBuilderFindingsPrompt(opts: {
   /** v2 issue 01: the measured vision capability, so a corrected surface
    * ticket gets the screenshot self-check when the seat can actually see. */
   visionCapability?: VisionCapabilityFact | null;
+  /** The project's declared interaction interface (issue #97) — see
+   * {@link buildBuilderPrompt}. */
+  projectInterface?: ProjectInterface | null;
 }): PhaseMessages {
   const { session, granularity, tickets, verify, feedback, design, coherence } = opts;
   const findingsBlock = feedback.findings.length
     ? feedback.findings.map((f, i) => `${i + 1}. ${f}`).join("\n")
     : "(no findings listed)";
   const cadenceOptions: CadenceOptions = {
-    surface: tickets.some((t) => touchesVisualSurface(t)),
+    surface: surfaceSelfCheckApplies(tickets, opts.projectInterface),
     visionCapable: opts.visionCapability ? opts.visionCapability.readsImages : null,
   };
   return {

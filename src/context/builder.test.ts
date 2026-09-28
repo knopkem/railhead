@@ -458,8 +458,9 @@ describe("open-ended craft ticket — the art agent", () => {
   it("switches the directive to the screenshot-iteration craft loop, not checkpoint-on-green", () => {
     const p = builderPrompt({ session: {}, granularity: "product", tickets: [artTicket], verify: ["npm test"] });
     expect(p).toContain("OPEN-ENDED CRAFT ticket");
-    expect(p).toMatch(/READ the screenshot back/i);
-    expect(p).toMatch(/capture a screenshot under \.railhead\//i);
+    expect(p).toMatch(/READ the capture back/i);
+    expect(p).toMatch(/FULL rendered artifact/i);
+    expect(p).toMatch(/Judge it as a whole/i);
     expect(p).toMatch(/Keep iterating until the artifact is genuinely good/i);
     expect(p).not.toMatch(/checkpoint the moment it is individually green/i);
   });
@@ -523,8 +524,10 @@ describe("surface cadence for visual tickets (v2 issue 01)", () => {
   it("generalizes the screenshot loop to every visual-surface ticket when vision is verified", () => {
     const p = builderPrompt({ ...fresh, tickets: [surfaceTicket], visionCapability: capable });
     expect(p).toMatch(/verify this ticket with your own eyes/i);
-    expect(p).toMatch(/READ the screenshot back/i);
-    expect(p).toMatch(/screenshot of the affected surface under \.railhead\//i);
+    expect(p).toMatch(/READ the capture back/i);
+    expect(p).toMatch(/FULL rendered artifact/i);
+    expect(p).toMatch(/whole composition/i);
+    expect(p).toMatch(/proves behavior, not quality/i);
     expect(p).toMatch(/visibly wrong is NOT green/i);
   });
 
@@ -551,6 +554,23 @@ describe("surface cadence for visual tickets (v2 issue 01)", () => {
     };
     const p = builderPrompt({ ...fresh, tickets: [structural], visionCapability: capable });
     expect(p).not.toMatch(/verify this ticket with your own eyes/i);
+  });
+
+  it("never asks a terminal/none project for a vision check, whatever the criteria say", () => {
+    const cliLike: BuilderTicket = {
+      file: "tickets/04-menu.md",
+      number: "04",
+      title: "CLI menu",
+      body: "Render the menu and handle input.",
+      criteria: ["the menu shows the selected item", "input is echoed back"],
+    };
+    for (const iface of ["terminal", "none"] as const) {
+      const p = builderPrompt({ ...fresh, tickets: [cliLike], visionCapability: capable, projectInterface: iface });
+      expect(p).not.toMatch(/verify this ticket with your own eyes/i);
+      expect(p).not.toMatch(/FULL rendered artifact/i);
+    }
+    const rendered = builderPrompt({ ...fresh, tickets: [cliLike], visionCapability: capable, projectInterface: "browser-ui" });
+    expect(rendered).toMatch(/verify this ticket with your own eyes/i);
   });
 
   it("re-injects the design doc verbatim on a warm surface resume (cheap models do not re-read)", () => {

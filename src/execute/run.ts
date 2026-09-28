@@ -34,8 +34,8 @@ import { kickoffPerTicketVisualReview, joinPendingVisualReview, visualReviewLoop
 import { addPendingCheckpoint } from "../core/pending-checkpoints.ts";
 import { runCommandHint } from "../gates/visual.ts";
 import { buildInteractionSmokePrompt, parseInteractionSmokeVerdict, type InteractionSmokeScope } from "../gates/interaction-smoke.ts";
-import { interactionSmokePassGap, parseToolCalls } from "../gates/evidence.ts";
-import { touchesVisualSurface } from "../context/surface.ts";
+import { hasRenderObservation, interactionSmokePassGap, parseToolCalls } from "../gates/evidence.ts";
+import { surfaceSelfCheckApplies, touchesVisualSurface } from "../context/surface.ts";
 import { goalReviewAtCheckpoint, goalReviewAtRunEnd, goalCheckpointsToFire } from "../gates/goal-loop.ts";
 import { structuralReviewAtCheckpoint, structuralCheckpointsToFire, runStructuralReview } from "../gates/structural-loop.ts";
 // Re-exported so run.ts's historical surface (and run.test.ts's import) keeps
@@ -2038,6 +2038,30 @@ async function builderInvocationPlan(
 }
 
 /**
+ * v2 issue 01 follow-through: a surface checkpoint whose build transcript has
+ * no capture or image read did not follow the self-check cadence. Record it as
+ * verification debt — the next goal/visual checkpoint gets it as an explicit
+ * must-check item — rather than silently trusting "I looked". Never a hard
+ * failure: programmatic evidence can be legitimate for some tickets, and a
+ * blind or unmeasured seat is handled by the cadence variants, not this check.
+ */
+async function recordVisualSelfCheck(
+  ledger: string,
+  ticket: TicketState,
+  phaseFile: string,
+): Promise<void> {
+  const raw = await readFile(eventPath(ledger, phaseFile), "utf8").catch(() => "");
+  if (hasRenderObservation(parseToolCalls(raw))) {
+    ticket.logs.push(`build ${phaseFile}: visual self-check evidence present (a capture or image read)`);
+    return;
+  }
+  const note = "no visual self-check evidence in the build transcript (no capture or image read) — the surface cadence was not followed; check the rendered surface";
+  ticket.unverified = [...(ticket.unverified ?? []), note];
+  ticket.logs.push(`build ${phaseFile}: ${note}`);
+  console.log(`[${nowClock()}]   ${ticket.number} build ⚠ ${note}`);
+}
+
+/**
  * The durable-session builder engine. Resumes `state.builder.session_id` (or
  * starts fresh when none is held), asks the session to implement the current
  * unit and stop at a `$CHECKPOINT ticket=NN` marker, and returns ok only when
@@ -2130,6 +2154,12 @@ async function runBuilderStep(
    * re-drive once as a SEEDED advance (a fresh session must not receive a
    * findings prompt that references a "last checkpoint" it never had). */
   const visionCapability = await readVisionCapabilityFor(state.cwd, state._models?.implement ?? null);
+  // A surface checkpoint is expected to carry a capture/image read in its
+  // transcript. Gated on the same interface-aware classification the cadence
+  // used, and skipped when the seat was measured blind (the cadence then asked
+  // for state evidence, not pixels).
+  const visualSelfCheckDue = surfaceSelfCheckApplies(promptTickets, state.config.projectInterface ?? null)
+    && visionCapability?.readsImages !== false;
   // Progress evidence for the capacity verdict: captured once per builder
   // invocation, before any drive, so a compaction count can be read against
   // whether the invocation actually moved the worktree. Compaction with
@@ -2156,6 +2186,7 @@ async function runBuilderStep(
           design: surface ? designDoc : null,
           coherence: charter,
           visionCapability,
+          projectInterface: state.config.projectInterface ?? null,
         })
       : buildBuilderPrompt({
           session: targetSession,
@@ -2188,6 +2219,7 @@ async function runBuilderStep(
           charter,
           contextBudget: contextBudget(state),
           visionCapability,
+          projectInterface: state.config.projectInterface ?? null,
         });
     // Issue #133: a fresh seed (first run, or after a session-lost recovery
     // dropped the handle) branches off the base session with the builder's
@@ -2307,6 +2339,7 @@ async function runBuilderStep(
       ticket.logs.push(`build ${phaseFile}: no marker, but HEAD moved during the invocation (builder committed ${head.slice(0, 8)}) — counting it as the checkpoint; verify still gates the commit`);
       console.log(`[${nowClock()}]   ${ticket.number} build ⊘ no marker, HEAD moved — counting the invocation's commit as the checkpoint`);
       ticket.context = await analyzePhase(ledger, phaseFile);
+      if (visualSelfCheckDue) await recordVisualSelfCheck(ledger, ticket, phaseFile);
       return { ok: true, toolCalls: result.toolCalls };
     }
     // v2 issue 01 fallback: a turn that ended with NO marker but whose ticket
@@ -2318,6 +2351,7 @@ async function runBuilderStep(
       ticket.logs.push(`build ${phaseFile}: ended without a marker, but ticket ${expectedTicket} was already verify-green — counting it as the checkpoint (v2 issue 01 fallback)`);
       console.log(`[${nowClock()}]   ${ticket.number} build ⊘ no marker, already verify-green — counting it as the checkpoint`);
       ticket.context = await analyzePhase(ledger, phaseFile);
+      if (visualSelfCheckDue) await recordVisualSelfCheck(ledger, ticket, phaseFile);
       return { ok: true, toolCalls: result.toolCalls };
     }
     const err =
@@ -2342,6 +2376,7 @@ async function runBuilderStep(
   console.log(
     `[${nowClock()}]   ${ticket.number} build ✓ checkpoint ${markerTicket} — ${result.steps} steps · ctx ${(result.inFlightTokens / 1000).toFixed(1)}k${sessionBit} · ${builder.checkpoint_count + 1} checkpoints`,
   );
+  if (visualSelfCheckDue) await recordVisualSelfCheck(ledger, ticket, phaseFile);
   return { ok: true, toolCalls: result.toolCalls };
 }
 

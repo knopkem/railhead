@@ -25,6 +25,18 @@ The model was not misbehaving. It followed its only instruction: try until
 green. The contract offered no honest failure, and the enforcement was too
 weak to substitute for one.
 
+## Amendment: automated visual self-check debt rides the same must-check channel (Sep 2026)
+
+A surface ticket's checkpoint transcript is now checked for a capture or an
+image read (`hasRenderObservation`). If the check was due — the ticket touches
+a rendered surface, the project's declared interface HAS a rendered surface
+(`terminal`/`none` never do), and the seat was not measured blind — and the
+transcript shows neither, the ticket records verification debt through the
+same `ticket.unverified` channel a `$BLOCKED: verification-unavailable` exit
+uses, so the next goal/visual checkpoint must-check it. It is never a hard
+failure: programmatic evidence is legitimate for some tickets, and this is
+truth-in-advertising for "I looked", not a gate on how the work is verified.
+
 ## Context
 
 - **No blocked exit exists.** The builder prompt defines `$CHECKPOINT` and
