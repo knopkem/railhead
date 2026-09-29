@@ -8,10 +8,12 @@ import {
   commitPaths,
   commitSubjectsSince,
   commitOrReuseHead,
+  dirtyPaths,
   ensureInitialCommit,
   initGit,
   listTrackedFiles,
   rangeDiff,
+  restorePaths,
   workingDiff,
   workingTreeSummary,
   readProjectDoc,
@@ -46,6 +48,19 @@ describe("listTrackedFiles", () => {
     const dir = await mkdtemp(join(tmpdir(), "git-none-"));
     dirs.push(dir);
     expect(await listTrackedFiles(dir)).toEqual([]);
+  });
+});
+
+describe("restorePaths (ADR 0058)", () => {
+  it("discards worktree changes to a named tracked path", async () => {
+    const cwd = await freshRepo();
+    await writeFile(join(cwd, "prompt"), "planned v1\n");
+    await commit(cwd, "track the legacy prompt artifact");
+    await writeFile(join(cwd, "prompt"), "planned v2\n");
+    expect(await dirtyPaths(cwd)).toContain("prompt");
+    await restorePaths(cwd, ["prompt"]);
+    expect(await readFile(join(cwd, "prompt"), "utf8")).toBe("planned v1\n");
+    expect(await dirtyPaths(cwd)).not.toContain("prompt");
   });
 });
 

@@ -105,3 +105,15 @@ interactive `railhead fix` now flows from the printed plan straight into the
 run, exactly like an accepted interactive build plan. `-c`/`--continue` still
 skips the question for interactive feature runs.
 
+## Amendment (2026-09-29): every mode starts on acceptance; the feature prompts are gone
+
+The two last hold-outs are removed. Interactive feature runs asked twice —
+"Build this step now?" after the derivation (before any plan existed) and
+"Start this run now?" after decomposition (after the plan review had already
+accepted the plan in `PLAN.md`). Neither carried a decision: plan acceptance
+is the approval point. `railhead feature` now flows from the accepted plan
+into tickets and the run exactly like build/fix. `-c`/`--continue` is removed
+with the question it skipped; the derived feature prompt is no longer printed
+raw (it is recorded in the plan's `origin.json`). Feature plan reuse and the
+removal of the root `prompt` artifact are ADR 0058.
+

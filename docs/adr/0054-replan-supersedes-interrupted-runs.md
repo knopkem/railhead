@@ -58,3 +58,16 @@ ADR 0016's invariant "`railhead run` on a branch with a prior running/stopped
 run resumes it" still holds verbatim — this ADR narrows only the post-plan
 handoff, which is not a `railhead run` invocation. ADR 0016's Gap 3 invariant
 check stays as the corruption guard it was meant to be.
+
+## Amendment (2026-09-29): a feature re-run with an intact plan does not re-plan
+
+Decision 2's "re-running a planning command asks for a new plan" governs the
+commands that PLAN. `railhead feature` now checks its step namespace first:
+when the plan is intact (origin.json plus every ticket file it recorded),
+the re-run reuses it and starts/resumes the run directly, unless `--replan`
+is passed or the step was reopened with feedback (ADR 0058). Auto-resume on
+that path is safe for the same reason this ADR disabled it after a replan —
+the ticket files were not replaced. Every path that still plans supersedes
+the branch's interrupted runs exactly as below. The plan-only path in
+decision 2 (the user declines "Start this run now?") no longer exists:
+accepting a plan always starts the run.

@@ -402,9 +402,10 @@ export const RAILHEAD_IGNORES = [
 
 /**
  * The files the Railhead itself puts in a project — config and plan/run
- * artifacts, including the root `prompt` file `cmdBuild` persists. A tracked
- * repo whose files are ALL in the owned set has no work of its own yet, so
- * `build`'s greenfield posture is still correct.
+ * artifacts, including the legacy root `prompt` file `cmdBuild` once persisted
+ * (ADR 0058; kept here so an older repo still reads as railhead-owned). A
+ * tracked repo whose files are ALL in the owned set has no work of its own
+ * yet, so `build`'s greenfield posture is still correct.
  */
 const RAILHEAD_OWNED_FILES = new Set([
   "railhead.json",

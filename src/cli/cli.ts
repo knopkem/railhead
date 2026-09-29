@@ -53,7 +53,7 @@ import {
 import type { TicketState, RunState } from "../core/state.ts";
 import { renderStatusTable, writeReport, elapsedLabel, nowClock, renderNextActionable, renderArcSummary } from "./overview.ts";
 import { runPlan, maybeGenerateAgentsMd, runSharpenSession, runProductSession, reviseProductArc, deriveFeaturePrompt, type ProductSessionResult } from "../plan/planner.ts";
-import { readPlanOrigin } from "../plan/plan-identity.ts";
+import { readPlanOrigin, readReusablePlan } from "../plan/plan-identity.ts";
 import { readProductPlan, writeProductPlan, nextArcAction, setStepStatus, PRODUCT_DOC, type ProductStep } from "../core/product.ts";
 import {
   GRILL_DEPTH_OPTIONS,
@@ -151,7 +151,7 @@ export async function main(argv: string[]): Promise<void> {
 function usage() {
   console.log(`usage: railhead <command>
 
-  build "<what to build>" [--model M] [-a] [-c] [--full|--medium|--light|--none]
+  build "<what to build>" [--model M] [-a] [--full|--medium|--light|--none]
        [--review M|full|light|off] [--vision full|light|off] [--goal full|light|off]
        [--structural full|light|off] [--sharpen|--no-sharpen] [--yolo] [--verbose]
        [--greenfield]
@@ -167,8 +167,8 @@ function usage() {
                   --medium per-ticket code review + goal/structural checkpoints
                   --full   everything on (per-ticket visual too)
                   --none   plan -> implement -> verify -> commit, no reviews
-       -a/--auto: no human prompts (light preset unless another is given); auto-start
-       -c:        ask all questions, then auto-start the run
+       -a/--auto: no human prompts (light preset unless another is given); accepting
+                  the plan (or the fix) starts the run with no further prompt.
        --sharpen/--no-sharpen: boolean override (presets default the sharpening
        interview off under --light/--none)
        a clarifying interview runs when a preset runs sharpen (--medium/--full) unless
@@ -176,20 +176,22 @@ function usage() {
        build is the greenfield posture (scaffold-first): in a repo that already
        has tracked code it asks whether to switch to feature posture (under -a
        it refuses with the exact command); --greenfield forces build through.
-  fix  "<bug report>" [--model M] [-a] [-c] [--full|--medium|--light|--none]
+  fix  "<bug report>" [--model M] [-a] [--full|--medium|--light|--none]
        [--review ...] [--vision ...] [--goal ...] [--structural ...]
        [--sharpen|--no-sharpen] [--yolo] [--verbose]
        turn a bug report into a fix ticket, then run it
         flags: same as build above; interactive runs answer the same
         per-gate cadence questions (code review, then visual/goal/structural),
         with no gate forced on by fix mode
-  feature ["<one feature>"] [--step N] [flags as build]
+  feature ["<one feature>"] [--step N] [--replan] [flags as build]
        [--review ...] [--vision ...] [--goal ...] [--structural ...]
        [--sharpen|--no-sharpen] [--yolo] [--verbose] [-a]
        build ONE unattended feature of the product arc (ADR 0051). With no
         description: the first eligible roadmap step in docs/product.md is
         derived into the feature prompt; a built-but-unverified step blocks
         the next until you mark it done or reopen it; --step N forces a step.
+        A re-run reuses the step's intact plan instead of planning again;
+        --replan discards it and plans a fresh attempt (ADR 0058).
         On finish the step is marked built and the arc update is committed on
         the run branch — test it, then answer done / leave / reopen.
   product "<overall vision | steering>" [--model M] [-a] [--verbose]
@@ -793,7 +795,7 @@ export function foreignBuildRefusal(evidence: string): string {
 }
 
 async function cmdBuild(cwd: string, prefs: PlanArgs, internal: { arcStepNumber?: number; slug?: string } = {}): Promise<RunOutcome | null> {
-  const { prompt, auto, cont, yolo: yoloFlag, verbose, modelOverride, overrides, sharpen, greenfield } = prefs;
+  const { prompt, auto, yolo: yoloFlag, verbose, modelOverride, overrides, sharpen, greenfield } = prefs;
   let mode = prefs.mode;
 
   // `build` is the greenfield posture: its ticket prompt mandates a
@@ -1103,25 +1105,16 @@ async function cmdBuild(cwd: string, prefs: PlanArgs, internal: { arcStepNumber?
     else console.log("no AGENTS.md written (model produced none).");
   }
 
-  if (ordered.length) {
-    await git.writeProjectDoc(cwd, "prompt", enrichedPrompt);
-    // ADR 0041 (amended): accepting the interactive plan IS the start
-    // decision — tickets are created and the build begins with no second
-    // prompt. Fix mode has no plan review at all: the run starts as soon as
-    // the fix plan is written. `-c`/`--continue` stays the explicit start
-    // signal for the remaining interactive shapes.
-    const acceptedPlan = !auto && (mode === "build" || mode === "fix");
-    const startNow = auto || cont || acceptedPlan || await askYesNo("Start this run now?", true);
-    if (startNow) {
-      return await cmdRun(cwd, [outDir, ...(verbose ? ["--verbose"] : [])], { fromPlan: true, verifySeeded });
-    } else {
-      console.log("planned; nothing run. start later with: railhead run <tickets-dir>");
-      return null;
-    }
-  } else {
-    console.log("planned; nothing run. start later with: railhead run <tickets-dir>");
+  if (!ordered.length) {
+    console.log("planned no tickets; nothing to run.");
     return null;
   }
+  // ADR 0041 (amended) / ADR 0058: accepting the plan IS the start decision —
+  // tickets are created and the build begins with no second prompt in every
+  // mode. The prompt rides the plan's origin.json, never a root `prompt` file:
+  // a worktree artifact here dirtied every replan and blocked the run-branch
+  // checkout.
+  return await cmdRun(cwd, [outDir, ...(verbose ? ["--verbose"] : [])], { fromPlan: true, verifySeeded });
 }
 
 interface GateCadenceOption {
@@ -1335,35 +1328,52 @@ async function cmdFeature(cwd: string, prefs: PlanArgs): Promise<void> {
   if (!step.description.trim()) {
     throw new Error(`step ${step.number} ("${step.title}") has no description — write one in ${PRODUCT_DOC} so the derivation has material`);
   }
-  const config = await loadConfig(cwd);
-  const models = resolveModels(config, prefs.modelOverride ? ["--model", prefs.modelOverride] : []);
-  console.log(`arc: deriving the feature prompt for step ${step.number} — ${step.title}`)
-  const prompt = await deriveFeaturePrompt({
-    cwd,
-    step: { number: step.number, title: step.title, description: step.description, feedback: step.feedback, runId: step.runId },
-    plan: arc,
-    model: models.plan ?? null,
-    maxContextTokens: config.max_context_tokens ?? undefined,
-  });
-  console.log(`\nfeature prompt (step ${step.number} — ${step.title}):\n\n${prompt}\n`);
-  if (!prefs.auto) {
-    const go = await askYesNo("Build this step now?", true);
-    if (!go) {
-      console.log("not built — `railhead feature` derives it again next time.");
-      return;
-    }
+
+  // Stable per-step namespace: a reopened step's next attempt reuses the same
+  // `.scratch/<slug>/` plan docs and `run/<slug>` branch instead of
+  // fragmenting a new one per derivation.
+  const slug = `step-${String(step.number).padStart(2, "0")}-${titleSlug(step.title)}`;
+  const outDir = join(cwd, ".scratch", slug, "issues");
+
+  // ADR 0058: a re-run after a stop, crash, or refused checkout reuses the
+  // step's intact plan instead of re-deriving and re-planning it. A step
+  // reopened with feedback always re-plans (the old plan cannot have honored
+  // the note), and `--replan` forces a fresh attempt.
+  const existing = prefs.replan ? null : await readReusablePlan(outDir);
+  const pendingFeedback = step.feedback?.trim() ?? "";
+  if (existing && pendingFeedback) {
+    console.log(`arc: step ${step.number} was reopened with feedback — re-planning instead of reusing the existing ${existing.tickets}-ticket plan`);
   }
-  // The arc's update commits on the product branch now, so the upcoming
-  // per-ticket commits stay pure feature diffs (stage-by-path only — never
-  // weaving in-progress worktree changes into the commit).
-  await git.commitPaths(cwd, [PRODUCT_DOC], `railhead: product arc — step ${step.number} (${step.title})`);
-  const end = await cmdBuild(cwd, { ...prefs, prompt, mode: "feature" }, {
-    arcStepNumber: step.number,
-    // Stable per-step namespace: a reopened step's next attempt reuses the
-    // same `.scratch/<slug>/` plan docs and `run/<slug>` branch instead of
-    // fragmenting a new one per derivation.
-    slug: `step-${String(step.number).padStart(2, "0")}-${titleSlug(step.title)}`,
-  });
+  let end: RunOutcome | null;
+  if (existing && !pendingFeedback) {
+    console.log(`arc: reusing the existing plan for step ${step.number} — ${existing.tickets} ticket(s), planned ${existing.createdAt}; pass --replan to generate a fresh one`);
+    const forward: string[] = [];
+    if (prefs.overrides.code) forward.push("--review", prefs.overrides.code);
+    if (prefs.overrides.visual) forward.push("--vision", prefs.overrides.visual);
+    if (prefs.overrides.goal) forward.push("--goal", prefs.overrides.goal);
+    if (prefs.overrides.structural) forward.push("--structural", prefs.overrides.structural);
+    if (prefs.verbose) forward.push("--verbose");
+    end = await cmdRun(cwd, [outDir, ...forward]);
+  } else {
+    const config = await loadConfig(cwd);
+    const models = resolveModels(config, prefs.modelOverride ? ["--model", prefs.modelOverride] : []);
+    console.log(`arc: deriving the feature prompt for step ${step.number} — ${step.title}`);
+    const prompt = await deriveFeaturePrompt({
+      cwd,
+      step: { number: step.number, title: step.title, description: step.description, feedback: step.feedback, runId: step.runId },
+      plan: arc,
+      model: models.plan ?? null,
+      maxContextTokens: config.max_context_tokens ?? undefined,
+    });
+    // The arc's update commits on the product branch now, so the upcoming
+    // per-ticket commits stay pure feature diffs (stage-by-path only — never
+    // weaving in-progress worktree changes into the commit).
+    await git.commitPaths(cwd, [PRODUCT_DOC], `railhead: product arc — step ${step.number} (${step.title})`);
+    end = await cmdBuild(cwd, { ...prefs, prompt, mode: "feature" }, {
+      arcStepNumber: step.number,
+      slug,
+    });
+  }
   if (!end) {
     console.log(`arc: step ${step.number} ran under \`railhead run\` — flip it to built in ${PRODUCT_DOC} once the run finishes.`);
     return;
@@ -1507,6 +1517,20 @@ async function adoptProductArc(cwd: string, args: ProductArgs, session: ProductS
   console.log(`next: \`railhead feature\` builds the first todo step unattended. Commit ${PRODUCT_DOC} whenever the arc changes.`);
 }
 
+/**
+ * ADR 0058: `cmdBuild` used to persist the run prompt to the repo root
+ * (`prompt`), and per-ticket commits tracked it. Every replan rewrote it, which
+ * dirtied the worktree and blocked the run-branch checkout. The file is no
+ * longer written; this restores a legacy dirty copy to HEAD before a branch
+ * switch so an existing repo is never stuck on it.
+ */
+async function restoreLegacyPromptArtifact(cwd: string): Promise<void> {
+  if (!(await git.listTrackedFiles(cwd)).includes("prompt")) return;
+  if (!(await git.dirtyPaths(cwd).catch((): string[] => [])).includes("prompt")) return;
+  await git.restorePaths(cwd, ["prompt"]);
+  console.log("restored the legacy `prompt` artifact to HEAD (the railhead no longer writes it) so the branch switch can proceed");
+}
+
 async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean; verifySeeded?: boolean } = {}): Promise<RunOutcome | null> {
   const args = parseRunArgs(rest);
   if (!args.ticketsDir) throw new Error("run requires a tickets directory");
@@ -1578,6 +1602,7 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean; v
     throw new Error("Not a git repository. Run `railhead init` to scaffold railhead.json and git, then retry.");
   }
 
+  await restoreLegacyPromptArtifact(cwd);
   if (await git.branchExists(cwd, branch)) {
     await git.checkoutBranch(cwd, branch);
   } else if ((await git.currentBranch(cwd).catch(() => "")) !== branch) {
@@ -1614,6 +1639,10 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean; v
     }
   }
 
+  // ADR 0058: the run prompt lives in the plan's origin.json (written by the
+  // planner), not in a root `prompt` file. The root read stays as a fallback
+  // for plans that predate the origin marker.
+  const planOrigin = await readPlanOrigin(join(ticketsDir, "..")).catch(() => null);
   const { runId, state, ledger } = await startRun({
     cwd,
     ticketsDir,
@@ -1622,7 +1651,7 @@ async function cmdRun(cwd: string, rest: string[], opts: { fromPlan?: boolean; v
     config,
     verbose,
     quiet,
-    originalPrompt: await git.readProjectDoc(cwd, "prompt") ?? undefined,
+    originalPrompt: planOrigin?.prompt ?? (await git.readProjectDoc(cwd, "prompt") ?? undefined),
     verifySeeded: opts.verifySeeded,
   });
 
@@ -1668,6 +1697,7 @@ async function cmdResume(cwd: string, runIdArg?: string): Promise<void> {
   if (state.status === "superseded") {
     throw new Error(`run ${runId} was superseded by a fresh plan — nothing to resume. Start the plan with \`railhead run <tickets-dir>\`, or re-plan with \`railhead build\`.`);
   }
+  await restoreLegacyPromptArtifact(cwd);
   await git.checkoutBranch(cwd, state.branch);
   // Re-read railhead.json so a mid-run config edit (a switched model, a changed
   // verify list, a raised gate) takes effect on resume — `state.json` holds the

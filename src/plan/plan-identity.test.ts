@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { checkPlanOrigin, writePlanOrigin, readPlanOrigin, readPlanWallMs, type PlanOrigin } from "./plan-identity.ts";
+import { checkPlanOrigin, writePlanOrigin, readPlanOrigin, readPlanWallMs, readReusablePlan, type PlanOrigin } from "./plan-identity.ts";
 
 describe("checkPlanOrigin (#47)", () => {
   const mkOrigin = (over: Partial<PlanOrigin> = {}): PlanOrigin => ({
@@ -195,6 +195,61 @@ describe("writePlanOrigin / readPlanOrigin (#47)", () => {
       await expect(readPlanOrigin(dir)).rejects.toThrow(/missing required fields/i);
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("readReusablePlan (ADR 0058)", () => {
+  async function makePlan(ticketFiles: string[], onDisk: string[]): Promise<{ outDir: string; cleanup: () => Promise<void> }> {
+    const root = await mkdtemp(join(tmpdir(), "railhead-reusable-"));
+    const planDir = join(root, "step-03-search");
+    const outDir = join(planDir, "issues");
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(outDir, { recursive: true });
+    await writePlanOrigin(planDir, {
+      slug: "step-03-search",
+      prompt: "add search",
+      created_at: "2026-08-31T12:00:00Z",
+      ticket_files: ticketFiles,
+      base_sha: null,
+    });
+    for (const f of onDisk) await writeFile(join(outDir, f), "# ticket\n", "utf8");
+    return { outDir, cleanup: () => rm(root, { recursive: true, force: true }) };
+  }
+
+  it("returns the ticket count and plan time when origin and every ticket file are present", async () => {
+    const { outDir, cleanup } = await makePlan(["01-a.md", "02-b.md"], ["01-a.md", "02-b.md", "99-stale.md"]);
+    try {
+      expect(await readReusablePlan(outDir)).toEqual({ tickets: 2, createdAt: "2026-08-31T12:00:00Z" });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("returns null when a recorded ticket file is missing on disk (a torn plan is not reused)", async () => {
+    const { outDir, cleanup } = await makePlan(["01-a.md", "02-b.md"], ["01-a.md"]);
+    try {
+      expect(await readReusablePlan(outDir)).toBeNull();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("returns null when there is no origin marker", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "railhead-reusable-"));
+    try {
+      expect(await readReusablePlan(join(dir, "issues"))).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null for an origin with no ticket files (an empty plan is not runnable)", async () => {
+    const { outDir, cleanup } = await makePlan([], []);
+    try {
+      expect(await readReusablePlan(outDir)).toBeNull();
+    } finally {
+      await cleanup();
     }
   });
 });

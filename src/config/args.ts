@@ -56,7 +56,9 @@ export interface PlanArgs {
   /** The description prompt — the non-flag arguments joined. */
   prompt: string;
   auto: boolean;
-  cont: boolean;
+  /** `railhead feature --replan`: discard the step's intact plan and plan it
+   * again (ADR 0058). Without it, a re-run reuses an intact plan silently. */
+  replan: boolean;
   yolo: boolean;
   /** Echo the exact prompt sent to each model call to the console. */
   verbose: boolean;
@@ -76,7 +78,7 @@ export interface PlanArgs {
 
 const PLAN_BOOL_FLAGS = new Set([
   "-a", "--auto", "-y", "--yes",
-  "-c", "--continue",
+  "--replan",
   "--yolo",
   "--verbose",
   "--greenfield",
@@ -93,7 +95,6 @@ const PLAN_VALUE_FLAGS = new Set([
 /** Parse the arguments of `railhead build` / `railhead fix` / `railhead feature`. */
 export function parsePlanArgs(argv: string[], mode: "build" | "fix" | "feature"): PlanArgs {
   const auto = argv.includes("-a") || argv.includes("--auto") || argv.includes("-y") || argv.includes("--yes");
-  const cont = argv.includes("-c") || argv.includes("--continue");
   const presets = (["full", "medium", "light", "none"] as const).filter((p) => argv.includes(`--${p}`));
   if (presets.length > 1) {
     throw new Error(`conflicting presets: ${presets.map((p) => `--${p}`).join(" and ")} — pick one`);
@@ -127,7 +128,7 @@ export function parsePlanArgs(argv: string[], mode: "build" | "fix" | "feature")
   return {
     prompt,
     auto,
-    cont,
+    replan: argv.includes("--replan"),
     yolo: argv.includes("--yolo"),
     verbose: argv.includes("--verbose"),
     modelOverride: argValue(argv, "--model"),

@@ -54,10 +54,12 @@ describe("parsePlanArgs", () => {
     expect(parsePlanArgs(["build", "a", "thing"], "build").prompt).toBe("build a thing");
   });
 
-  it("detects auto and continue flags", () => {
-    const a = parsePlanArgs(["-a", "-c", "build"], "build");
+  it("detects the auto and --replan flags", () => {
+    const a = parsePlanArgs(["-a", "--replan", "build"], "build");
     expect(a.auto).toBe(true);
-    expect(a.cont).toBe(true);
+    expect(a.replan).toBe(true);
+    expect(a.prompt).toBe("build");
+    expect(parsePlanArgs(["build"], "build").replan).toBe(false);
   });
 
   it("parses a preset flag", () => {

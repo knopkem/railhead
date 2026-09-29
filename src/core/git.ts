@@ -22,6 +22,14 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return stdout.trim();
 }
 
+/** `git` without whitespace normalization — for output formats whose leading
+ * whitespace is data (`status --porcelain`'s first status column). The plain
+ * {@link git} helper's `.trim()` eats that column on the first line. */
+async function gitRaw(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await exec(GIT, args, { cwd, maxBuffer: MAX_BUFFER });
+  return stdout;
+}
+
 export function branchExists(cwd: string, branch: string): Promise<boolean> {
   return git(cwd, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])
     .then((out) => out.length > 0)
@@ -38,6 +46,13 @@ export function createBranch(cwd: string, branch: string): Promise<void> {
 
 export function checkoutBranch(cwd: string, branch: string): Promise<void> {
   return git(cwd, ["checkout", branch]).then(() => undefined);
+}
+
+/** Discard uncommitted changes to the named tracked paths (`git checkout --`).
+ * Used by the legacy `prompt` artifact cleanup (ADR 0058): the file is pure
+ * tool output that once blocked the run-branch checkout. */
+export function restorePaths(cwd: string, paths: string[]): Promise<void> {
+  return git(cwd, ["checkout", "--", ...paths]).then(() => undefined);
 }
 
 export function headCommit(cwd: string): Promise<string> {
@@ -317,7 +332,7 @@ export function isClean(cwd: string): Promise<boolean> {
  * instead of collapsing a wholly-untracked directory to `dir/`, so out-of-scope
  * change reports name the files a phase actually wrote. */
 export async function dirtyPaths(cwd: string): Promise<string[]> {
-  const out = await git(cwd, ["status", "--porcelain", "-uall"]);
+  const out = await gitRaw(cwd, ["status", "--porcelain", "-uall"]);
   return out
     .split("\n")
     .filter((l) => l.length > 3)

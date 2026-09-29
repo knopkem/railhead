@@ -1,5 +1,5 @@
 import { writeFile, readFile } from "node:fs/promises";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { ArcStepIdentity } from "../core/product.ts";
 
@@ -100,6 +100,19 @@ export function checkPlanOrigin(origin: PlanOrigin | null, currentTicketFiles: s
   }
 
   return warnings;
+}
+
+/** ADR 0058: a plan on disk that a feature re-run can pick up instead of
+ * planning again — the origin marker plus every ticket file it recorded, all
+ * still present. Null when the namespace is absent, empty, or damaged (a
+ * crashed finalize, a manual purge), so the caller plans a fresh attempt. */
+export async function readReusablePlan(outDir: string): Promise<{ tickets: number; createdAt: string } | null> {
+  const origin = await readPlanOrigin(join(outDir, "..")).catch(() => null);
+  if (!origin || origin.ticket_files.length === 0) return null;
+  for (const file of origin.ticket_files) {
+    if (!existsSync(join(outDir, file))) return null;
+  }
+  return { tickets: origin.ticket_files.length, createdAt: origin.created_at };
 }
 
 /** ADR 0040: the measured wall time of this project's plan phase(s), read from
