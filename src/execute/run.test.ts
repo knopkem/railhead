@@ -3246,6 +3246,59 @@ describe("goal review cadence (issue #73)", () => {
     expect(final.goal_reviews?.map((r) => r.group)).toEqual(["engine", "run-end"]);
   });
 
+  it("spriteforge-spine regression: a mid-sentence marker mention is not a verdict — no corrective tickets from narration", async () => {
+    // The spine goal transcript mentioned "$GOAL_PASS/$GOAL_FAIL" in prose
+    // before its real own-line verdict. The old parser took the FAIL mention as
+    // the verdict and the rest of the transcript became 146 findings; the
+    // fail-loud promotion then turned six narration lines naming a "prior
+    // blocker" into favicon corrective tickets. The gate must PASS with no
+    // correctives.
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      goal_review: { mode: "light" },
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null }});
+    const engine: Ticket[] = [
+      { file: "01-a.md", number: "01", slug: "a", title: "Scaffold", what: "scaffold", criteria: ["renders the scene"], group: "engine" },
+    ];
+    await writeTickets(ticketsDir, engine);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = engine.map((t) => toTicketState(t));
+
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else if (kind === "goal") {
+        await emitText(ledgerDir, options.phaseFile, [
+          "Let me first run the app and then emit a $GOAL_PASS/$GOAL_FAIL verdict with findings.",
+          "",
+          "## Next Move",
+          "1. Emit final verdict: $GOAL_PASS or $GOAL_FAIL with [BLOCKER]/[MAJOR] findings",
+          "",
+          "$GOAL_PASS",
+          "$END",
+        ].join("\n"));
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    expect(final.tickets.some((t) => t.title.startsWith("Goal review fix:"))).toBe(false);
+    const engineRec = final.goal_reviews?.find((r) => r.group === "engine");
+    expect(engineRec?.verdict).toBe("pass");
+    expect(engineRec?.findings).toEqual([]);
+  });
+
   it("light + checkpoint_action advisory (ADR 0029): group boundary runs an advisory pass — records findings, zero corrective tickets, steering reaches the run-end pass", async () => {
     const cwd = await freshRepo();
     const ticketsDir = ticketsDirOf(cwd);
@@ -3610,6 +3663,165 @@ describe("goal review cadence (issue #73)", () => {
     // counts as smoke evidence — yet inconclusive never fails the run.
     const ticket02 = final.tickets.find((t) => t.number === "02")!;
     expect(ticket02.logs.join("\n")).toContain("downgraded to inconclusive");
+  });
+
+  it("interaction smoke skips a corrective whose finding is not an interaction claim (spriteforge favicon shape)", async () => {
+    // The corrective is ungrouped by construction; the old `!ticket.group`
+    // boundary test launched a browser agent for it. Relevance now reads the
+    // corrective's finding — a favicon/asset fix names no control to drive.
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      projectInterface: "browser-ui",
+      goal_review: { mode: "light" },
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
+    });
+    const group: Ticket[] = [
+      { file: "01-a.md", number: "01", slug: "a", title: "A", what: "a", criteria: ["renders a"], group: "core" },
+      { file: "02-b.md", number: "02", slug: "b", title: "B", what: "b", criteria: ["renders b"], group: "core" },
+    ];
+    await writeTickets(ticketsDir, group);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = group.map((t) => toTicketState(t));
+
+    const interactPhases: string[] = [];
+    let goalCalls = 0;
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else if (kind === "interact") {
+        interactPhases.push(options.phaseFile);
+        await emitText(ledgerDir, options.phaseFile, "$SMOKE_PASS\n$END");
+      } else if (kind === "goal") {
+        goalCalls += 1;
+        if (goalCalls === 1) {
+          await emitText(ledgerDir, options.phaseFile, "$GOAL_FAIL\n[BLOCKER] index.html ships no favicon and the browser 404s on every load (src/index.js)\n$END");
+        } else {
+          await emitText(ledgerDir, options.phaseFile, "$GOAL_PASS\n$END");
+        }
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    const corrective = final.tickets.find((t) => t.title.startsWith("Goal review fix:"));
+    expect(corrective).toBeDefined();
+    // The group boundary (02) legitimately ran the smoke; the corrective (03)
+    // did not — relevance read its finding, which names no control to drive.
+    expect(interactPhases).toEqual(["02-01-interact"]);
+    expect(corrective!.logs.join("\n")).toContain("skipped — no interaction claims");
+  });
+
+  it("interaction smoke runs for an interactive corrective, scoped to the built app", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      projectInterface: "browser-ui",
+      goal_review: { mode: "light" },
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: "goal-model", extract: null },
+    });
+    const group: Ticket[] = [
+      { file: "01-a.md", number: "01", slug: "a", title: "A", what: "a", criteria: ["renders a"], group: "core" },
+      { file: "02-b.md", number: "02", slug: "b", title: "B", what: "b", criteria: ["renders b"], group: "core" },
+    ];
+    await writeTickets(ticketsDir, group);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = group.map((t) => toTicketState(t));
+
+    const interactPhases: string[] = [];
+    const interactPrompts: Record<string, string> = {};
+    let goalCalls = 0;
+    mockExec.mockImplementation(async (prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else if (kind === "interact") {
+        interactPhases.push(options.phaseFile);
+        interactPrompts[options.phaseFile] = prompt;
+        await emitText(ledgerDir, options.phaseFile, "$SMOKE_PASS\n$END");
+      } else if (kind === "goal") {
+        goalCalls += 1;
+        if (goalCalls === 1) {
+          await emitText(ledgerDir, options.phaseFile, "$GOAL_FAIL\n[BLOCKER] the pause button does nothing (src/index.js)\n$END");
+        } else {
+          await emitText(ledgerDir, options.phaseFile, "$GOAL_PASS\n$END");
+        }
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    // The group boundary (02) ran the smoke, and so did the interactive
+    // corrective (03) — whose artifact is the whole built frontier, not the
+    // corrective alone.
+    expect(interactPhases).toContain("03-01-interact");
+    const correctivePrompt = interactPrompts["03-01-interact"]!;
+    expect(correctivePrompt).toContain("This gate closes the built app so far");
+    expect(correctivePrompt).toContain("- [built] 01 A (group core)");
+    expect(correctivePrompt).toContain("- [built] 02 B (group core)");
+    expect(correctivePrompt).toContain("[built] 03 Goal review fix: the pause button");
+  });
+
+  it("interaction smoke skips a group whose tickets claim no rendered/interactive surface", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      projectInterface: "browser-ui",
+      goal_review: { mode: "off" },
+      model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: "rev-model", visual: null, goal: null, extract: null },
+    });
+    const group: Ticket[] = [
+      { file: "01-a.md", number: "01", slug: "a", title: "A", what: "a", criteria: ["pure model modules are unit tested"], group: "core" },
+      { file: "02-b.md", number: "02", slug: "b", title: "B", what: "b", criteria: ["npm run typecheck passes"], group: "core" },
+    ];
+    await writeTickets(ticketsDir, group);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = group.map((t) => toTicketState(t));
+
+    const interactPhases: string[] = [];
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else if (kind === "review") {
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nok");
+      } else if (kind === "interact") {
+        interactPhases.push(options.phaseFile);
+        await emitText(ledgerDir, options.phaseFile, "$SMOKE_PASS\n$END");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    expect(interactPhases).toEqual([]);
+    const ticket02 = final.tickets.find((t) => t.number === "02")!;
+    expect(ticket02.logs.join("\n")).toContain('skipped — no ticket in group "core" claims a rendered/interactive surface');
   });
 
   it("fails the run when a run-end goal review's corrective ticket fails (issue #120)", async () => {

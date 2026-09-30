@@ -1,5 +1,5 @@
 import { scanJsonObjects } from "../core/json.ts";
-import { indexOfOutsideFences } from "../core/fences.ts";
+import { indexOfOutsideFences, indexOfOwnLineMarkerOutsideFences } from "../core/fences.ts";
 import { parseProductPlan, type ProductPlan } from "../core/product.ts";
 import { DEFAULT_CONTEXT_TOKENS, normalizeShellCommands } from "../config/config.ts";
 import { renderLearnings } from "../context/learnings.ts";
@@ -492,12 +492,15 @@ Every finding must name the demand and the missing deliverable. Do not flag impl
 /** Parse the plan-gate verdict. Defensive like the other verdict parsers: no
  * FAIL marker and no PASS marker → pass (a model that emitted nothing usable
  * must not block a plan); FAIL wins when both markers appear; findings are the
- * non-empty lines between `$PLAN_FAIL` and `$END`; a `$REPLAN` marker (anywhere
- * outside fences) asks for a regenerated frontier rather than a hard stop. */
+ * non-empty lines between `$PLAN_FAIL` and `$END`; a `$REPLAN` marker (own
+ * line, outside fences) asks for a regenerated frontier rather than a hard
+ * stop. Own-line like the review-seat verdict markers (reviewer.ts
+ * `indexOfMarker`): a marker mentioned mid-sentence is narration, not a
+ * verdict — a prose "$REPLAN" would otherwise re-plan the frontier. */
 export function parsePlanGateVerdict(text: string): { verdict: "pass" | "fail"; findings: string[]; replan: boolean } {
-  const replan = indexOfOutsideFences(text, /\$replan\b/i) >= 0;
-  const failIdx = indexOfOutsideFences(text, /\$plan_fail\b/i);
-  const passIdx = indexOfOutsideFences(text, /\$plan_pass\b/i);
+  const replan = indexOfOwnLineMarkerOutsideFences(text, "\\$replan") >= 0;
+  const failIdx = indexOfOwnLineMarkerOutsideFences(text, "\\$plan_fail");
+  const passIdx = indexOfOwnLineMarkerOutsideFences(text, "\\$plan_pass");
   if (failIdx < 0) return { verdict: "pass", findings: [], replan };
   if (passIdx >= 0 && failIdx > passIdx) return { verdict: "pass", findings: [], replan };
   const after = text.slice(failIdx + PLAN_GATE_FAIL.length);

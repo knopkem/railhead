@@ -193,6 +193,24 @@ export function nextTicketNumber(state: RunState): number {
  */
 export const REVIEW_FOLLOWUP_TITLE = "Review follow-up: ";
 
+/** The title prefixes every railhead-generated corrective ticket carries (the
+ * three review-gate correctives plus the code-review follow-up). Consumers
+ * that must tell generated repair work from planned work — today the
+ * interaction gate's relevance rule — match these rather than adding a
+ * ticket-file schema field; the prefixes are already the load-bearing identity
+ * (see {@link scheduleReviewFollowUps}). */
+export const CORRECTIVE_TITLE_PREFIXES = [
+  CORRECTIVE_SPECS.visual.titlePrefix,
+  CORRECTIVE_SPECS.goal.titlePrefix,
+  CORRECTIVE_SPECS.structural.titlePrefix,
+  REVIEW_FOLLOWUP_TITLE,
+] as const;
+
+/** Whether a ticket title marks it as railhead-generated corrective work. */
+export function isCorrectiveTitle(title: string): boolean {
+  return CORRECTIVE_TITLE_PREFIXES.some((prefix) => title.startsWith(prefix));
+}
+
 export function generateReviewFollowUpTickets(findings: string[]): PlanTicket[] {
   const majors = promoteUnlabelledSeverity(findings).filter((f) => classifySeverity(f) === "major");
   if (majors.length === 0) return [];

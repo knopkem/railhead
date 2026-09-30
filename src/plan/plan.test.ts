@@ -329,6 +329,21 @@ describe("buildPlanGatePrompt / parsePlanGateVerdict (v2 issue 01)", () => {
     expect(parsePlanGateVerdict("$PLAN_FAIL\n[GAP] x\n$END\n$PLAN_PASS").verdict).toBe("fail");
   });
 
+  it("ignores mid-sentence marker mentions — narration is not a verdict", () => {
+    // A prose mention must not fail the plan gate, and must not request a
+    // replan either (a false $REPLAN regenerates the whole frontier).
+    const d = parsePlanGateVerdict("I would emit $PLAN_FAIL with a [GAP] only if the plan misses the goal; otherwise $PLAN_PASS.\nI will emit a $REPLAN if the structure is wrong.");
+    expect(d.verdict).toBe("pass");
+    expect(d.findings).toEqual([]);
+    expect(d.replan).toBe(false);
+  });
+
+  it("still reads own-line markers (indented allowed)", () => {
+    const d = parsePlanGateVerdict("  $PLAN_FAIL\n[GAP] sound → nothing owns audio\n  $END");
+    expect(d.verdict).toBe("fail");
+    expect(d.findings).toEqual(["[GAP] sound → nothing owns audio"]);
+  });
+
   it("stays product-free for build plans (no feature block)", () => {
     const text = prompt();
     expect(text).not.toMatch(/PRODUCT CONTEXT/);

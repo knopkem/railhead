@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { joinPhaseMessages, type PhaseMessages } from "../context/preamble.ts";
 const promptText = (m: PhaseMessages): string => joinPhaseMessages(m);
 const visualPrompt = (o: Parameters<typeof buildVisualReviewPrompt>[0]): string => promptText(buildVisualReviewPrompt(o));
-import { parseVisualVerdict, buildVisualReviewPrompt, runCommandHint, shouldRunVisualReview, touchesVisualSurface, surfaceSelfCheckApplies, DEGRADED_TARGET_RECOVERY_NOTE } from "./visual.ts";
+import { parseVisualVerdict, buildVisualReviewPrompt, runCommandHint, shouldRunVisualReview, touchesVisualSurface, surfaceSelfCheckApplies, mentionsInteractionClaim, DEGRADED_TARGET_RECOVERY_NOTE } from "./visual.ts";
 import type { Ticket } from "../core/ticket.ts";
 
 describe("parseVisualVerdict", () => {
@@ -517,6 +517,31 @@ describe("touchesVisualSurface (issue #99 — one shared surface gate)", () => {
       expect(surfaceSelfCheckApplies([surface], iface)).toBe(true);
       expect(surfaceSelfCheckApplies([structural], iface)).toBe(false);
     }
+  });
+});
+
+describe("mentionsInteractionClaim (interaction-smoke relevance)", () => {
+  it("matches claims about controls, inputs, and actions", () => {
+    expect(mentionsInteractionClaim("the pause button does nothing")).toBe(true);
+    expect(mentionsInteractionClaim("clicking the canvas does not draw")).toBe(true);
+    expect(mentionsInteractionClaim("the toolbar eraser is dead")).toBe(true);
+    expect(mentionsInteractionClaim("keyboard shortcut [ does not change brush size")).toBe(true);
+    expect(mentionsInteractionClaim("undo does nothing after a stroke")).toBe(true);
+  });
+
+  it("does not match the favicon/asset corrective shape (the spriteforge spine tickets)", () => {
+    // These are the six narration lines that became corrective tickets 17-22;
+    // the narrow vocabulary keeps the browser-driving smoke off them.
+    expect(mentionsInteractionClaim("Prior blocker (favicon 404) is RESOLVED: `public/favicon.svg` exists, `index.html` has `<link rel=\"icon\">`")).toBe(false);
+    expect(mentionsInteractionClaim("`public/favicon.svg`: pixel-art \"S\" favicon (fixes prior 404 blocker)")).toBe(false);
+    expect(mentionsInteractionClaim("*Prior blocker** — RESOLVED. Favicon 404 from the last review is gone; no 404 / no console error on load.")).toBe(false);
+  });
+
+  it("is narrower than the recall-biased surface vocabulary", () => {
+    // "pixel" is surface vocabulary, and it is exactly what would put the
+    // pixel-art favicon back on the smoke path.
+    expect(touchesVisualSurface({ criteria: ["pixel-art favicon ships"] })).toBe(true);
+    expect(mentionsInteractionClaim("pixel-art favicon ships")).toBe(false);
   });
 });
 

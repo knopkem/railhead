@@ -34,6 +34,7 @@ import { kickoffPerTicketVisualReview, joinPendingVisualReview, visualReviewLoop
 import { addPendingCheckpoint } from "../core/pending-checkpoints.ts";
 import { runCommandHint } from "../gates/visual.ts";
 import { buildInteractionSmokePrompt, parseInteractionSmokeVerdict, type InteractionSmokeScope } from "../gates/interaction-smoke.ts";
+import { decideInteractionSmoke } from "../gates/interaction-schedule.ts";
 import { hasRenderObservation, interactionSmokePassGap, parseToolCalls } from "../gates/evidence.ts";
 import { surfaceSelfCheckApplies, touchesVisualSurface } from "../context/surface.ts";
 import { goalReviewAtCheckpoint, goalReviewAtRunEnd, goalCheckpointsToFire } from "../gates/goal-loop.ts";
@@ -1312,89 +1313,105 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
     // the finding feeds back to the implementer and retries before review.
     // Skipped when the config resolves it off, there is no resolved model, or
     // the declared interface is non-interactive.
-    const interactionBoundary = !ticket.group || state.tickets
-      .filter((t) => t.group === ticket.group && t.file !== ticket.file)
-      .every((t) => t.status === "committed");
-    if (interactionSmokeEnabled(state.config) && interactionBoundary) {
-      const interactModel = state._models?.visual ?? state._models?.review ?? state._models?.implement ?? null;
-      const iface = state.config.projectInterface;
-      if (interactModel !== null && iface !== "none") {
-        const isPhase = `${ticket.number}-${String(attempt).padStart(2, "0")}-interact`;
-        const scopeTag = scopeLabel(state.tickets, ticket);
-        const runHint = runCommandHint({ verify: state.config.verify, smoke: state.config.smoke });
-        const hints = state.config.visual_review?.interaction_hints ?? state.config.goal_review?.interaction_hints ?? null;
-        const scope = interactionSmokeScopeFor(parsed, allParsed, state);
-        const prompt = buildInteractionSmokePrompt({
-          runCommandHint: runHint,
-          verifyCommands: state.config.verify,
-          interactionHints: hints,
-          projectInterface: iface,
-          scope,
-        });
-        const smokeRetry = await withFailureLadderOnThrow(
-          () => runReviewAgent({
-            label: "interaction smoke",
-            prompt,
-            cwd: state.cwd,
-            ledgerDir: ledger,
-            phaseFile: isPhase,
-            model: interactModel,
-            agent: RAILHEAD_AGENT_NAMES.observe,
-            baseSession: baseSessionId(state),
-            live: !state.quiet,
-            verbose: state.verbose,
-            heartbeat: true,
-            livePrefix: "interact",
-            maxSteps: state.config.max_phase_steps,
-            stallTimeoutSec: state.config.stall_timeout_sec,
-            maxStepModelSec: state.config.max_step_model_sec,
-            phaseWallSec: state.config.visual_review?.round_wall_sec ?? DEFAULT_INTERACTION_SMOKE_WALL_SEC,
-            maxContextTokens: seatContextBudget(state, "visual"),
-          }),
-          { backoff: state.config.infra_backoff_sec, budget: seatContextBudget(state, "visual"), restartWorker: ladderRestart(state) },
-        );
-        const agentOutcome = smokeRetry.ok
-          ? smokeRetry.value
-          : { status: "incomplete" as const, transcript: "", detail: smokeRetry.rung.diagnosis };
-        if (agentOutcome.status === "ok") {
-          const verdict = parseInteractionSmokeVerdict(agentOutcome.transcript);
-          if (verdict.verdict === "pass") {
-            // v2 issue 01: a browser-ui PASS must carry real-input + render
-            // observation evidence; a startup-only run (a 200, a listening
-            // port) is downgraded to inconclusive, never recorded as green.
-            let gap: string | null = null;
-            if (iface === "browser-ui") {
-              const raw = await readFile(eventPath(ledger, isPhase), "utf8").catch(() => "");
-              gap = interactionSmokePassGap(parseToolCalls(raw), iface);
-            }
-            if (gap) {
-              ticket.logs.push(`interact ${isPhase}: $SMOKE_PASS downgraded to inconclusive — ${gap}`);
-              console.log(`[${nowClock()}] [${scopeTag}] interaction smoke ⚠ inconclusive — ${gap}`);
-            } else {
-              ticket.logs.push(`interact ${isPhase}: ok — app operated by a real interaction`);
-              console.log(`[${nowClock()}] [${scopeTag}] interaction smoke ✓ PASS — app operated by a real interaction`);
-            }
-          } else if (verdict.verdict === "fail") {
-            const findings = verdict.findings;
-            ticket.logs.push(`interact ${isPhase}: FAIL — ${findings.length} finding(s)`);
-            console.log(`[${nowClock()}] [${scopeTag}] interaction smoke ✗ FAIL: ${findings.slice(0, 3).join(" | ")}`);
-            await writeState(ledger, state);
-            const r = advanceRetry(counters, { type: "verify_failed", output: findings.join("\n") }, limits);
-            counters = r.counters;
-            prevFeedback = r.step.next === "implement" ? (r.step as { feedback: string }).feedback : null;
-            continue; // next build attempt
-          } else {
-            const noSurface = agentOutcome.transcript.includes("$SMOKE_INCONCLUSIVE");
-            const why = noSurface ? "no interactive surface built yet" : "agent produced no verdict (app could not be driven)";
-            ticket.logs.push(`interact ${isPhase}: inconclusive — ${why}; not a failure`);
-            console.log(`[${nowClock()}] [${scopeTag}] interaction smoke ⊘ inconclusive — ${why}; not a failure`);
+    //
+    // The firing decision is the pure schedule in interaction-schedule.ts: the
+    // old `!ticket.group ||` test treated every ungrouped corrective in a
+    // grouped plan as a group boundary, so a favicon fix launched a browser
+    // agent scoped to itself (and one run wedged it into a degraded-target
+    // kill). Boundary, relevance, and scope are now answered separately.
+    const interactModel = state._models?.visual ?? state._models?.review ?? state._models?.implement ?? null;
+    const iface = state.config.projectInterface;
+    const interaction = decideInteractionSmoke({
+      enabled: interactionSmokeEnabled(state.config),
+      iface,
+      parsed,
+      allParsed,
+      tickets: state.tickets,
+    });
+    if (interaction.candidate && !interaction.run) {
+      // Visibility for a deliberate skip: without it a missing interact phase
+      // reads as "the gate never fired" rather than "the boundary had nothing
+      // a user could drive".
+      const skipPhase = `${ticket.number}-${String(attempt).padStart(2, "0")}-interact`;
+      ticket.logs.push(`interact ${skipPhase}: skipped — ${interaction.reason}`);
+      console.log(`[${nowClock()}]   ${ticket.number} interaction smoke ⊘ skipped — ${interaction.reason}`);
+    }
+    if (interaction.run && interactModel !== null && iface !== "none") {
+      const isPhase = `${ticket.number}-${String(attempt).padStart(2, "0")}-interact`;
+      const scopeTag = scopeLabel(state.tickets, ticket);
+      const runHint = runCommandHint({ verify: state.config.verify, smoke: state.config.smoke });
+      const hints = state.config.visual_review?.interaction_hints ?? state.config.goal_review?.interaction_hints ?? null;
+      const scope = interactionSmokeScopeFor(parsed, allParsed, state);
+      const prompt = buildInteractionSmokePrompt({
+        runCommandHint: runHint,
+        verifyCommands: state.config.verify,
+        interactionHints: hints,
+        projectInterface: iface,
+        scope,
+      });
+      const smokeRetry = await withFailureLadderOnThrow(
+        () => runReviewAgent({
+          label: "interaction smoke",
+          prompt,
+          cwd: state.cwd,
+          ledgerDir: ledger,
+          phaseFile: isPhase,
+          model: interactModel,
+          agent: RAILHEAD_AGENT_NAMES.observe,
+          baseSession: baseSessionId(state),
+          live: !state.quiet,
+          verbose: state.verbose,
+          heartbeat: true,
+          livePrefix: "interact",
+          maxSteps: state.config.max_phase_steps,
+          stallTimeoutSec: state.config.stall_timeout_sec,
+          maxStepModelSec: state.config.max_step_model_sec,
+          phaseWallSec: state.config.visual_review?.round_wall_sec ?? DEFAULT_INTERACTION_SMOKE_WALL_SEC,
+          maxContextTokens: seatContextBudget(state, "visual"),
+        }),
+        { backoff: state.config.infra_backoff_sec, budget: seatContextBudget(state, "visual"), restartWorker: ladderRestart(state) },
+      );
+      const agentOutcome = smokeRetry.ok
+        ? smokeRetry.value
+        : { status: "incomplete" as const, transcript: "", detail: smokeRetry.rung.diagnosis };
+      if (agentOutcome.status === "ok") {
+        const verdict = parseInteractionSmokeVerdict(agentOutcome.transcript);
+        if (verdict.verdict === "pass") {
+          // v2 issue 01: a browser-ui PASS must carry real-input + render
+          // observation evidence; a startup-only run (a 200, a listening
+          // port) is downgraded to inconclusive, never recorded as green.
+          let gap: string | null = null;
+          if (iface === "browser-ui") {
+            const raw = await readFile(eventPath(ledger, isPhase), "utf8").catch(() => "");
+            gap = interactionSmokePassGap(parseToolCalls(raw), iface);
           }
+          if (gap) {
+            ticket.logs.push(`interact ${isPhase}: $SMOKE_PASS downgraded to inconclusive — ${gap}`);
+            console.log(`[${nowClock()}] [${scopeTag}] interaction smoke ⚠ inconclusive — ${gap}`);
+          } else {
+            ticket.logs.push(`interact ${isPhase}: ok — app operated by a real interaction`);
+            console.log(`[${nowClock()}] [${scopeTag}] interaction smoke ✓ PASS — app operated by a real interaction`);
+          }
+        } else if (verdict.verdict === "fail") {
+          const findings = verdict.findings;
+          ticket.logs.push(`interact ${isPhase}: FAIL — ${findings.length} finding(s)`);
+          console.log(`[${nowClock()}] [${scopeTag}] interaction smoke ✗ FAIL: ${findings.slice(0, 3).join(" | ")}`);
+          await writeState(ledger, state);
+          const r = advanceRetry(counters, { type: "verify_failed", output: findings.join("\n") }, limits);
+          counters = r.counters;
+          prevFeedback = r.step.next === "implement" ? (r.step as { feedback: string }).feedback : null;
+          continue; // next build attempt
         } else {
-          ticket.logs.push(`interact ${isPhase}: ${agentOutcome.detail}`);
-          console.log(`[${nowClock()}] [${scopeTag}] interaction smoke ⊘ inconclusive — ${agentOutcome.detail}; not a failure`);
+          const noSurface = agentOutcome.transcript.includes("$SMOKE_INCONCLUSIVE");
+          const why = noSurface ? "no interactive surface built yet" : "agent produced no verdict (app could not be driven)";
+          ticket.logs.push(`interact ${isPhase}: inconclusive — ${why}; not a failure`);
+          console.log(`[${nowClock()}] [${scopeTag}] interaction smoke ⊘ inconclusive — ${why}; not a failure`);
         }
-        await writeState(ledger, state);
+      } else {
+        ticket.logs.push(`interact ${isPhase}: ${agentOutcome.detail}`);
+        console.log(`[${nowClock()}] [${scopeTag}] interaction smoke ⊘ inconclusive — ${agentOutcome.detail}; not a failure`);
       }
+      await writeState(ledger, state);
     }
 
     // Working-diff review (gated by code_review.mode, issue #73). `full` and
@@ -1951,14 +1968,22 @@ function toBuilderTicket(parsed: Ticket): BuilderTicket {
  * claims plus which tickets exist yet. Without this the fresh judge reads the
  * design intent (the finished app) and fails a correct scaffold group for a
  * canvas a later group owns — the retry then over-implements the next ticket's
- * work. */
+ * work.
+ *
+ * With no group (a corrective, a follow-up, or an ungrouped plan) the artifact
+ * is the whole built frontier, never just the current ticket: the spriteforge
+ * favicon corrective was scoped to itself, so the agent reported "no
+ * interactive surface built yet" about an app that already had a working
+ * canvas. */
 function interactionSmokeScopeFor(parsed: Ticket, allParsed: Ticket[], state: RunState): InteractionSmokeScope {
   const committed = new Set(state.tickets.filter((t) => t.status === "committed").map((t) => t.file));
   const group = parsed.group ?? null;
+  const scopeTickets = group !== null
+    ? allParsed.filter((t) => t.group === group)
+    : allParsed.filter((t) => t.file === parsed.file || committed.has(t.file));
   return {
     group,
-    groupTickets: allParsed
-      .filter((t) => (group !== null ? t.group === group : t.file === parsed.file))
+    groupTickets: scopeTickets
       .map((t) => ({ number: t.number, title: t.title, what: t.what, criteria: t.criteria })),
     frontier: allParsed.map((t) => ({
       number: t.number,

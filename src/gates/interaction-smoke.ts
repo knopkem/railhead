@@ -33,9 +33,11 @@ export interface InteractionFrontierEntry {
  * canvas, which ticket 02 owned, and the retry then over-implemented it into
  * ticket 01. */
 export interface InteractionSmokeScope {
-  /** The group this boundary closes; null for an ungrouped plan. */
+  /** The group this boundary closes; null for an ungrouped plan, a corrective,
+   * or a follow-up. */
   group: string | null;
-  /** The closed group's tickets — the artifact under test. */
+  /** The artifact under test: the closed group's tickets, or — when there is
+   * no group — every built ticket (the whole app on disk so far). */
   groupTickets: { number: string; title: string; what: string; criteria: string[] }[];
   /** Every run ticket, in execution order, with its build state. */
   frontier: InteractionFrontierEntry[];
@@ -46,7 +48,11 @@ function renderScope(scope: InteractionSmokeScope): string {
   const frontier = scope.frontier
     .map((t) => `- ${t.built ? "[built]" : "[pending]"} ${t.number} ${t.title}${t.group ? ` (group ${t.group})` : ""}`)
     .join("\n");
-  const artifact = scope.group ? `group "${scope.group}"` : `ticket ${scope.groupTickets[0]?.number ?? "?"}`;
+  const artifact = scope.group
+    ? `group "${scope.group}"`
+    : scope.groupTickets.length > 1
+      ? `the built app so far (${scope.groupTickets.length} tickets on disk)`
+      : `ticket ${scope.groupTickets[0]?.number ?? "?"}`;
   const claims = scope.groupTickets
     .map((t) => {
       const criteria = t.criteria.map((c) => `  - ${c}`).join("\n");

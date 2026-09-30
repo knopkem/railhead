@@ -45,6 +45,28 @@ export function touchesVisualSurface(ticket: { criteria: string[] }): boolean {
 }
 
 /**
+ * Interaction-claim vocabulary — the narrow sibling of {@link
+ * VISUAL_CRITERIA_RE}, used to decide whether a CORRECTIVE ticket's subject is
+ * worth the interaction smoke. The smoke spawns a browser-driving agent (and
+ * can wedge one — the spriteforge ticket-17 degraded-target kill), so a
+ * corrective is judged on whether its finding CLAIMS an operability problem
+ * (a control, input, or action that does not work), not on the broad surface
+ * vocabulary: a favicon/asset fix is a render concern, and the recall-biased
+ * surface words ("pixel", "screen", "font", "layout") would put it back on the
+ * smoke path. Deliberately not used for group boundaries — those keep the
+ * existing surface gate (ADR 0044), where a false positive is one boundary
+ * check rather than one check per corrective.
+ */
+export const INTERACTION_CLAIM_RE =
+  /\b(?:click\w*|press\w*|tap\w*|key\w*|button\w*|input\w*|drag\w*|drop\w*|pointer\w*|cursor\w*|scroll\w*|menu\w*|toolbar\w*|shortcut\w*|toggle\w*|select\w*|hover\w*|focus\w*|submit\w*|undo\w*|redo\w*|zoom\w*|interact\w*|operat\w*|draw\w*|paint\w*|eras\w*|mov\w*|respond\w*|control\w*|tool\w*|handle\w*)\b/i;
+
+/** Whether arbitrary text (a corrective ticket's title + what) claims a user
+ *  operation — a control, input, or action that could be driven. */
+export function mentionsInteractionClaim(text: string): boolean {
+  return INTERACTION_CLAIM_RE.test(text);
+}
+
+/**
  * Whether the rendered-surface self-check (capture → read → judge) applies to
  * an invocation. Two independent conditions:
  *  - the project's declared interface has a rendered surface at all. An

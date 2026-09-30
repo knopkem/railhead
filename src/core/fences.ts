@@ -99,7 +99,7 @@ export function indexOfOutsideFences(text: string, re: RegExp): number {
 }
 
 /** Index of the first `needle` occurrence at or after `fromIndex` that sits
- *  outside every fenced region, or -1. Literal, case-sensitive. */
+ * outside every fenced region, or -1. Literal, case-sensitive. */
 export function indexOfLiteralOutsideFences(text: string, needle: string, fromIndex = 0): number {
   const ranges = fenceRanges(text);
   let idx = text.indexOf(needle, fromIndex);
@@ -108,6 +108,22 @@ export function indexOfLiteralOutsideFences(text: string, needle: string, fromIn
     idx = text.indexOf(needle, idx + needle.length);
   }
   return -1;
+}
+
+/** Index of the first occurrence of `marker` (a regex source fragment, no
+ *  delimiters) that is BOTH outside every fenced region (#108) AND the first
+ *  non-space token on its line — the own-line contract every protocol marker
+ *  is emitted under. A mid-sentence mention is narration, not a signal: the
+ *  spriteforge spine run's prose "then emit a $GOAL_PASS/$GOAL_FAIL verdict"
+ *  was read as the verdict, and the plan/`$REPLAN`/`$PROBE`/`$CORRECTIVE`
+ *  family carries the same latent bug (verdict parsing was anchored in
+ *  reviewer.ts's `indexOfMarker`; this primitive is the shared home for the
+ *  rest). The returned index points at the marker itself (leading whitespace
+ *  excluded), so callers can slice from `index + marker.length`. A `\b` is
+ *  appended so a marker that is only a prefix of a longer word stays inert;
+ *  matching is case-insensitive. */
+export function indexOfOwnLineMarkerOutsideFences(text: string, marker: string): number {
+  return indexOfOutsideFences(text, new RegExp(`(?<=^[ \\t]*)${marker}\\b`, "im"));
 }
 
 /** Index of the last `needle` occurrence that sits outside every fenced

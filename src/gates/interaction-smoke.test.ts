@@ -84,6 +84,24 @@ describe("buildInteractionSmokePrompt", () => {
     expect(p).toContain("dragging paints pixels");
   });
 
+  it("labels a no-group scope over multiple built tickets as the built app, not a lone ticket", () => {
+    const scope: InteractionSmokeScope = {
+      group: null,
+      groupTickets: [
+        { number: "01", title: "Scaffold", what: "shell", criteria: ["renders the bench"] },
+        { number: "02", title: "Canvas", what: "pencil", criteria: ["dragging paints"] },
+      ],
+      frontier: [
+        { number: "01", title: "Scaffold", group: "core", built: true },
+        { number: "02", title: "Canvas", group: "core", built: true },
+        { number: "03", title: "Palette", group: "studio", built: false },
+      ],
+    };
+    const p = promptText(buildInteractionSmokePrompt({ runCommandHint: "npm run dev", verifyCommands: [], scope }));
+    expect(p).toContain("This gate closes the built app so far (2 tickets on disk)");
+    expect(p).toContain("dragging paints");
+  });
+
   it("forbids failing a pending feature and offers the no-surface inconclusive verdict", () => {
     const p = smokePrompt({ runCommandHint: "npm run dev", verifyCommands: [] });
     expect(p).toMatch(/never try to operate it and never fail for its absence/i);

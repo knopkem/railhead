@@ -71,6 +71,32 @@ describe("parseVerdict — the one parser behind visual/goal/structural (#89)", 
     expect(parseVerdict("$VISUAL_FAILED to launch\n$END", visual)).toEqual({ verdict: "inconclusive", findings: [] });
   });
 
+  it("ignores a marker mentioned mid-sentence — only an own-line marker is a verdict (spriteforge spine)", () => {
+    // The reviewer's own narration said "emit a $GOAL_PASS/$GOAL_FAIL verdict";
+    // reading that FAIL mention as the verdict made the rest of the transcript
+    // 146 findings and generated six favicon corrective tickets. The real
+    // verdict is the own-line $GOAL_PASS at the end.
+    const text =
+      "Let me run the app and then emit a $GOAL_PASS/$GOAL_FAIL verdict with findings.\n\n" +
+      "## Next Move\n1. Emit final verdict: $GOAL_PASS or $GOAL_FAIL with [BLOCKER]/[MAJOR] findings\n\n" +
+      "$GOAL_PASS\n$END";
+    expect(parseVerdict(text, goal)).toEqual({ verdict: "pass", findings: [] });
+  });
+
+  it("a mid-sentence fail mention alone is inconclusive, not a fail", () => {
+    expect(parseVerdict("I will emit $GOAL_FAIL only if a real blocker survives.", goal)).toEqual({
+      verdict: "inconclusive",
+      findings: [],
+    });
+  });
+
+  it("accepts an indented own-line marker", () => {
+    expect(parseVerdict("  $GOAL_PASS\n$END", goal).verdict).toBe("pass");
+    const v = parseVerdict("  $GOAL_FAIL\n[BLOCKER] a real gap\n$END", goal);
+    expect(v.verdict).toBe("fail");
+    expect(v.findings).toEqual(["[BLOCKER] a real gap"]);
+  });
+
   it("ignores a fenced $FAIL example and reads a real $PASS outside the fence (#108)", () => {
     const text = "Here is the shape I was asked for:\n```\n$VISUAL_FAIL\n[BLOCKER] example\n$END\n```\n\n$VISUAL_PASS\n$END";
     expect(parseVerdict(text, visual)).toEqual({ verdict: "pass", findings: [] });
@@ -210,6 +236,20 @@ describe("classifySeverity — tolerant severity labels (#119)", () => {
     expect(classifySeverity("blockers are fine")).toBe("minor");
     expect(classifySeverity("majority rules")).toBe("minor");
   });
+
+  it("treats a label whose body says none as no finding", () => {
+    // "[BLOCKER] none." is the canonical no-blocker statement — in the
+    // spriteforge-spine review it was the only labelled entry, and classifying
+    // it as a blocker armed the fail-loud promotion.
+    expect(classifySeverity("[BLOCKER] none.")).toBe("minor");
+    expect(classifySeverity("[MAJOR] none")).toBe("minor");
+    expect(classifySeverity("BLOCKER 1 — none.")).toBe("minor");
+    expect(classifySeverity("[BLOCKER] n/a")).toBe("minor");
+    // A label with an empty body is not an issue either.
+    expect(classifySeverity("[BLOCKER]")).toBe("minor");
+    // A real body still classifies.
+    expect(classifySeverity("[BLOCKER] x")).toBe("blocker");
+  });
 });
 
 describe("stripSeverityLabel (#119)", () => {
@@ -256,6 +296,12 @@ describe("promoteUnlabelledSeverity (#119)", () => {
   it("leaves a label-less, severity-word-less list unchanged by reference", () => {
     const findings = ["plain prose", "another note"];
     expect(promoteUnlabelledSeverity(findings)).toBe(findings);
+  });
+
+  it("does not promote a label whose body says none", () => {
+    // The none-body must not be resurrected into "[BLOCKER] [BLOCKER] none.".
+    expect(promoteUnlabelledSeverity(["[BLOCKER] none."])).toEqual(["[BLOCKER] none."]);
+    expect(promoteUnlabelledSeverity(["[MAJOR] none."])).toEqual(["[MAJOR] none."]);
   });
 });
 

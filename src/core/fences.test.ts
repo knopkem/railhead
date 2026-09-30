@@ -6,6 +6,7 @@ import {
   indexOfOutsideFences,
   indexOfLiteralOutsideFences,
   lastIndexOfLiteralOutsideFences,
+  indexOfOwnLineMarkerOutsideFences,
 } from "./fences.ts";
 
 describe("fenceRanges (#108)", () => {
@@ -105,6 +106,32 @@ describe("indexOfOutsideFences (#108)", () => {
   it("skips a fenced occurrence and lands on a later unfenced one", () => {
     const text = "```\n$VISUAL_PASS\n```\n$VISUAL_FAIL\n[BLOCKER] x\n$END";
     expect(indexOfOutsideFences(text, /\$visual_fail\b/i)).toBe(text.indexOf("$VISUAL_FAIL"));
+  });
+});
+
+describe("indexOfOwnLineMarkerOutsideFences (marker hygiene)", () => {
+  it("finds a marker on its own line and returns the marker index (indentation excluded)", () => {
+    const text = "prose about $REPLAN plans\n  $REPLAN\n$END";
+    expect(indexOfOwnLineMarkerOutsideFences(text, "\\$replan")).toBe(text.lastIndexOf("$REPLAN"));
+  });
+
+  it("ignores a marker mentioned mid-sentence (narration, not a signal)", () => {
+    const text = "I will emit a $REPLAN only if the plan is structurally wrong.\n$END";
+    expect(indexOfOwnLineMarkerOutsideFences(text, "\\$replan")).toBe(-1);
+  });
+
+  it("ignores a fenced own-line example and reads a later real one", () => {
+    const text = "format:\n```\n$REPLAN\n```\n$REPLAN\n$END";
+    expect(indexOfOwnLineMarkerOutsideFences(text, "\\$replan")).toBe(text.lastIndexOf("$REPLAN"));
+  });
+
+  it("returns -1 when every occurrence is fenced or mid-sentence", () => {
+    expect(indexOfOwnLineMarkerOutsideFences("```\n$REPLAN\n```", "\\$replan")).toBe(-1);
+    expect(indexOfOwnLineMarkerOutsideFences("a $REPLAN mention", "\\$replan")).toBe(-1);
+  });
+
+  it("keeps a marker that is only a prefix of a longer word inert", () => {
+    expect(indexOfOwnLineMarkerOutsideFences("$REPLANNING\n$END", "\\$replan")).toBe(-1);
   });
 });
 

@@ -218,13 +218,20 @@ function escapeMarker(marker: string): string {
   return marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Case-insensitive, word-bounded, fence-aware search for a verdict marker
- * (mirrors the per-kind `/\$visual_fail\b/i` the copies each hand-rolled). The
- * \b keeps a prefix like "$VISUAL_FAIL" from matching a longer marker
- * "$VISUAL_FAILED". A marker quoted inside a code fence is an example, not a
- * verdict — only unfenced occurrences count (issue #108). */
+/** Case-insensitive, word-bounded, fence-aware, LINE-ANCHORED search for a
+ * verdict marker (mirrors the per-kind `/\$visual_fail\b/i` the copies each
+ * hand-rolled). The \b keeps a prefix like "$VISUAL_FAIL" from matching a
+ * longer marker "$VISUAL_FAILED". A marker quoted inside a code fence is an
+ * example, not a verdict — only unfenced occurrences count (issue #108).
+ *
+ * The line anchor is the spriteforge-spine guard: the seats are told to emit
+ * the marker on its own line, so a marker mentioned mid-sentence ("…then emit
+ * a $GOAL_PASS/$GOAL_FAIL verdict…") is narration, not a verdict. Without the
+ * anchor that prose mention was read as the verdict, the rest of the
+ * transcript became 146 "findings", and the fail-loud promotion turned six of
+ * those lines into corrective tickets. */
 function indexOfMarker(text: string, marker: string): number {
-  return indexOfOutsideFences(text, new RegExp(`${escapeMarker(marker)}\\b`, "i"));
+  return indexOfOutsideFences(text, new RegExp(`^[ \\t]*${escapeMarker(marker)}\\b`, "im"));
 }
 
 /**
@@ -245,9 +252,12 @@ function indexOfMarker(text: string, marker: string): number {
  *
  * Only unfenced occurrences of a marker count (issue #108): the review prompts
  * themselves print the markers as the output contract, so a marker the model
- * echoes as an example inside a ``` block is never a verdict. Once an unfenced
- * fail marker is found, findings are still sliced from the RAW text (a finding
- * may legitimately quote code).
+ * echoes as an example inside a ``` block is never a verdict. Markers must also
+ * stand on their own line (the contract the prompts state) — a mid-sentence
+ * mention is narration, and reading it as a verdict is how a $GOAL_PASS
+ * transcript once became a $GOAL_FAIL with 146 narration "findings". Once an
+ * unfenced, own-line fail marker is found, findings are still sliced from the
+ * RAW text (a finding may legitimately quote code).
  *
  * Finding splitting reuses `splitFindings` so the severity/junk-tolerance
  * rules stay uniform across every review path.
@@ -407,6 +417,33 @@ export function splitFindings(text: string): string[] {
 export type Severity = "blocker" | "major" | "minor";
 
 /**
+ * The severity label at the head of a finding (after stripping bullets,
+ * numbering, and bold/italic/bracket decoration) plus its body, or null when
+ * no label is present. One extraction shared by {@link classifySeverity} and
+ * {@link stripSeverityLabel} so the two can never disagree about what the
+ * label is and where its body starts.
+ */
+function labelledSeverity(finding: string): { severity: Severity; body: string } | null {
+  const head = stripLabelDecorations(finding);
+  const m = /^(blocker|major)\b/i.exec(head);
+  if (!m) return null;
+  return {
+    severity: m[0].toLowerCase() === "blocker" ? "blocker" : "major",
+    body: head.slice(m[0].length).replace(/^[\s\d*:)\].—–_-]+/, "").trim(),
+  };
+}
+
+/** A label whose body says there is nothing to fix — `[BLOCKER] none.` — is not
+ * a finding. The canonical no-blocker statement must never classify as a
+ * blocker: in the spriteforge-spine review it was the ONLY labelled entry, and
+ * under the old classifier it armed the fail-loud promotion (every narration
+ * line naming a "prior blocker" became a corrective ticket). */
+const EMPTY_SEVERITY_BODY_RE = /^(?:none|n\/a)\b/i;
+function isNoneSeverityBody(body: string): boolean {
+  return body.length === 0 || EMPTY_SEVERITY_BODY_RE.test(body);
+}
+
+/**
  * One tolerant severity classifier shared by every review seat (issue #119).
  * Small models rephrase the `[BLOCKER]`/`[MAJOR]` bracket labels the reviewer
  * is asked for — `BLOCKER 1 —`, `MAJOR 3:`, `**Blocker:**`, `* Major *`,
@@ -415,12 +452,13 @@ export type Severity = "blocker" | "major" | "minor";
  * the label from the *start* of a finding (after stripping bullets, numbering,
  * bold/italic markers, and an opening bracket) and matches the bare word, so a
  * label in any of those shapes classifies identically to the bracketed form.
+ * A label with an empty/"none" body classifies as `minor` — there is no issue
+ * to act on.
  */
 export function classifySeverity(finding: string): Severity {
-  const head = stripLabelDecorations(finding);
-  if (/^blocker\b/i.test(head)) return "blocker";
-  if (/^major\b/i.test(head)) return "major";
-  return "minor";
+  const labelled = labelledSeverity(finding);
+  if (!labelled || isNoneSeverityBody(labelled.body)) return "minor";
+  return labelled.severity;
 }
 
 /** Strip the leading bullets/numbering/bold/italic/bracket decoration a small
@@ -457,10 +495,8 @@ const LEADING_LABEL_DECORATIONS: RegExp[] = [
  * build corrective-ticket bodies. A finding with no recognized label is
  * returned trimmed and unchanged. */
 export function stripSeverityLabel(finding: string): string {
-  const head = stripLabelDecorations(finding);
-  const m = /^(blocker|major)\b/i.exec(head);
-  if (!m) return finding.trim();
-  return head.slice(m[0].length).replace(/^[\s\d*:)\].—–_-]+/, "").trim();
+  const labelled = labelledSeverity(finding);
+  return labelled ? labelled.body : finding.trim();
 }
 
 /** Whether a finding's text names a severity word (blocker/major) anywhere —
@@ -475,12 +511,14 @@ export function mentionsSeverityWord(finding: string): boolean {
  * recognized [BLOCKER]/[MAJOR] label yet still name a severity word
  * (blocker/major), re-label every such finding `[BLOCKER]` so the seat can
  * never convert a "BLOCKER"-laden verdict into a clean soft-pass. Findings
- * that already carry a recognized blocker are left untouched (the label won). */
+ * that already carry a recognized blocker are left untouched (the label won),
+ * and a labelled finding with an empty/"none" body is never promoted — that is
+ * the no-blocker statement, not a claim. */
 export function promoteUnlabelledSeverity(findings: string[]): string[] {
   if (findings.some((f) => classifySeverity(f) === "blocker")) return findings;
   let changed = false;
   const out = findings.map((f) => {
-    if (classifySeverity(f) === "minor" && mentionsSeverityWord(f)) {
+    if (labelledSeverity(f) === null && mentionsSeverityWord(f)) {
       changed = true;
       return `[BLOCKER] ${f.trim()}`;
     }

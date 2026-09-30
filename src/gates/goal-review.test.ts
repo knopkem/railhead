@@ -53,6 +53,10 @@ $END`;
   it("ignores a $PROBE example quoted inside a code fence", () => {
     expect(parseProbeBlock("```\n$PROBE\n{\"behavior\":\"b\",\"command\":\"c\"}\n$END\n```")).toBeNull();
   });
+
+  it("ignores a mid-sentence $PROBE mention — narration is not a block", () => {
+    expect(parseProbeBlock('I will emit a $PROBE object {"behavior":"b","command":"c"} after $END')).toBeNull();
+  });
 });
 
 describe("goal prompt — registered probes (v2 issue 01)", () => {
@@ -130,6 +134,19 @@ describe("parseGoalVerdict", () => {
     expect(v.findings.length).toBe(1);
   });
 
+  it("does not read a mid-sentence marker mention as the verdict (spriteforge spine)", () => {
+    // The reviewer's narration mentions both markers ("emit a
+    // $GOAL_PASS/$GOAL_FAIL verdict") before its real own-line verdict. The
+    // mention must stay inert: before the line anchor it parsed as FAIL, the
+    // rest of the transcript became 146 findings, and six favicon corrective
+    // tickets were generated from narration lines naming a "prior blocker".
+    const text =
+      "Let me run the app and then emit a $GOAL_PASS/$GOAL_FAIL verdict with findings.\n\n" +
+      "## Next Move\n1. Emit final verdict: $GOAL_PASS or $GOAL_FAIL with [BLOCKER]/[MAJOR] findings\n\n" +
+      "$GOAL_PASS\n$END";
+    expect(parseGoalVerdict(text)).toEqual({ verdict: "pass", findings: [] });
+  });
+
   it("tolerates case-insensitive markers", () => {
     expect(parseGoalVerdict("$goal_pass\n$end")).toEqual({ verdict: "pass", findings: [] });
     const v = parseGoalVerdict("$goal_fail\n[BLOCKER] gap\n$end");
@@ -172,6 +189,10 @@ describe("parseReplanRequested (#65)", () => {
     const text = "$GOAL_FAIL\n[BLOCKER] gap\n$END\n$REPLAN\n$END";
     expect(parseReplanRequested(text)).toBe(true);
   });
+
+  it("does not replan on a mid-sentence mention (narration, not a signal)", () => {
+    expect(parseReplanRequested("I will emit a $REPLAN if the plan structure is wrong.\n$END")).toBe(false);
+  });
 });
 
 describe("parseCorrectiveTickets (#67)", () => {
@@ -196,6 +217,11 @@ $END`;
   it("returns null when no $CORRECTIVE block is present (mechanical fallback)", () => {
     expect(parseCorrectiveTickets("$GOAL_FAIL\n[BLOCKER] gap\n$END")).toBeNull();
     expect(parseCorrectiveTickets("")).toBeNull();
+  });
+
+  it("ignores a mid-sentence $CORRECTIVE mention — a prose suggestion is not a block", () => {
+    expect(parseCorrectiveTickets('I could emit a $CORRECTIVE like {"title":"not real"} later.\n$END')).toBeNull();
+    expect(parseCorrectiveTickets("prose mentions $CORRECTIVE and then\n$GOAL_FAIL\n[BLOCKER] gap\n$END")).toBeNull();
   });
 
   it("returns null when the block parses to no tickets", () => {

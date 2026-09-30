@@ -9,7 +9,7 @@ import { visionCapabilityBlock, type VisionCapabilityFact } from "../execute/vis
 import { buildPlaythroughSection } from "../context/playthrough.ts";
 import { renderPreamble, type PhaseMessages } from "../context/preamble.ts";
 import { scanJsonObjects } from "../core/json.ts";
-import { indexOfOutsideFences } from "../core/fences.ts";
+import { indexOfOutsideFences, indexOfOwnLineMarkerOutsideFences } from "../core/fences.ts";
 import { PRODUCT_DOC } from "../core/product.ts";
 import { isBlocker } from "./reviewer.ts";
 import type { ProbeRecipe, ProbeStatus } from "../core/probes.ts";
@@ -47,9 +47,11 @@ export function parseGoalVerdict(text: string): GoalVerdict {
  * regex classifier over finding prose. Word-boundary search (like the verdict
  * parsers) — the marker is distinctive enough that a mid-sentence mention is
  * vanishingly rare and a false positive just replans (safe). Fence-aware
- * (#108): a $REPLAN quoted inside a code fence is an example, not a signal. */
+ * (#108): a $REPLAN quoted inside a code fence is an example, not a signal.
+ * Own-line (like every protocol marker): a mid-sentence mention is narration,
+ * and a false replan re-plans the whole frontier. */
 export function parseReplanRequested(text: string): boolean {
-  return indexOfOutsideFences(text, /\$replan\b/i) >= 0;
+  return indexOfOwnLineMarkerOutsideFences(text, "\\$replan") >= 0;
 }
 
 /**
@@ -64,13 +66,14 @@ export function parseReplanRequested(text: string): boolean {
  * nothing) so the caller falls back to the mechanical per-finding split. A
  * `$REPLAN` marker supersedes this block — the caller checks replan first.
  *
- * Fence-aware (#108): the `$CORRECTIVE` gate is on its UNFENCED occurrence (a
- * quoted example inside a code fence is ignored), but the JSON is sliced from
- * the RAW text so a legitimate fence-wrapped JSON object still parses
+ * Fence-aware and own-line (#108): the `$CORRECTIVE` gate is on its UNFENCED,
+ * line-leading occurrence (a quoted example inside a code fence, or a marker
+ * mentioned mid-sentence in narration, is ignored), but the JSON is sliced
+ * from the RAW text so a legitimate fence-wrapped JSON object still parses
  * (`scanJsonObjects` already tolerates fence lines).
  */
 export function parseCorrectiveTickets(text: string): PlanTicket[] | null {
-  const start = indexOfOutsideFences(text, /\$corrective\b/i);
+  const start = indexOfOwnLineMarkerOutsideFences(text, "\\$corrective");
   if (start < 0) return null;
   let slice = text.slice(start + "$CORRECTIVE".length);
   const end = slice.search(/\$end\b/i);
@@ -96,11 +99,11 @@ export function parseCorrectiveTickets(text: string): PlanTicket[] | null {
  * object per materialized behavior probe `{behavior, command, expect}`. The
  * railhead registers these once per group; later rounds run them
  * deterministically before judging, so the same blocker is never re-derived by
- * hand. Fence-aware gate on the UNFENCED marker; JSON sliced from the raw text
- * (mirrors `parseCorrectiveTickets`).
+ * hand. Fence-aware and own-line gate on the marker; JSON sliced from the raw
+ * text (mirrors `parseCorrectiveTickets`).
  */
 export function parseProbeBlock(text: string): ProbeRecipe[] | null {
-  const start = indexOfOutsideFences(text, /\$probe\b/i);
+  const start = indexOfOwnLineMarkerOutsideFences(text, "\\$probe");
   if (start < 0) return null;
   let slice = text.slice(start + "$PROBE".length);
   const end = slice.search(/\$end\b/i);
