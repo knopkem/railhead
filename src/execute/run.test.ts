@@ -3707,6 +3707,50 @@ describe("goal review cadence (issue #73)", () => {
     expect(ticket02.logs.join("\n")).toContain("downgraded to inconclusive");
   });
 
+  it("--none (every gate off) skips the interaction smoke even for browser-ui — no overhead means no judges", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig({
+      projectInterface: "browser-ui",
+      // interaction_smoke intentionally unset: the derived default would turn it
+      // on for browser-ui, but all four gates off is the --none shape.
+      code_review: { mode: "off" },
+      visual_review: { mode: "off" },
+      goal_review: { mode: "off" },
+      structural_review: { mode: "off" },
+    });
+    const group: Ticket[] = [
+      { file: "01-a.md", number: "01", slug: "a", title: "A", what: "a", criteria: ["renders a"], group: "core" },
+      { file: "02-b.md", number: "02", slug: "b", title: "B", what: "b", criteria: ["renders b"], group: "core" },
+    ];
+    await writeTickets(ticketsDir, group);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = group.map((t) => toTicketState(t));
+
+    const interactPhases: string[] = [];
+    mockExec.mockImplementation(async (_prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeImplementedFile(cwd);
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else if (kind === "interact") {
+        interactPhases.push(options.phaseFile);
+        await emitText(ledgerDir, options.phaseFile, "$SMOKE_PASS\n$END");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const final = await runLoop(state, ledgerDir);
+
+    expect(final.status).toBe("finished");
+    expect(interactPhases).toEqual([]);
+    expect(final.tickets.every((t) => t.status === "committed")).toBe(true);
+  });
+
   it("interaction smoke skips a corrective whose finding is not an interaction claim (spriteforge favicon shape)", async () => {
     // The corrective is ungrouped by construction; the old `!ticket.group`
     // boundary test launched a browser agent for it. Relevance now reads the

@@ -159,6 +159,7 @@ Notes:
 - **Severities:** `[BLOCKER]` always retries (up to the cap, then hard-fail). `[MAJOR]` retries through the budget in `medium`/`full`; in `light` it gets one corrective attempt, then soft-passes. Minor findings never retry.
 - **Mid-run vs run-end:** goal and structural fire at group checkpoints as well as at run end; visual fires per-ticket (under `full`) and at run end. When goal review fires at run end it takes visual's whole-app seat — the goal + design-doc frame is stronger.
 - **Corrective tickets:** `[BLOCKER]` findings generate corrective tickets that run the full gate inline before the originating review may pass.
+- **`--none` means no judges at all.** With every review gate off, the interaction smoke (otherwise derived ON for a `browser-ui`/`canvas` interface and fired at committed group boundaries) is off too — it feeds findings back to the builder, so it is a judge. An explicit `"interaction_smoke": true` still wins, so a hand-written `railhead.json` can keep the smoke without turning a review gate on.
 - **Visual review** runs the app, captures screenshots with a vision model, and judges them against the acceptance criteria. `fix` asks the same cadence questions as `build` — a bug fix is not auto-escalated to per-ticket visual.
 - **Vision is measured, not declared.** A probe has the seat model read a generated PNG; `build`/`run`/`fix`/`resume` refuse to start a vision gate on a blind model.
 - **Halt:** any phase can write `.railhead/STOP` (contents = reason) to stop the run for a human. `resume` refuses until the file is deleted.

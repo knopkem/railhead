@@ -422,14 +422,32 @@ describe("loadConfig", () => {
   });
 
   it("interactionSmokeEnabled derives the default from the declared interface (v2 issue 01)", async () => {
-    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({ interface: "browser-ui" }))))).toBe(true);
-    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({ interface: "canvas" }))))).toBe(true);
-    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({ interface: "terminal" }))))).toBe(false);
-    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({ interface: "native" }))))).toBe(false);
+    const ui = { interface: "browser-ui", visual_review: { mode: "light" } };
+    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify(ui))))).toBe(true);
+    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({ interface: "canvas", visual_review: { mode: "light" } }))))).toBe(true);
+    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({ interface: "terminal", visual_review: { mode: "light" } }))))).toBe(false);
+    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({ interface: "native", visual_review: { mode: "light" } }))))).toBe(false);
     expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({}))))).toBe(false);
     // A human's explicit value always wins — even off for a browser-ui project.
     expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({ interface: "browser-ui", interaction_smoke: false }))))).toBe(false);
     expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({ interface: "terminal", interaction_smoke: true }))))).toBe(true);
+  });
+
+  it("interactionSmokeEnabled is off under --none even for a driveable interface, but explicit true still wins", async () => {
+    // --none persists all four gates off; the smoke is a corrective judge too,
+    // so the no-overhead preset must not leave one running.
+    const none = {
+      interface: "browser-ui",
+      code_review: { mode: "off" },
+      visual_review: { mode: "off" },
+      goal_review: { mode: "off" },
+      structural_review: { mode: "off" },
+    };
+    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify(none))))).toBe(false);
+    // A hand-written config can still ask for it without turning a gate on.
+    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({ ...none, interaction_smoke: true }))))).toBe(true);
+    // One gate back on restores the interface-derived default.
+    expect(interactionSmokeEnabled(await loadConfig(await makeCwd(JSON.stringify({ ...none, code_review: { mode: "light" } }))))).toBe(true);
   });
 });
 

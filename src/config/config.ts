@@ -374,8 +374,9 @@ export interface RailheadConfig {
    * without input+render evidence in the ledger downgrades to inconclusive.
    * No vision required: the agent asserts through DOM/a11y text, state reads,
    * or a pixel sample. Unset = derived by `interactionSmokeEnabled` (ON for a
-   * declared `browser-ui`/`canvas` interface); an explicit boolean always
-   * wins. Skipped silently when no model resolves or the declared interface is
+   * declared `browser-ui`/`canvas` interface, OFF when every review gate is
+   * off — the `--none` preset); an explicit boolean always wins. Skipped
+   * silently when no model resolves or the declared interface is
    * `none`.
    */
   interaction_smoke?: boolean;
@@ -679,17 +680,36 @@ export const severityTriggersRetry = (
  * build (see `src/execute/review-schedule.ts`). */
 export const codeReviewRunsMidRun = (mode: GateMode): boolean => mode !== "off";
 
+/** Whether every review gate is off — the `--none` preset's shape, whether it
+ * came from the preset or from four explicit `off` overrides. The gate modes
+ * are the persisted resolution of the preset, so a resume sees the same answer
+ * without re-reading the command line. */
+export function reviewGatesAllOff(
+  config: Pick<RailheadConfig, "code_review" | "visual_review" | "goal_review" | "structural_review">,
+): boolean {
+  return (config.code_review?.mode ?? "off") === "off"
+    && (config.visual_review?.mode ?? "off") === "off"
+    && (config.goal_review?.mode ?? "off") === "off"
+    && (config.structural_review?.mode ?? "off") === "off";
+}
+
 /** v2 issue 01: whether the interaction smoke is on. An explicit
  * `interaction_smoke` value (true OR false) always wins; when unset it
  * defaults ON for a project whose declared interface is a browser page the
  * seat can drive (`browser-ui` / `canvas` — not `native`: the smoke drives a
- * browser, and a native window has none). The default is derived, not seeded
- * by the planner, so it holds for hand-written `railhead.json` files and for
- * projects planned before the interface was declared. */
+ * browser, and a native window has none), UNLESS every review gate is off.
+ * `--none` means a run with no corrective judges at all — the smoke is one
+ * (a FAIL feeds the builder before the boundary ticket commits), so it does not
+ * ride through the one preset whose point is no overhead. The default is
+ * derived, not seeded by the planner, so it holds for hand-written
+ * `railhead.json` files and for projects planned before the interface was
+ * declared; such a file that wants the smoke without any review gate sets
+ * `interaction_smoke: true`. */
 export function interactionSmokeEnabled(
-  config: Pick<RailheadConfig, "interaction_smoke" | "projectInterface">,
+  config: Pick<RailheadConfig, "interaction_smoke" | "projectInterface" | "code_review" | "visual_review" | "goal_review" | "structural_review">,
 ): boolean {
   if (typeof config.interaction_smoke === "boolean") return config.interaction_smoke;
+  if (reviewGatesAllOff(config)) return false;
   return config.projectInterface === "browser-ui" || config.projectInterface === "canvas";
 }
 
