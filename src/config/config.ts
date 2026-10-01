@@ -641,10 +641,12 @@ export interface CodeReviewConfig {
   /**
    * Whether the per-ticket reviewer inherits the project's ordinary toolset
    * (the same observe seat visual/goal/structural use) or runs on the isolated
-   * reviewer agent that denies every tool. `true` (the default) is the bypass:
-   * the reviewer may read, search, and run read-only commands to verify the
-   * diff instead of judging the prompt alone. `false` restores the sandboxed
-   * diff-only seat. Absent = the default (`true`).
+   * reviewer agent that denies every tool. `false` (the default) is the
+   * sandboxed diff-only seat: the reviewer judges the precomputed diff and
+   * contract slice in its prompt and does not reach for the repo. `true` is the
+   * bypass — the reviewer may read, search, and run read-only commands to
+   * verify the diff instead of judging the prompt alone. Absent = the default
+   * (`false`).
    */
   inherit_tools?: boolean;
   /** `always` (default) or `smart` (see `CodeReviewTrigger`). Persisted, so
@@ -841,7 +843,7 @@ export const DEFAULT_CONFIG: RailheadConfig = {
   feature_mode: false,
   art_direction: true,
   model: { plan: DEFAULT_MODEL, implement: DEFAULT_MODEL, review: DEFAULT_MODEL, visual: null, extract: null, goal: null },
-  code_review: { mode: "off", inherit_tools: true, trigger: "always" },
+  code_review: { mode: "off", inherit_tools: false, trigger: "always" },
   visual_review: { mode: "off", max_rounds: null, round_wall_sec: null, interaction_hints: null },
   goal_review: { mode: "off", fallback_cadence: 4, max_rounds: null, max_replans: DEFAULT_MAX_REPLANS, interaction_hints: null },
   structural_review: { mode: "off" },

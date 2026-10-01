@@ -41,6 +41,17 @@ describe("buildReviewerPrompt", () => {
     expect(p).not.toMatch(/repo-wide check you cannot run/);
   });
 
+  it("tells the reviewer the ticket is already quoted, so it never globs for the ticket file", async () => {
+    const p = await reviewerText({
+      ticketFile: "tickets/02-shell-store-canvas-surface.md",
+      ticketBody: "work",
+      criteria: ["c1"],
+      diff: "d",
+    });
+    expect(p).toContain("TICKET FILE: tickets/02-shell-store-canvas-surface.md");
+    expect(p).toMatch(/do NOT glob, find, or otherwise search the repository for this file or for any other ticket/);
+  });
+
   it("treats ACs that name a third-party artifact as unverified plan claims: judge capability, never double-down on the name", async () => {
     const p = await reviewerText({
       ticketFile: "01-a.md",

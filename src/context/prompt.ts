@@ -211,7 +211,7 @@ An acceptance criterion that names a concrete third-party package/artifact (or a
   const roleBlock = `${reviewerFrame}
 The purpose of review is to confirm the acceptance criteria are COMPLETELY met and the change basically works — not to police code style or polish. Ignore minor quality nits; only surface issues that genuinely matter.
 
-TICKET FILE: ${ticketFile}
+TICKET FILE: ${ticketFile} — this review's ticket, already quoted in full below. The TICKET and ACCEPTANCE CRITERIA blocks are the complete, authoritative copy: do NOT glob, find, or otherwise search the repository for this file or for any other ticket document.
 
 TICKET:
 ${ticketBody}
@@ -449,7 +449,7 @@ export async function buildReviewerReadModePrompt(options: {
   const roleBlock = `${reviewerFrame}
 The purpose of review is to confirm the acceptance criteria are COMPLETELY met and the change basically works — not to police code style or polish. Ignore minor quality nits; only surface issues that genuinely matter.
 
-TICKET FILE: ${ticketFile}
+TICKET FILE: ${ticketFile} — this review's ticket, already quoted in full below. The TICKET and ACCEPTANCE CRITERIA blocks are the complete, authoritative copy: do NOT glob, find, or otherwise search the repository for this file or for any other ticket document.
 
 TICKET:
 ${ticketBody}

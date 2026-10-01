@@ -69,7 +69,7 @@ import {
   summarizeContracts,
 } from "../core/contracts.ts";
 import { updateContracts } from "./contract-extract.ts";
-import { stripNonSource, estimateTokens, REVIEW_MODE_THRESHOLD_RATIO, DIFF_FILE_THRESHOLD_RATIO } from "./diff-filter.ts";
+import { stripNonSource, estimateTokens, REVIEW_MODE_THRESHOLD_RATIO, DIFF_FILE_THRESHOLD_RATIO, REVIEW_DIFF_CONTEXT_LINES } from "./diff-filter.ts";
 import * as git from "../core/git.ts";
 import {
   mineFailureLearning,
@@ -1503,7 +1503,7 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
         console.log(`[${nowClock()}]   ${ticket.number} review ⊘ not run (smart — ${schedule.reason})`);
       }
     } else {
-      const rawDiff = await git.workingDiff(state.cwd);
+      const rawDiff = await git.workingDiff(state.cwd, REVIEW_DIFF_CONTEXT_LINES);
       const diff = stripNonSource(rawDiff);
       const rvPhase = `${ticket.number}-${String(attempt).padStart(2, "0")}-review`;
       const reviewStart = Date.now();
@@ -1577,7 +1577,7 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
           fixMode: !!state.config.fix_mode,
           maxContextTokens: seatContextBudget(state, "review"),
           readMode: useReadMode,
-          inheritTools: state.config.code_review?.inherit_tools ?? true,
+          inheritTools: state.config.code_review?.inherit_tools ?? false,
           stat: reviewStat,
           files: useReadMode ? sourceFiles : undefined,
           diffFile: diffFilePath,

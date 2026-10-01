@@ -54,11 +54,11 @@ export interface ReviewArgs {
    * file-list prompt instead of the raw diff (#30). */
   readMode?: boolean;
   /** The per-ticket review's tool posture (`code_review.inherit_tools`, default
-   * true in railhead.json): when true the review runs on the ordinary
-   * tool-bearing observe seat and the prompt grants read/search/run to verify
-   * the diff — the isolated tool-denied reviewer seats are bypassed; false
-   * uses them. Absent = false, keeping direct callers on the sandboxed
-   * default that the config layer opts out of. */
+   * false): when true the review runs on the ordinary tool-bearing observe seat
+   * and the prompt grants read/search/run to verify the diff — the isolated
+   * tool-denied reviewer seats are bypassed; false uses them. Absent = false,
+   * which is both the config default and the sandboxed default for direct
+   * callers. */
   inheritTools?: boolean;
   /** When readMode is true, the diff stat to show instead of the raw diff. */
   stat?: string;

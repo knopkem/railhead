@@ -91,6 +91,25 @@ describe("workingDiff", () => {
     expect(diff).toContain('"snake"');
   });
 
+  it("carries the requested context width around a hunk (the tool-denied reviewer's only evidence)", async () => {
+    const cwd = await freshRepo();
+    const above = Array.from({ length: 30 }, (_, i) => `line ${String(i).padStart(2, "0")}`);
+    const below = Array.from({ length: 30 }, (_, i) => `line ${String(i + 30).padStart(2, "0")}`);
+    await writeFile(join(cwd, "f.txt"), [...above, "old", ...below].join("\n") + "\n");
+    await commit(cwd, "baseline");
+    await writeFile(join(cwd, "f.txt"), [...above, "new", ...below].join("\n") + "\n");
+
+    const narrow = await workingDiff(cwd);
+    const wide = await workingDiff(cwd, 10);
+    // `-U3` (the default) stops at `line 27`; `-U10` reaches `line 20`. The
+    // reviewer's seat denies every tool, so only the wide form lets it see the
+    // code the changed line sits inside without reading the file back.
+    expect(narrow).toContain("line 27");
+    expect(narrow).not.toContain("line 20\n");
+    expect(wide).toContain("line 20");
+    expect(wide.split("\n").length).toBeGreaterThan(narrow.split("\n").length);
+  });
+
   it("leaves the worktree and index intact after reading the diff", async () => {
     const cwd = await freshRepo();
     await writeFile(join(cwd, "kept.txt"), "kept\n");

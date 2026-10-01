@@ -426,8 +426,15 @@ export function filesChanged(cwd: string, from: string, to: string): Promise<str
  * makes `git diff HEAD` surface them as "new file" entries without staging
  * their content; the cleanup `git reset` drops those markers and leaves both
  * the worktree and any real index entries untouched.
+ *
+ * `contextLines` sets the unified-diff context width (git's own default is 3).
+ * The Reviewer's seat denies every tool, so a `-U3` diff forces it to read whole
+ * files back to see the code a hunk sits inside; review passes
+ * `REVIEW_DIFF_CONTEXT_LINES` (diff-filter.ts) for a self-sufficient prompt. The
+ * stash/recovery callers keep the default — a wider context is still apply-able,
+ * but they want the patch, not the prose.
  */
-export async function workingDiff(cwd: string): Promise<string> {
+export async function workingDiff(cwd: string, contextLines = 3): Promise<string> {
   await git(cwd, ["add", "-A", "-N"]);
   try {
     // Deliberately NOT the trimmed `git()` helper: the trailing newline is
@@ -435,7 +442,10 @@ export async function workingDiff(cwd: string): Promise<string> {
     // `git apply`-able (the SpriteForge-14 recovery hit a corrupt-patch error
     // purely because .trim() had stripped the final newline), so the raw
     // stdout is returned verbatim.
-    const { stdout } = await exec(GIT, ["diff", "HEAD"], { cwd, maxBuffer: MAX_BUFFER });
+    const { stdout } = await exec(GIT, ["diff", "HEAD", `-U${contextLines}`], {
+      cwd,
+      maxBuffer: MAX_BUFFER,
+    });
     return stdout;
   } finally {
     await git(cwd, ["reset", "-q"]);

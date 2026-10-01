@@ -325,14 +325,14 @@ describe("loadConfig", () => {
     expect(bogus.code_review?.trigger).toBe("always");
   });
 
-  it("defaults code_review.inherit_tools to true (the reviewer runs on the ordinary tool-bearing seat like every other gate)", async () => {
+  it("defaults code_review.inherit_tools to false (the reviewer runs on the isolated tool-denied seat)", async () => {
     const cfg = await loadConfig(await makeCwd(null));
-    expect(cfg.code_review?.inherit_tools).toBe(true);
+    expect(cfg.code_review?.inherit_tools).toBe(false);
   });
 
-  it("preserves code_review.inherit_tools: false (restores the isolated tool-denied reviewer)", async () => {
-    const cfg = await loadConfig(await makeCwd(JSON.stringify({ code_review: { mode: "full", inherit_tools: false } })));
-    expect(cfg.code_review?.inherit_tools).toBe(false);
+  it("preserves code_review.inherit_tools: true (opts the reviewer onto the ordinary tool-bearing seat)", async () => {
+    const cfg = await loadConfig(await makeCwd(JSON.stringify({ code_review: { mode: "full", inherit_tools: true } })));
+    expect(cfg.code_review?.inherit_tools).toBe(true);
   });
 
   it("reads code_review.mode / visual_review.mode / goal_review.mode / structural_review.mode (#73)", async () => {

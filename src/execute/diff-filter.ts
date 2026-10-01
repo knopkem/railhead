@@ -104,6 +104,20 @@ export function filesWithEntries(entries: ContractEntry[], allFiles: string[]): 
 
 export const REVIEW_MODE_THRESHOLD_RATIO = 0.4;
 
+/** Unified-diff context width for the per-ticket review diff.
+ *
+ * The reviewer seat denies every tool, so the diff in its prompt is the only
+ * evidence it has. git's default `-U3` shows the changed lines but not the
+ * function or block they live in, so a reviewer checking "is this handler
+ * complete?" has to reason about code it cannot see — measured on the SpriteForge
+ * run, that produced 204 `read` calls across 10 reviews (one file read 19
+ * times), re-reading whole files just to reconstruct the enclosing scope. At 60
+ * lines the hunk carries its own context: hunks within 120 lines merge, so small
+ * files arrive whole, while a large file stays a compact diff instead of its full
+ * text. Measured cost on that run: 6-13k tokens per review against a ~100k seat
+ * budget, far below REVIEW_MODE_THRESHOLD_RATIO. */
+export const REVIEW_DIFF_CONTEXT_LINES = 60;
+
 /** Issue #46: below this ratio of max_context_tokens, the diff is inlined in
  * the reviewer prompt; at or above, it is written to a ledger file and the
  * reviewer reads it on demand. Deliberately lower than

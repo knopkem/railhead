@@ -737,10 +737,52 @@ describe("processTicket", () => {
     expect(reviewPrompts[0]).not.toContain("package-lock.json");
   });
 
-  it("review: runs on the ordinary observe seat by default and on the isolated reviewer when code_review.inherit_tools is false", async () => {
+  it("review: hands the tool-denied reviewer a diff carrying the changed line's surrounding context", async () => {
+    const cwd = await freshRepo();
+    const ticketsDir = ticketsDirOf(cwd);
+    const ledgerDir = join(cwd, ".railhead", "run-test");
+    await initLedger(ledgerDir);
+    const config = baseConfig();
+    const { state: ticketState } = await makeTicket(ticketsDir);
+    const state = await makeState(cwd, ticketsDir, config);
+    state.tickets = [ticketState];
+
+    const above = Array.from({ length: 30 }, (_, i) => `const pre${i} = ${i};`);
+    const below = Array.from({ length: 30 }, (_, i) => `const post${i} = ${i};`);
+    await mkdir(join(cwd, "src"), { recursive: true });
+    await writeFile(join(cwd, "src", "index.js"), [...above, "const target = 1;", ...below].join("\n") + "\n", "utf8");
+    await git.commit(cwd, "baseline");
+
+    const reviewPrompts: string[] = [];
+    mockExec.mockImplementation(async (prompt, options) => {
+      const kind = kindOf(options);
+      if (kind === "implement") {
+        await writeFile(join(cwd, "src", "index.js"), [...above, "const target = 2;", ...below].join("\n") + "\n", "utf8");
+        await emitText(ledgerDir, options.phaseFile, "DONE");
+      } else if (kind === "review") {
+        reviewPrompts.push(prompt);
+        await emitText(ledgerDir, options.phaseFile, "$BLOCKING\nNONE\n$NITS\nNONE\n$OK\nlooks good");
+      } else {
+        await emitText(ledgerDir, options.phaseFile, "$CONTRACTS\n$END");
+      }
+      return okResult();
+    });
+
+    const outcome = await processTicket(state, ledgerDir, ticketState);
+
+    expect(outcome).toBe("ok");
+    expect(reviewPrompts).toHaveLength(1);
+    // REVIEW_DIFF_CONTEXT_LINES (60) reaches back to pre0; the old -U3 diff
+    // stopped at pre27, forcing the reviewer to read the file back to judge it.
+    expect(reviewPrompts[0]).toContain("const pre0 = 0;");
+    expect(reviewPrompts[0]).toContain("-const target = 1;");
+    expect(reviewPrompts[0]).toContain("+const target = 2;");
+  });
+
+  it("review: runs on the isolated reviewer by default and on the ordinary observe seat when code_review.inherit_tools is true", async () => {
     const cases: Array<{ label: string; config: RailheadConfig; agent: string }> = [
-      { label: "default (bypass enabled)", config: baseConfig(), agent: "railhead-observe" },
-      { label: "inherit_tools false", config: baseConfig({ code_review: { mode: "full", inherit_tools: false } }), agent: "railhead-review" },
+      { label: "default (sandboxed)", config: baseConfig(), agent: "railhead-review" },
+      { label: "inherit_tools true", config: baseConfig({ code_review: { mode: "full", inherit_tools: true } }), agent: "railhead-observe" },
     ];
     for (const c of cases) {
       const cwd = await freshRepo();
