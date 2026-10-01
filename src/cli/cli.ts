@@ -542,6 +542,13 @@ async function cmdInit(cwd: string, yes: boolean = false, free: boolean = false)
     return;
   }
 
+  // The vision probe below writes `.railhead/vision-probe/` (the PNG and its
+  // ledger). Without the ignore in place the read-only guard fingerprints the
+  // worktree around the probe and reports the probe's own writes as a violation
+  // ("write-denied but changed the worktree") on a fresh repo. `build`/`run`
+  // install it at start; init is the one path that probes first.
+  await ensureProjectGitignore(cwd);
+
   const defaultModel = await getDefaultModel();
   const defaultLabel = defaultModel
     ? `opencode default (${defaultModel})`

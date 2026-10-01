@@ -39,14 +39,16 @@ let probeBehavior: Behavior = "see";
 let probeQueue: Behavior[] = [];
 let probeCalls = 0;
 let probeAgents: (string | null | undefined)[] = [];
+let probeStalls: (number | null | undefined)[] = [];
 
 vi.mock("./executor.ts", async (importOriginal) => {
   const mod = await importOriginal<typeof import("./executor.ts")>();
   return {
     ...mod,
-    executeOpendCode: async (_prompt: string, options: { cwd: string; ledgerDir: string; phaseFile: string; agent?: string | null }) => {
+    executeOpendCode: async (_prompt: string, options: { cwd: string; ledgerDir: string; phaseFile: string; agent?: string | null; stallTimeoutSec?: number | null }) => {
       probeCalls++;
       probeAgents.push(options.agent);
+      probeStalls.push(options.stallTimeoutSec);
       const behavior = probeQueue.shift() ?? probeBehavior;
       const imagePath = join(options.cwd, ".railhead", "vision-probe", "probe.png");
       const png = await readFile(imagePath);
@@ -125,6 +127,7 @@ beforeEach(() => {
   probeQueue = [];
   probeCalls = 0;
   probeAgents = [];
+  probeStalls = [];
 });
 
 describe("randomProbeSpec", () => {
@@ -452,6 +455,12 @@ describe("ensureVisionForGates", () => {
     expect(records[0]!.reads_images).toBe(true);
     // Browser capture + read only; the probe can never edit the project.
     expect(probeAgents).toEqual(["railhead-probe"]);
+  });
+
+  it("gives the probe a 300s stall guard by default (the old 120s killed a thinking model under load)", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "vision-probe-"));
+    await ensureVisionForGates({ cwd, requests: [{ gate: "visual", model: "test/model" }] });
+    expect(probeStalls).toEqual([300]);
   });
 
   it("records a probe that never received an image as inconclusive, not as a blind model", async () => {

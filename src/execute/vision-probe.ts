@@ -210,6 +210,15 @@ export interface VisionProbeOptions {
   attempts?: number | null;
 }
 
+/** Stall guard for a probe step. A local 27B with thinking enabled can spend a
+ * minute reasoning before its first tool call even on an idle server; under any
+ * concurrent load that exceeds the old 120s, the guard SIGKILLs opencode, which
+ * does not cancel the generation already queued on the server — so the retry
+ * queues behind the orphan and stalls too, burning minutes of init on a false
+ * failure. A probe is a one-shot, user-attended diagnostic: a longer silence is
+ * strictly better than a kill, and a genuinely wedged server still ends. */
+const PROBE_STALL_SEC = 300;
+
 /** Rank for {@link pickBestProbeOutcome}: a pass outranks a delivered-but-
  * misread attempt, which outranks an attempt where no image ever arrived.
  * Ties keep the later attempt (freshest evidence). Pure. */
@@ -250,7 +259,7 @@ async function runProbeAttempt(options: VisionProbeOptions, model: string | null
       heartbeat: true,
       livePrefix: "vision-probe",
       maxSteps: options.maxSteps ?? 12,
-      stallTimeoutSec: options.stallTimeoutSec ?? 120,
+      stallTimeoutSec: options.stallTimeoutSec ?? PROBE_STALL_SEC,
       maxContextTokens: options.maxContextTokens ?? 32000,
     }),
   );
@@ -482,7 +491,7 @@ export async function ensureVisionForGates(options: {
           model: request.model,
           maxContextTokens: options.maxContextTokens ?? null,
           maxSteps: 12,
-          stallTimeoutSec: 120,
+          stallTimeoutSec: PROBE_STALL_SEC,
         });
         byModel.set(request.model, outcome);
         records.push(await recordVisionCapability(cwd, outcome));
@@ -542,7 +551,7 @@ export async function ensureImplementerVision(options: {
     model,
     maxContextTokens: options.maxContextTokens ?? null,
     maxSteps: 12,
-    stallTimeoutSec: 120,
+    stallTimeoutSec: PROBE_STALL_SEC,
   });
   return recordVisionCapability(cwd, outcome);
 }

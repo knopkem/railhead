@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ensureInitialCommit, initGit } from "../core/git.ts";
+import { ensureProjectGitignore } from "../core/project-assets.ts";
 import { eventPath, initLedger } from "../core/ledger.ts";
 import { guardReadOnlyPhase } from "./read-only-guard.ts";
 
@@ -73,5 +74,23 @@ describe("guardReadOnlyPhase", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("write-denied"));
     const event = JSON.parse((await readFile(eventPath(ledger, "02-phase"), "utf8")).trim()) as { paths: string[] };
     expect(event.paths).toContain("src/leak.ts");
+  });
+
+  it("sees no change when the phase writes railhead's own ignored .railhead tree (the init vision probe)", async () => {
+    const cwd = await freshRepo();
+    await ensureProjectGitignore(cwd);
+    const ledger = await freshLedger(cwd);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await guardReadOnlyPhase(cwd, ledger, "03-phase", "vision probe", async () => {
+      await mkdir(join(cwd, ".railhead", "vision-probe"), { recursive: true });
+      await writeFile(join(cwd, ".railhead", "vision-probe", "probe.png"), "png\n", "utf8");
+    });
+
+    // Without the ignore in place before the probe, this warned "write-denied
+    // but changed the worktree" — the probe's own artifact framed as a
+    // violation. cmdInit must install the ignore before it probes.
+    expect(warn).not.toHaveBeenCalled();
+    await expect(readFile(eventPath(ledger, "03-phase"), "utf8")).rejects.toThrow();
   });
 });
