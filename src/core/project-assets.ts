@@ -520,6 +520,80 @@ export function frameworkExternalDirsForVerify(verify: string[]): string[] {
   return toolchainLines(verify, (row) => row.externalDirs);
 }
 
+/** The reasoning-effort ceiling a run will impose on the implement model. */
+const MAX_REASONING_EFFORT = "medium";
+
+/** opencode's reasoning-effort levels, cheapest first. Index IS the rank, so
+ * ordering the list is the whole ordering model. `minimal` is the floor some
+ * providers accept; an unrecognised level is treated as "above every known
+ * level" so an unknown value gets clamped rather than trusted. */
+const REASONING_EFFORT_LEVELS = ["none", "minimal", "low", "medium", "high", "max"] as const;
+
+function effortRank(effort: string): number {
+  const idx = REASONING_EFFORT_LEVELS.indexOf(effort as (typeof REASONING_EFFORT_LEVELS)[number]);
+  // Unknown ⇒ assume the most expensive, so a typo cannot escape the ceiling.
+  return idx === -1 ? REASONING_EFFORT_LEVELS.length : idx;
+}
+
+/** The `reasoningEffort` a model id resolves to, or undefined when the project
+ * has no opinion. Tolerates every partially-written shape the file can be in
+ * (`provider.<id>.models.<model>.options`) without assuming any level exists. */
+function readReasoningEffort(cfg: Record<string, unknown>, model: string | undefined): string | undefined {
+  if (model === undefined) return undefined;
+  const slashIdx = model.indexOf("/");
+  if (slashIdx <= 0) return undefined;
+  const providerId = model.slice(0, slashIdx);
+  const modelId = model.slice(slashIdx + 1);
+  const provider = (cfg.provider ?? {}) as Record<string, any>;
+  const value = provider[providerId]?.models?.[modelId]?.options?.reasoningEffort;
+  return typeof value === "string" ? value : undefined;
+}
+
+/** Write `effort` for a `provider/model` id, creating only the spine it needs
+ * so a project with no opinion gains no empty `provider`/`models` blocks. */
+function setReasoningEffort(cfg: Record<string, any>, model: string, effort: string): void {
+  const slashIdx = model.indexOf("/");
+  if (slashIdx <= 0) return;
+  const providerId = model.slice(0, slashIdx);
+  const modelId = model.slice(slashIdx + 1);
+  cfg.provider = cfg.provider ?? {};
+  cfg.provider[providerId] = cfg.provider[providerId] ?? {};
+  cfg.provider[providerId].models = cfg.provider[providerId].models ?? {};
+  cfg.provider[providerId].models[modelId] = cfg.provider[providerId].models[modelId] ?? {};
+  const modelCfg = cfg.provider[providerId].models[modelId];
+  modelCfg.options = modelCfg.options ?? {};
+  modelCfg.options.reasoningEffort = effort;
+}
+
+/** Whether a model id has been deliberately configured to do NO reasoning.
+ *
+ * Two spellings mean the same thing to a chat template, and both are absolute:
+ *  - `options.thinking: false` — the AI-SDK-level thinking switch.
+ *  - `options.chat_template_kwargs.enable_thinking: false` — the template's own
+ *    switch, which is what actually gates the chain on a self-hosted
+ *    mlx-community model.
+ *
+ * This matters because the two are NOT subordinate: measured on Splash /
+ * Qwen3.8-27B, a request with `thinking: false` reports 0 reasoning tokens and
+ * no `reasoning_content`, but adding `reasoning_effort` ALONE brings reasoning
+ * back (216 tokens at "medium", 208 at "low") with the `thinking: false` still
+ * sitting in the request. An effort value is therefore enough to switch
+ * reasoning ON against an explicit off, which makes "the user turned thinking
+ * off" something the clamp must honour rather than outrank.
+ */
+function reasoningDisabled(cfg: Record<string, unknown>, model: string | undefined): boolean {
+  if (model === undefined) return false;
+  const slashIdx = model.indexOf("/");
+  if (slashIdx <= 0) return false;
+  const providerId = model.slice(0, slashIdx);
+  const modelId = model.slice(slashIdx + 1);
+  const provider = (cfg.provider ?? {}) as Record<string, any>;
+  const options = provider[providerId]?.models?.[modelId]?.options;
+  if (options === undefined || options === null) return false;
+  return options.thinking === false
+    || options.chat_template_kwargs?.enable_thinking === false;
+}
+
 /**
  * Ensure a project's opencode.json pre-grants read access to the named
  * external directories. Idempotent and append-only:
@@ -532,6 +606,14 @@ export function frameworkExternalDirsForVerify(verify: string[]): string[] {
  *     `ask`) for the same path always wins; the railhead never overrides
  *     intent. opencode's external_directory rule is "last match wins", so a
  *     user can still deny a broad path after we allow it.
+ *
+ *   - Clamps the implement model's `reasoningEffort` DOWN to "medium" and only
+ *     when the project already asked for MORE than that. A project at "low"
+ *     keeps "low"; a project that never set it gets nothing written.
+ *   - Never touches a model the project configured for NO reasoning
+ *     (`thinking: false` or `enable_thinking: false`). That is absolute: an
+ *     effort value alone re-enables reasoning against it, so writing one would
+ *     undo the operator's explicit choice.
  *
  * @param cwd project root
  * @param allowDirs paths to allow (typically from `frameworkExternalDirsForVerify`)
@@ -622,28 +704,52 @@ export async function ensureProjectOpenCodePermissions(
     changed = true;
   }
 
-  // Clamp reasoning effort to "medium" for the implement model, but ONLY when
-  // the caller has confirmed the model supports reasoning (via
+  // Clamp reasoning effort to AT MOST "medium" for the implement model, but
+  // ONLY when the caller has confirmed the model supports reasoning (via
   // queryReasoningCapability). Reasoning models (e.g. Qwen3.8 27B) can think
   // for 20+ minutes on a single step with no output events, tripping the stall
-  // timer. "medium" bounds the reasoning chain while keeping the model's
-  // problem-solving ability. Never overwrite a user's existing setting.
-  if (options?.implementModel && options.implementModel !== "default" && options.clampReasoning) {
-    const slashIdx = options.implementModel.indexOf("/");
-    if (slashIdx > 0) {
-      const providerId = options.implementModel.slice(0, slashIdx);
-      const modelId = options.implementModel.slice(slashIdx + 1);
-      cfg.provider = cfg.provider ?? {};
-      cfg.provider[providerId] = cfg.provider[providerId] ?? {};
-      cfg.provider[providerId].models = cfg.provider[providerId].models ?? {};
-      cfg.provider[providerId].models[modelId] = cfg.provider[providerId].models[modelId] ?? {};
-      const modelCfg = cfg.provider[providerId].models[modelId];
-      modelCfg.options = modelCfg.options ?? {};
-      if (modelCfg.options.reasoningEffort === undefined) {
-        modelCfg.options.reasoningEffort = "medium";
-        changed = true;
-      }
-    }
+  // timer.
+  //
+  // The clamp is a CEILING, never a floor. `MAX_REASONING_EFFORT` is the
+  // highest effort the run will tolerate; a project already set lower keeps its
+  // own value. This direction matters for two reasons:
+  //
+  //   1. It was previously a floor in effect — writing "medium" into a project
+  //      that had deliberately chosen "low" in its GLOBAL config. The project
+  //      file then shadowed the global one, so the railhead silently overrode
+  //      a choice the operator had already made.
+  //   2. The original justification does not hold on an openai-compatible
+  //      provider. `reasoning_effort` is not a token budget there, it is a
+  //      stylistic prompt hint, and RAISING it makes the model reason LONGER.
+  //      Measured against Splash/Qwen3.8-27B on a hard constraint task: low
+  //      2,810 reasoning tokens / 39.6 s, medium 4,623 / 64.1 s, high 6,000+
+  //      / 130.8 s — where "high" exhausted the whole output budget without
+  //      emitting an answer. So "medium" is a cost the clamp imposed, not a
+  //      bound it provided, and a project sitting at "low" was being billed for
+  //      reasoning it did not ask for.
+  //
+  // Genuinely unbounded runs are handled where they belong: the stall timer
+  // (`stall_timeout_sec`) and per-step model ceiling (`max_step_model_sec`)
+  // kill a runaway step regardless of the effort the operator chose.
+  //
+  // A model the operator has configured to do NO reasoning is exempt from the
+  // ceiling entirely. There is no runaway chain to bound — the chain is off —
+  // so the clamp has no work to do, and writing an effort value here would
+  // RE-ENABLE reasoning against an explicit `thinking: false` (see
+  // `reasoningDisabled`). Nothing is written, so a contradictory leftover
+  // (`thinking: false` alongside `effort: "max"`) is also left exactly as the
+  // operator wrote it rather than silently edited.
+  const effort = readReasoningEffort(cfg, options?.implementModel);
+  if (
+    options?.implementModel
+    && options.implementModel !== "default"
+    && options.clampReasoning
+    && effort !== undefined
+    && !reasoningDisabled(cfg, options.implementModel)
+    && effortRank(effort) > effortRank(MAX_REASONING_EFFORT)
+  ) {
+    setReasoningEffort(cfg, options.implementModel, MAX_REASONING_EFFORT);
+    changed = true;
   }
 
   if (changed) {

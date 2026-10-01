@@ -179,6 +179,23 @@ into ONE user message, the builder grew append-only.
    planner or judge. Evidence: `npm run bench` (`scripts/bench.mts`) results
    and the #135 verdict.
 
+6. **A base session is re-touched, because creation alone does not keep it
+   resident** (amendment, issue #133 follow-up). Decision 3 assumes the base's
+   prefix is available to later forks, but nothing re-sends that prefix after
+   creation: the run only ever *forks* the base, and a fork's request carries
+   the phase's own messages, not a re-send of `[system][preamble]`. On a
+   process-local LRU prefix cache the entry therefore ages out while the run
+   sits inside builder contexts that grow to tens of thousands of tokens, and
+   the next fork pays a full cold prefill. Measured on the Splash fixture with
+   a base created at run start: a fork hours later reported 736/3,752 tokens
+   cached over 278 s; after one re-touch the following fork reported 3,808
+   cached over 3 s. The touch is the same `--session <base> --fork` shape a
+   real phase uses, ending in the base's own deterministic `READY`
+   acknowledgement, so it re-inserts a byte-identical prefix. It is fail-open,
+   independent of `persistent_worker`, and deliberately issued *between*
+   phases — a concurrent touch would clobber the executor's single
+   `activeChildPid` and misdirect `SIGINT` for the phase actually running.
+
 Telemetry (#130) records every phase's first-step cold/cached split in the
 report, with a run-level hit ratio and a warning when a review/goal/contract
 phase re-prefills a non-trivial prompt with zero reuse. Related: #13, #124,

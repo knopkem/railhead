@@ -200,6 +200,32 @@ describe("ensureProjectOpenCodePermissions", () => {
     return JSON.parse(raw);
   }
 
+  /** Seed a project that already has an opinion about a model's options. */
+  async function withModelOptions(cwd: string, model: string, options: Record<string, unknown>): Promise<void> {
+    const slash = model.indexOf("/");
+    await writeFile(
+      join(cwd, "opencode.json"),
+      JSON.stringify({
+        $schema: "https://opencode.ai/config.json",
+        provider: {
+          [model.slice(0, slash)]: { models: { [model.slice(slash + 1)]: { options } } },
+        },
+      }, null, 2),
+      "utf8",
+    );
+  }
+
+  async function withReasoningEffort(cwd: string, model: string, effort: string): Promise<void> {
+    await withModelOptions(cwd, model, { reasoningEffort: effort });
+  }
+
+  /** Read back one model's `options` block, or undefined if absent. */
+  async function readModelOptions(cwd: string, model: string): Promise<any> {
+    const slash = model.indexOf("/");
+    const cfg = await readConfig(cwd);
+    return cfg.provider?.[model.slice(0, slash)]?.models?.[model.slice(slash + 1)]?.options;
+  }
+
   it("creates opencode.json with $schema and the permission block when none exists", async () => {
     const cwd = await makeCwd();
     await ensureProjectOpenCodePermissions(cwd, ["~/.cargo/**"]);
@@ -397,11 +423,11 @@ describe("ensureProjectOpenCodePermissions", () => {
     expect(cfg.compaction).toEqual({ auto: true, reserved: 23000 });
   });
 
-  it("sets reasoningEffort to medium for the implement model", async () => {
+  it("does not invent a reasoningEffort for a project that has no opinion", async () => {
     const cwd = await makeCwd();
     await ensureProjectOpenCodePermissions(cwd, [], { implementModel: "mtplx/mtplx-qwen38-27b-optimized-speed", clampReasoning: true });
     const cfg = await readConfig(cwd);
-    expect(cfg.provider.mtplx.models["mtplx-qwen38-27b-optimized-speed"].options.reasoningEffort).toBe("medium");
+    expect(cfg.provider).toBeUndefined();
   });
 
   it("does not set reasoningEffort when implementModel is 'default'", async () => {
@@ -413,9 +439,10 @@ describe("ensureProjectOpenCodePermissions", () => {
 
   it("does not set reasoningEffort when clampReasoning is not true", async () => {
     const cwd = await makeCwd();
+    await withReasoningEffort(cwd, "mtplx/some-model", "max");
     await ensureProjectOpenCodePermissions(cwd, [], { implementModel: "mtplx/some-model" });
     const cfg = await readConfig(cwd);
-    expect(cfg.provider).toBeUndefined();
+    expect(cfg.provider.mtplx.models["some-model"].options.reasoningEffort).toBe("max");
   });
 
   it("does not set reasoningEffort when implementModel is null/undefined", async () => {
@@ -425,27 +452,143 @@ describe("ensureProjectOpenCodePermissions", () => {
     expect(cfg.provider).toBeUndefined();
   });
 
-  it("does not overwrite a user's existing reasoningEffort setting", async () => {
+  // The regression this clamp is a CEILING for: a project that deliberately
+  // chose "low" in its GLOBAL config had "medium" written into its project
+  // config, which then shadowed the global one and billed it for reasoning it
+  // never asked for. A lower setting must survive untouched.
+  it("never raises a project's own lower reasoningEffort", async () => {
+    for (const keep of ["none", "minimal", "low"] as const) {
+      const cwd = await makeCwd();
+      await withReasoningEffort(cwd, "mtplx/some-model", keep);
+      await ensureProjectOpenCodePermissions(cwd, [], { implementModel: "mtplx/some-model", clampReasoning: true });
+      const cfg = await readConfig(cwd);
+      expect(cfg.provider.mtplx.models["some-model"].options.reasoningEffort).toBe(keep);
+    }
+  });
+
+  it("clamps a higher reasoningEffort down to the ceiling", async () => {
+    for (const over of ["high", "max"] as const) {
+      const cwd = await makeCwd();
+      await withReasoningEffort(cwd, "mtplx/some-model", over);
+      await ensureProjectOpenCodePermissions(cwd, [], { implementModel: "mtplx/some-model", clampReasoning: true });
+      const cfg = await readConfig(cwd);
+      expect(cfg.provider.mtplx.models["some-model"].options.reasoningEffort).toBe("medium");
+    }
+  });
+
+  it("leaves a project already at the ceiling alone", async () => {
     const cwd = await makeCwd();
-    const user = {
-      $schema: "https://opencode.ai/config.json",
-      provider: {
-        mtxpl: {
-          models: {
-            "mtplx-qwen38-27b-optimized-speed": {
-              options: { reasoningEffort: "high" },
+    await withReasoningEffort(cwd, "mtplx/some-model", "medium");
+    await ensureProjectOpenCodePermissions(cwd, [], { implementModel: "mtplx/some-model", clampReasoning: true });
+    const cfg = await readConfig(cwd);
+    expect(cfg.provider.mtplx.models["some-model"].options.reasoningEffort).toBe("medium");
+  });
+
+  it("clamps an unrecognised reasoningEffort rather than trusting it", async () => {
+    const cwd = await makeCwd();
+    await withReasoningEffort(cwd, "mtplx/some-model", "turbo");
+    await ensureProjectOpenCodePermissions(cwd, [], { implementModel: "mtplx/some-model", clampReasoning: true });
+    const cfg = await readConfig(cwd);
+    expect(cfg.provider.mtplx.models["some-model"].options.reasoningEffort).toBe("medium");
+  });
+
+  it("preserves the model's other options when clamping", async () => {
+    const cwd = await makeCwd();
+    await writeFile(
+      join(cwd, "opencode.json"),
+      JSON.stringify({
+        provider: { mtplx: { models: { "some-model": { options: { reasoningEffort: "max", thinking: true, chat_template_kwargs: { enable_thinking: true } } } } } },
+      }, null, 2),
+      "utf8",
+    );
+    await ensureProjectOpenCodePermissions(cwd, [], { implementModel: "mtplx/some-model", clampReasoning: true });
+    const cfg = await readConfig(cwd);
+    expect(cfg.provider.mtplx.models["some-model"].options).toEqual({
+      reasoningEffort: "medium",
+      thinking: true,
+      chat_template_kwargs: { enable_thinking: true },
+    });
+  });
+
+  it("is idempotent — a second pass over a clamped project changes nothing", async () => {
+    const cwd = await makeCwd();
+    await withReasoningEffort(cwd, "mtplx/some-model", "max");
+    await ensureProjectOpenCodePermissions(cwd, [], { implementModel: "mtplx/some-model", clampReasoning: true });
+    const first = await readFile(join(cwd, "opencode.json"), "utf8");
+    await ensureProjectOpenCodePermissions(cwd, [], { implementModel: "mtplx/some-model", clampReasoning: true });
+    expect(await readFile(join(cwd, "opencode.json"), "utf8")).toBe(first);
+  });
+
+  it("does not clamp a different model's effort than the implement model", async () => {
+    const cwd = await makeCwd();
+    await withReasoningEffort(cwd, "mtplx/other-model", "max");
+    await ensureProjectOpenCodePermissions(cwd, [], { implementModel: "mtplx/some-model", clampReasoning: true });
+    const cfg = await readConfig(cwd);
+    expect(cfg.provider.mtplx.models["other-model"].options.reasoningEffort).toBe("max");
+  });
+
+  // A user who turns reasoning OFF is the case the old clamp got actively
+  // wrong: it filled in `reasoningEffort: "medium"` whenever the property was
+  // undefined, and on Splash/Qwen3.8 an effort value alone brings reasoning
+  // back (216 tokens, `reasoning_content` present) even with `thinking: false`
+  // still in the request. So the railhead switched reasoning back on for a
+  // config that read as though it were obeyed.
+  it("never enables reasoning a project explicitly turned off", async () => {
+    for (const off of [
+      { thinking: false },
+      { chat_template_kwargs: { enable_thinking: false } },
+    ]) {
+      const cwd = await makeCwd();
+      await withModelOptions(cwd, "mtplx/some-model", off);
+      await ensureProjectOpenCodePermissions(cwd, [], { implementModel: "mtplx/some-model", clampReasoning: true });
+      expect(await readModelOptions(cwd, "mtplx/some-model")).toEqual(off);
+    }
+  });
+
+  it("leaves an explicit reasoning-off config alone even when effort is contradictory", async () => {
+    // `thinking: false` + `effort: "max"` is self-contradictory, and the
+    // template's off switch is what actually wins on the wire. The clamp has no
+    // runaway chain to bound, so it edits nothing rather than "helpfully"
+    // rewriting the operator's own contradiction.
+    const cwd = await makeCwd();
+    const seeded = { thinking: false, reasoningEffort: "max" };
+    await withModelOptions(cwd, "mtplx/some-model", seeded);
+    await ensureProjectOpenCodePermissions(cwd, [], { implementModel: "mtplx/some-model", clampReasoning: true });
+    expect(await readModelOptions(cwd, "mtplx/some-model")).toEqual(seeded);
+  });
+
+  it("still clamps a high effort when reasoning is explicitly ON", async () => {
+    const cwd = await makeCwd();
+    await withModelOptions(cwd, "mtplx/some-model", { thinking: true, reasoningEffort: "max" });
+    await ensureProjectOpenCodePermissions(cwd, [], { implementModel: "mtplx/some-model", clampReasoning: true });
+    expect(await readModelOptions(cwd, "mtplx/some-model")).toEqual({ thinking: true, reasoningEffort: "medium" });
+  });
+
+  it("does not let one model's reasoning-off exempt another model", async () => {
+    const cwd = await makeCwd();
+    // Both models in one write: the helpers each create the file, so seeding
+    // two models needs a single shape.
+    await writeFile(
+      join(cwd, "opencode.json"),
+      JSON.stringify({
+        $schema: "https://opencode.ai/config.json",
+        provider: {
+          mtplx: {
+            models: {
+              "off-model": { options: { thinking: false } },
+              "some-model": { options: { reasoningEffort: "max" } },
             },
           },
         },
-      },
-    };
-    await writeFile(join(cwd, "opencode.json"), JSON.stringify(user, null, 2), "utf8");
-    await ensureProjectOpenCodePermissions(cwd, [], { implementModel: "mtplx/mtplx-qwen38-27b-optimized-speed", clampReasoning: true });
-    const cfg = await readConfig(cwd);
-    expect(cfg.provider.mtxpl.models["mtplx-qwen38-27b-optimized-speed"].options.reasoningEffort).toBe("high");
+      }, null, 2),
+      "utf8",
+    );
+    await ensureProjectOpenCodePermissions(cwd, [], { implementModel: "mtplx/some-model", clampReasoning: true });
+    expect((await readModelOptions(cwd, "mtplx/some-model")).reasoningEffort).toBe("medium");
+    expect(await readModelOptions(cwd, "mtplx/off-model")).toEqual({ thinking: false });
   });
 
-  it("sets reasoningEffort alongside compaction when both options are provided", async () => {
+  it("sets compaction even when it leaves reasoningEffort alone", async () => {
     const cwd = await makeCwd();
     await ensureProjectOpenCodePermissions(cwd, [], {
       contextTokens: 100000,
@@ -454,7 +597,7 @@ describe("ensureProjectOpenCodePermissions", () => {
     });
     const cfg = await readConfig(cwd);
     expect(cfg.compaction).toEqual({ auto: true, reserved: 10000 });
-    expect(cfg.provider.mtplx.models["some-model"].options.reasoningEffort).toBe("medium");
+    expect(cfg.provider).toBeUndefined();
   });
 });
 

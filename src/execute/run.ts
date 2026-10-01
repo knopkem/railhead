@@ -18,6 +18,7 @@ import { replanFromCheckpoint, replanFromCapacity } from "../gates/replan.ts";
 import type { BlockReport } from "../core/blocked.ts";
 import { describeExecFailure, executeOpendCode, executeFreshPhase, killActiveChild, withPersistentWorker, startPersistentWorker, stopPersistentWorker, configureContextGuard } from "./executor.ts";
 import { baseSessionId, ensureBaseSession, forkPhase } from "./base-session.ts";
+import { keepBaseWarm, markBaseWarm } from "./base-touch.ts";
 import { setProviderHealth } from "./provider-health.ts";
 import { withFailureLadder, withFailureLadderOnThrow, PhaseFailure, evidenceFromResult, SPIRAL_COMPACTION_THRESHOLD, type FailureEvidence } from "./failure-ladder.ts";
 import { setDependencySourceDeny } from "./guard.ts";
@@ -427,12 +428,31 @@ async function runLoopInner(state: RunState, ledger: string, onUpdate?: () => vo
     (state.pending_checkpoints?.goal.length ?? 0) > 0 ||
     (state.pending_checkpoints?.structural.length ?? 0) > 0;
   if (hasPendingWork && haltReason(state.cwd) === null) {
+    // A base already on the state was validated/reused, not created, so its
+    // cache residency is unknown — a resumed run can be days old. Only a
+    // genuinely fresh creation warms the prefix as a side effect.
+    const hadBase = baseSessionId(state) !== null;
     await ensureBaseSession({
       state,
       ledger,
       model: state._models?.implement ?? null,
       contextTokens: contextBudget(state),
     });
+    if (hadBase) {
+      // Force past the interval: the gates `drainOwedGates` runs next all fork
+      // this base, and a stale prefix means each of them pays a cold prefill.
+      await keepBaseWarm({
+        state,
+        ledger,
+        model: state._models?.implement ?? null,
+        contextTokens: contextBudget(state),
+        force: true,
+      });
+    } else {
+      // Creation already re-inserted the prefix; start the clock instead of
+      // spending a redundant call.
+      markBaseWarm(state);
+    }
   }
   const drainOutcome = await drainOwedGates(state, ledger, processTicket);
   if (drainOutcome === "fail" && !isFinished(state.status)) {
@@ -793,6 +813,20 @@ export async function processTicket(state: RunState, ledger: string, ticket: Tic
   const restartsAtStart = state.builder?.restarts.length ?? 0;
   ticket.review_skip_reason = undefined;
   await writeState(ledger, state);
+
+  // Re-touch the base session's KV prefix (issue #133 follow-up). Nothing sends
+  // the base's `[system][preamble]` after creation, so an hour of builder
+  // traffic evicts it and the ticket's first forked phase pays a cold prefill.
+  // Fronting the ticket re-inserts it; the 15-minute limit makes the later
+  // in-ticket phases free. Strictly BETWEEN phases on purpose: a concurrent
+  // touch would clobber the executor's single `activeChildPid` slot and
+  // misdirect SIGINT for the phase that is actually running.
+  await keepBaseWarm({
+    state,
+    ledger,
+    model: state._models?.implement ?? null,
+    contextTokens: contextBudget(state),
+  });
 
   const allParsed = await loadTickets(state.tickets_dir);
   const parsed = allParsed.find((t) => t.file === ticket.file);
